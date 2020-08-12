@@ -1,0 +1,3 @@
+*.o
+/librinex.a
+/rinex_scan

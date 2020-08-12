@@ -1,0 +1,9 @@
+{
+    "files.exclude": {
+        "*.o": true,
+        "librinex.a": true,
+        "rinex_scan": true,
+        "perf.data": true,
+        "perf.data.old": true
+    }
+}
