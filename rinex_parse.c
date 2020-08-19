@@ -440,6 +440,16 @@ static rinex_error_t rnx_read_v2_observations(
 {
     rinex_signal_t *signal;
     int ii, jj, kk, nn;
+#if defined(__SSE4_1__)
+    const __m128i v_nl = _mm_set1_epi8('\n');
+    const __m128i v_sp = _mm_set1_epi8(' ');
+    static const char v_mask[] = {
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0
+    };
+#endif
 
     /* Read observations for each satellite. */
     for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
@@ -493,11 +503,25 @@ static rinex_error_t rnx_read_v2_observations(
             memcpy(signal->id.sv, epoch + 32 + 3 * (ii % 12), 3);
 
             /* Copy the observation data. */
+#if defined(__SSE4_1__)
+            {
+                __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
+                __m128i m_nl = _mm_cmpeq_epi8(v_nl, v_obs);
+                int mask = _mm_movemask_epi8(m_nl);
+                int idx = __builtin_ctz(mask | 0x10000);
+                __m128i m_sp = _mm_loadu_si128((const __m128i *)(v_mask + 16 - idx));
+                __m128i res = _mm_blendv_epi8(v_sp, v_obs, m_sp);
+                _mm_storeu_si128((__m128i *)(p->base.buffer + nn * 16), res);
+                obs += idx;
+            }
+            (void)kk;
+#else
             for (kk = 0; kk < 16; ++kk)
             {
                 /* XXX: Check format? */
                 p->base.buffer[nn * 16 + kk] = (*obs == '\n') ? ' ' : *obs++;
             }
+#endif
 
             /* Bump our count of signals recorded. */
             nn++;
@@ -644,6 +668,16 @@ static rinex_error_t rnx_read_v3_observations(
     rinex_signal_t *signal;
     const char *sv_id;
     int ii, jj, kk, nn, prev_obs, last_obs;
+#if defined(__SSE4_1__)
+    const __m128i v_nl = _mm_set1_epi8('\n');
+    const __m128i v_sp = _mm_set1_epi8(' ');
+    static const char v_mask[] = {
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0
+    };
+#endif
 
     /* Read observations for each satellite. */
     for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
@@ -710,11 +744,25 @@ static rinex_error_t rnx_read_v3_observations(
             memcpy(signal->id.sv, sv_id, 3);
 
             /* Copy the observation data. */
+#if defined(__SSE4_1__)
+            {
+                __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
+                __m128i m_nl = _mm_cmpeq_epi8(v_nl, v_obs);
+                int mask = _mm_movemask_epi8(m_nl);
+                int idx = __builtin_ctz(mask | 0x10000);
+                __m128i m_sp = _mm_loadu_si128((const __m128i *)(v_mask + 16 - idx));
+                __m128i res = _mm_blendv_epi8(v_sp, v_obs, m_sp);
+                _mm_storeu_si128((__m128i *)(p->base.buffer + nn * 16), res);
+                obs += idx;
+            }
+            (void)kk;
+#else
             for (kk = 0; kk < 16; ++kk)
             {
                 /* XXX: Check format? */
                 p->base.buffer[nn * 16 + kk] = (*obs == '\n') ? ' ' : *obs++;
             }
+#endif
 
             /* Bump our count of signals recorded. */
             nn++;
