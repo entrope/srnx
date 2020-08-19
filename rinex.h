@@ -37,7 +37,7 @@ extern "C" {
 #endif /* defined(__cplusplus) */
 
 /** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
-#define RINEX_EXTRA 32
+#define RINEX_EXTRA 31
 
 /** rinex_stream is a utility class that abstracts filesystem operations
  * from rinex_file_load().  It provides a buffered view into a stream

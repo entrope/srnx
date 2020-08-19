@@ -35,7 +35,7 @@
 # include <x86intrin.h>
 #endif
 
-#define BLOCK_SIZE (1024 * 1024 - 32)
+#define BLOCK_SIZE (1024 * 1024 - RINEX_EXTRA)
 
 /** rnx_v23_parser is a RINEX v2.xx or v3.xx parser. */
 struct rnx_v23_parser
