@@ -107,9 +107,9 @@ static int rinex_mmap_advance(
     if (stream->map)
     {
         munmap(stream->map, stream->total);
-        stream->map = NULL;
-        stream->total = 0;
         stream->base.buffer = NULL;
+        stream->base.size = 0;
+        stream->map = NULL;
     }
 
     /* If we want to map to the end of the file, and that is within
@@ -124,7 +124,7 @@ static int rinex_mmap_advance(
      */
     eff_len = (stream->file_size + page_size - 1) & -page_size;
     base_offset = new_offset & -page_size;
-    stream->total = (new_offset - base_offset + req_size + page_size - 1) & -page_size;
+    stream->total = (new_offset - base_offset + req_size + RINEX_EXTRA + page_size - 1) & -page_size;
     if (base_offset + stream->total <= (size_t)eff_len)
     {
         /* We can do a simple mmap. */
@@ -148,7 +148,7 @@ success:
         return errno;
     }
     if (MAP_FAILED == mmap(stream->map, eff_len - base_offset, PROT_READ,
-        MAP_SHARED, stream->fd, base_offset))
+        MAP_SHARED | MAP_FIXED, stream->fd, base_offset))
     {
         return errno;
     }
