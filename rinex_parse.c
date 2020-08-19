@@ -134,7 +134,7 @@ static int find_end_of_header
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        if (pos[-61] != '\n' && pos[-61] != '\r')
+        if (pos[-61] != '\n')
         {
             ofs = (pos - in) + 1;
             continue;
@@ -142,7 +142,7 @@ static int find_end_of_header
 
         for (ii = sizeof end_of_header - 1; ii < 21; ++ii)
         {
-            if (pos[ii] == '\r' || pos[ii] == '\n')
+            if (pos[ii] == '\n')
             {
                 break;
             }
@@ -152,18 +152,7 @@ static int find_end_of_header
             }
         }
 
-        if (pos[ii] == '\r')
-        {
-            if (pos[ii+1] == '\n')
-            {
-                ii++;
-            }
-        }
-        else if (pos[ii] == '\n')
-        {
-            /* okay */
-        }
-        else
+        if (pos[ii] != '\n')
         {
             return RINEX_ERR_BAD_FORMAT;
         }
@@ -288,7 +277,7 @@ static int parse_fixed
     while (ii < width)
     {
         accum *= 10;
-        if (start[ii] == '\n' || start[ii] == '\r')
+        if (start[ii] == '\n')
         {
             /* stay at the newline */
         }
@@ -320,19 +309,8 @@ static int rnx_get_newline(
     /* Scanning for the first EOL is easy. */
     for (ii = *p_whence; ii < (int)s->size; ++ii)
     {
-        if (s->buffer[ii] == '\n' || s->buffer[ii] == '\r')
+        if (s->buffer[ii] == '\n')
         {
-            if (s->buffer[ii] == '\r')
-            {
-                if (ii + 1 >= (int)s->size)
-                {
-                    break;
-                }
-                if (s->buffer[ii+1] == '\n')
-                {
-                    ii++;
-                }
-            }
             return ii + 1;
         }
     }
@@ -358,8 +336,6 @@ static int rnx_get_newline(
 
 /** rnx_get_newlines tries to copy multiple lines from \a p->stream
  * to \a p->buffer.
- *
- * This converts all newline sequences to '\n' in the process.
  *
  * \param[in,out] p Parser needing data to be copied.
  * \param[in,out] p_buffer_alloc Pointer to allocated size of p->buffer.
@@ -400,7 +376,6 @@ static int rnx_get_newlines(
         /* Was it a newline? */
         if (p->stream->buffer[ii] == '\n')
         {
-        do_newline:
             ++jj;
             if (jj == n_header)
             {
@@ -410,22 +385,6 @@ static int rnx_get_newlines(
             {
                 return ii + 1;
             }
-        }
-        else if (p->stream->buffer[ii] == '\r')
-        {
-            /* Need to be able to check for CR LF sequence. */
-            if (ii + 1 >= (int)p->stream->size)
-            {
-                break;
-            }
-            if (p->stream->buffer[ii+1] == '\n')
-            {
-                ii++;
-            }
-
-            /* Replace CR (LF?) with LF. */
-            p->buffer[kk-1] = '\n';
-            goto do_newline;
         }
     }
 
@@ -1091,18 +1050,7 @@ static rinex_error_t rnx_copy_header
     for (ii = jj = last_eol = 0; ii < in_len; ++ii)
     {
         /* Convert CRLF to '\n'. */
-        if (in[ii] == '\r')
-        {
-            out[jj] = '\n';
-            if (in[ii+1] == '\n')
-            {
-                ++ii;
-            }
-        }
-        else /* Just copy the input character to the output. */
-        {
-            out[jj] = in[ii];
-        }
+        out[jj] = in[ii];
 
         /* Are we at an EOL? */
         if (out[jj] == '\n')
