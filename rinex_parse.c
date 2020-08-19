@@ -146,11 +146,7 @@ static int find_end_of_header
 
         for (ii = sizeof end_of_header - 1; ii < 21; ++ii)
         {
-            if (pos[ii] == '\n')
-            {
-                break;
-            }
-            if (ii != ' ')
+            if (pos[ii] != ' ')
             {
                 break;
             }
