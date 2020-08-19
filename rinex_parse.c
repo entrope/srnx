@@ -31,6 +31,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __x86_64__
+# include <x86intrin.h>
+#endif
+
 #define BLOCK_SIZE (1024 * 1024 - 32)
 
 /** rnx_v23_parser is a RINEX v2.xx or v3.xx parser. */
@@ -355,9 +359,41 @@ static int rnx_get_newlines(
 {
     const char * restrict buffer = p->stream->buffer;
     int ii, jj, res, n_total;
+#if defined(__AVX2__)
+    const __m256i v_nl = _mm256_broadcastb_epi8(_mm_set1_epi8('\n'));
+#endif
 
+    ii = *p_whence;
+    jj = 0;
     n_total = n_header + n_body;
-    for (ii = *p_whence, jj = 0; ii < (int)p->stream->size; ++ii)
+
+#if defined(__AVX2__)
+    for (; ii + 64 < (int)p->stream->size; ii += 64)
+    {
+        __m256i v_p   = _mm256_loadu_si256((__m256i const *)(buffer + ii));
+        __m256i v_p_2 = _mm256_loadu_si256((__m256i const *)(buffer + ii + 32));
+        __m256i m_nl   = _mm256_cmpeq_epi8(v_nl, v_p);
+        __m256i m_nl_2 = _mm256_cmpeq_epi8(v_nl, v_p_2);
+        uint64_t kk = (uint32_t)_mm256_movemask_epi8(m_nl)
+            | ((uint64_t)_mm256_movemask_epi8(m_nl_2) << 32);
+        while (kk)
+        {
+            int r = __builtin_ctzll(kk);
+            kk &= (kk - 1);
+            ++jj;
+            if (jj == n_header)
+            {
+                *p_body_ofs = ii + r + 1;
+            }
+            if (jj == n_total)
+            {
+                return ii + r + 1;
+            }
+        }
+    }
+#endif
+
+    for (; ii < (int)p->stream->size; ++ii)
     {
         /* Was it a newline? */
         if (buffer[ii] == '\n')
