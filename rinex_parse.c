@@ -462,17 +462,9 @@ static rinex_error_t rnx_read_v2_observations(
             {
                 goto eol;
             }
-            if (!memcmp(obs, blank, 14))
+            if (!memcmp(obs, blank, 16))
             {
-                obs += 14;
-                if (*obs != '\n')
-                {
-                    obs++;
-                }
-                if (*obs != '\n')
-                {
-                    obs++;
-                }
+                obs += 16;
                 goto eol;
             }
 
