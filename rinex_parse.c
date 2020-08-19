@@ -334,47 +334,33 @@ static int rnx_get_newline(
     return rnx_get_newline(s, p_whence);
 }
 
-/** rnx_get_newlines tries to copy multiple lines from \a p->stream
- * to \a p->buffer.
+/** rnx_get_newlines tries to ensure multiple lines are in \a p->stream.
  *
  * \param[in,out] p Parser needing data to be copied.
- * \param[in,out] p_buffer_alloc Pointer to allocated size of p->buffer.
  * \param[in] p_whence Offset at which to start counting.
  * \param[out] p_body_ofs Receives offset of body data within
- *   p->buffer.
+ *   \a p->stream->buffer.
  * \param[in] n_header Number of "header" lines to fetch.
  * \param[in] n_body Number of "body" lines to fetch.
- * \returns Number of bytes read from p->stream, or 0 for EOF, or
- *   (negative) rinex_error_t value on failure.
+ * \returns Number of bytes in p->stream needed to get \a n_header +
+ *   \a n_body newlines, or 0 for EOF, or rinex_error_t value on failure.
  */
 static int rnx_get_newlines(
     struct rinex_parser *p,
-    int *p_buffer_alloc,
     int *p_whence,
     int *p_body_ofs,
     int n_header,
     int n_body
 )
 {
-    int ii, jj, kk, res, n_total;
+    const char * restrict buffer = p->stream->buffer;
+    int ii, jj, res, n_total;
 
     n_total = n_header + n_body;
-    for (ii = *p_whence, jj = 0, kk = 0; ii < (int)p->stream->size; ++ii)
+    for (ii = *p_whence, jj = 0; ii < (int)p->stream->size; ++ii)
     {
-        /* Append next character to p->buffer. */
-        if (kk >= *p_buffer_alloc)
-        {
-            *p_buffer_alloc *= 2;
-            p->buffer = realloc(p->buffer, *p_buffer_alloc);
-            if (!p->buffer)
-            {
-                return RINEX_ERR_SYSTEM;
-            }
-        }
-        p->buffer[kk++] = p->stream->buffer[ii];
-
         /* Was it a newline? */
-        if (p->stream->buffer[ii] == '\n')
+        if (buffer[ii] == '\n')
         {
             ++jj;
             if (jj == n_header)
@@ -404,7 +390,7 @@ static int rnx_get_newlines(
     }
     *p_whence = 0;
 
-    return rnx_get_newlines(p, p_buffer_alloc, p_whence, p_body_ofs, n_header, n_body);
+    return rnx_get_newlines(p, p_whence, p_body_ofs, n_header, n_body);
 }
 
 static const char blank[] = "                ";
@@ -566,8 +552,9 @@ static int rnx_read_v2(struct rinex_parser *p_)
     case '0': case '1': case '6':
         /* Get enough data. */
         mm = (p->obs_len + 4) / 5; /* How many lines per satellite? */
-        res = rnx_get_newlines(p_, &p->buffer_alloc, &p->parse_ofs,
-            &body_ofs, (n_sats + 11) / 12, n_sats * mm);
+        body_ofs = 0;
+        res = rnx_get_newlines(p_, &p->parse_ofs, &body_ofs,
+            (n_sats + 11) / 12, n_sats * mm);
         if (res < 0)
         {
             return res;
@@ -585,8 +572,7 @@ static int rnx_read_v2(struct rinex_parser *p_)
     case '2': case '3': case '4': case '5':
         /* Get the data. */
         p->parse_ofs = res;
-        res = rnx_get_newlines(p_, &p->buffer_alloc, &p->parse_ofs,
-            NULL, 0, n_sats);
+        res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
         if (res < 0)
         {
             err = res;
@@ -597,6 +583,9 @@ static int rnx_read_v2(struct rinex_parser *p_)
         }
         else
         {
+            p->base.buffer_len = res - p->parse_ofs;
+            memcpy(p->base.buffer, p->base.stream->buffer + p->parse_ofs,
+                p->base.buffer_len);
             p->parse_ofs = res;
             err = 1;
         }
@@ -763,8 +752,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
     }
 
     /* Get enough data. */
-    res = rnx_get_newlines(p_, &p->buffer_alloc, &p->parse_ofs,
-        NULL, 0, n_sats);
+    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
     if (res < 0)
     {
         return res;
@@ -773,6 +761,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
     {
         return RINEX_ERR_BAD_FORMAT;
     }
+    line_len = res - p->parse_ofs;
     line = p->base.stream->buffer + p->parse_ofs;
     p->parse_ofs = res;
 
@@ -784,6 +773,8 @@ static int rnx_read_v3(struct rinex_parser *p_)
 
     case '2': case '3': case '4': case '5':
         /* We already did most of the work. */
+        memcpy(p->base.buffer, line, line_len);
+        p->base.buffer_len = line_len;
         p->base.signal_len = 0;
         return 1;
     }
