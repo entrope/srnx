@@ -500,6 +500,16 @@ static rinex_error_t rnx_read_v2_observations(
                 obs += idx;
             }
             (void)kk;
+#elif 0
+            for (kk = 0; (kk < 16) && (*obs != '\n'); ++kk)
+            {
+                /* XXX: Check format? */
+                p->base.buffer[nn * 16 + kk] = *obs++;
+            }
+            for (; kk < 16; ++kk)
+            {
+                p->base.buffer[nn * 16 + kk] = ' ';
+            }
 #else
             for (kk = 0; kk < 16; ++kk)
             {

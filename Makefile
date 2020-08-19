@@ -1,6 +1,7 @@
 all: librinex.a rinex_scan
 
-CFLAGS = -Wall -Wextra -Werror -O3 -g -march=native
+# CC = clang
+CFLAGS = -Wall -Wextra -Werror -O3 -g -march=native # -ftree-vectorize
 
 .PHONY: clean
 clean:
