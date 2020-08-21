@@ -491,11 +491,11 @@ static rinex_error_t rnx_read_v2_observations(
                 __m128i m_nl = _mm_cmpeq_epi8(v_nl, v_obs);
                 int mask = _mm_movemask_epi8(m_nl);
                 int idx = __builtin_ctz(mask | 0x10000);
-                __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bsrli_si128(m_nl, 1));
-                __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bsrli_si128(m_nl_1, 2));
-                __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bsrli_si128(m_nl_2, 4));
-                __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bsrli_si128(m_nl_3, 8));
-                __m128i res = _mm_blendv_epi8(v_sp, v_obs, m_sp);
+                __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
+                __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
+                __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
+                __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
+                __m128i res = _mm_blendv_epi8(v_obs, v_sp, m_sp);
                 _mm_storeu_si128((__m128i *)(p->base.buffer + nn * 16), res);
                 obs += idx;
             }
@@ -739,10 +739,10 @@ static rinex_error_t rnx_read_v3_observations(
                 __m128i m_nl = _mm_cmpeq_epi8(v_nl, v_obs);
                 int mask = _mm_movemask_epi8(m_nl);
                 int idx = __builtin_ctz(mask | 0x10000);
-                __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bsrli_si128(m_nl, 1));
-                __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bsrli_si128(m_nl_1, 2));
-                __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bsrli_si128(m_nl_2, 4));
-                __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bsrli_si128(m_nl_3, 8));
+                __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
+                __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
+                __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
+                __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
                 __m128i res = _mm_blendv_epi8(v_sp, v_obs, m_sp);
                 _mm_storeu_si128((__m128i *)(p->base.buffer + nn * 16), res);
                 obs += idx;
