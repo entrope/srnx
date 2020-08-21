@@ -1252,10 +1252,50 @@ int64_t rinex_parse_obs(const char c[])
 {
     int64_t value;
 
+#if defined(__SSSE3__)
+    // See Wojciech Muła, http://0x80.pl/notesen/2014-10-15-parsing-decimal-numbers-part-2-sse.html.
+    // c[0..15] looks like "mlkjihgfed.cba__", which requires tweaks.
+    // v_atoi maps ' ' and '-' to 0, and maps ASCII digits to values.
+    const __m128i v_atoi = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+        0, 0, 0, 0, 0, 0);
+    const __m128i mul_1_10 = _mm_setr_epi8(10, 1, 10, 1, 10, 1, 10, 1,
+        10, 1, 0, 1, 10, 1, 0, 0);
+    const __m128i mul_1_100 = _mm_setr_epi16(100, 1, 100, 1,
+        10, 1, 1, 0);
+    const __m128i weight_3 = _mm_setr_epi16(10000, 1, 100, 1, 10000, 1, 100, 1);
+    const __m128i weight_4 = _mm_setr_epi32(100000, 1, 100000, 1);
+    const __m128i v_minus = _mm_setr_epi8('-', '-', '-', '-', '-', '-',
+        '-', '-', '-', '-', 0, 0, 0, 0, 0, 0);
+
+    const __m128i v_obs = _mm_loadu_si128((const __m128i *)c);
+    const __m128i t0 = _mm_shuffle_epi8(v_atoi, v_obs);
+    // t0 = | m | l | k | j | i | h | g | f | e | d | 0 | c | b | a | x | x |
+    const __m128i t1 = _mm_maddubs_epi16(t0, mul_1_10);
+    // t1 = | ml | kj | ih | gf | ed | 0c | ba | 0 |
+    const __m128i t2 = _mm_madd_epi16(t1, mul_1_100);
+    // t2 = | mlkj | ihgf | edc | ba |
+    // As Muła suggests, this could convert two observations together.
+    const __m128i t3 = _mm_packus_epi32(t2, t2);
+    // t3 = | mlkj | ihgf | edc | ba | mlkj | ihgf | edc | ba |
+    const __m128i t4 = _mm_madd_epi16(t3, weight_3);
+    // t4 = | mlkjihgf | edcba | mlkjihgf | edcba |
+    const __m128i t5 = _mm_mul_epu32(t4, weight_4);
+    // t5 = | mlkjihgf00000 | mlkjihgf00000 |
+    const __m128i t6 = _mm_srli_epi64(t4, 32);
+    // t6 = | edcba | edcba |
+    const __m128i t7 = _mm_add_epi64(t5, t6);
+    value = _mm_extract_epi64(t7, 0);
+
+    if (_mm_movemask_epi8(_mm_cmpeq_epi8(v_obs, v_minus)))
+    {
+        value = -value;
+    }
+#else
     if (parse_fixed(&value, c, 14, 3))
     {
         value = INT64_MIN;
     }
+#endif
 
     return value;
 }
