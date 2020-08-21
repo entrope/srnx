@@ -115,7 +115,7 @@ struct rinex_epoch
     /** Decimal-coded minute of day.
      * Contains the sum of hour * 100 + minute.
      */
-    unsigned short hh_mm;
+    short hh_mm;
 
     /** Epoch flag (normally '0' through '6'). */
     char flag;
