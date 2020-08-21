@@ -1,3 +1,6 @@
 *.o
+/hash_test
 /librinex.a
+/rinex_analyze
 /rinex_scan
+/rinex_test

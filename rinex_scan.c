@@ -1,4 +1,4 @@
-/** rinex_scan.c - RINEX scanning utility.
+/** rinex_scan.c - RINEX observation file scanning utility.
  * Copyright 2020 Michael Poole.
  *
  * Permission is hereby granted, free of charge, to any person

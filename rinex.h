@@ -241,6 +241,17 @@ struct rinex_stream *rinex_stdio_stream(const char *filename);
 struct rinex_stream *rinex_stdin_stream(void);
 
 #if defined(__cplusplus)
+
+inline bool operator<(rinex_signal a, rinex_signal b)
+{
+    return a.u64 < b.u64;
+}
+
+inline bool operator==(rinex_signal a, rinex_signal b)
+{
+    return a.u64 == b.u64;
+}
+
 }
 #endif /* defined(__cplusplus) */
 

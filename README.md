@@ -26,7 +26,7 @@ RINEX 3.04 defines 258 distinct observation codes, out of about 576
 potential names (potentially 936 considering the whole alphabet).
 
 Defined: See the RINEX 3.xx specification.
-Pattern: {C,L,D,S}{1,2,3,4,5,6,7,8,9}{A,B,C,D,E,I,L,M,N,P,Q,S,W,Y,X,Z}
+Pattern: {C,L,D,S}{1,2,3,4,5,6,7,8,9}{A,B,C,D,E,I,L,M,N,P,Q,S,W,X,Y,Z}
 
 == Short signal names
 
