@@ -88,6 +88,9 @@ struct signal_run
     std::unique_ptr<signal_run> next;
 };
 
+int64_t min_s128[5], max_s128[5];
+uint64_t rlsb[5][64];
+
 static int l_ubase128(uint64_t val)
 {
     if (!(val >> 7)) return 1;
@@ -108,6 +111,21 @@ static int l_sbase128(int64_t val)
     return l_ubase128((val << 1) ^ (val >> 63));
 }
 
+static int l_sbase128_d(int64_t val, int level)
+{
+    if (min_s128[level] > val)
+    {
+        min_s128[level] = val;
+    }
+    if (max_s128[level] < val)
+    {
+        max_s128[level] = val;
+    }
+    ++rlsb[level][__builtin_clrsbl(val)];
+
+    return l_sbase128(val);
+}
+
 [[gnu::noinline]]
 void analyze_obs(const std::vector<int64_t> &obs, int &l0,
     int &l1, int &l2, int &l3, int &l4, int &l5)
@@ -122,7 +140,7 @@ void analyze_obs(const std::vector<int64_t> &obs, int &l0,
     p[0] = d[0], d[0] = obs[1];
     d[1] = d[0] - p[0];
     l0 += l_sbase128(d[0]);
-    tmp = l_sbase128(d[1]);
+    tmp = l_sbase128_d(d[1], 0);
     l1 += tmp; l2 += tmp; l3 += tmp; l4 += tmp; l5 += tmp;
 
     if (obs.size() < 3) return;
@@ -130,8 +148,8 @@ void analyze_obs(const std::vector<int64_t> &obs, int &l0,
     p[1] = d[1], d[1] = d[0] - p[0];
     d[2] = d[1] - p[1];
     l0 += l_sbase128(d[0]);
-    l1 += l_sbase128(d[1]);
-    tmp = l_sbase128(d[1]);
+    l1 += l_sbase128_d(d[1], 0);
+    tmp = l_sbase128_d(d[2], 1);
     l2 += tmp; l3 += tmp; l4 += tmp; l5 += tmp;
 
     if (obs.size() < 4) return;
@@ -140,9 +158,9 @@ void analyze_obs(const std::vector<int64_t> &obs, int &l0,
     p[2] = d[2], d[2] = d[1] - p[1];
     d[3] = d[2] - p[2];
     l0 += l_sbase128(d[0]);
-    l1 += l_sbase128(d[1]);
-    l2 += l_sbase128(d[2]);
-    tmp = l_sbase128(d[3]);
+    l1 += l_sbase128_d(d[1], 0);
+    l2 += l_sbase128_d(d[2], 1);
+    tmp = l_sbase128_d(d[3], 2);
     l3 += tmp; l4 += tmp; l5 += tmp;
 
     if (obs.size() < 5) return;
@@ -152,10 +170,10 @@ void analyze_obs(const std::vector<int64_t> &obs, int &l0,
     p[3] = d[3], d[3] = d[2] - p[2];
     d[4] = d[3] - p[3];
     l0 += l_sbase128(d[0]);
-    l1 += l_sbase128(d[1]);
-    l2 += l_sbase128(d[2]);
-    l3 += l_sbase128(d[3]);
-    tmp = l_sbase128(d[4]);
+    l1 += l_sbase128_d(d[1], 0);
+    l2 += l_sbase128_d(d[2], 1);
+    l3 += l_sbase128_d(d[3], 2);
+    tmp = l_sbase128_d(d[4], 3);
     l4 += tmp; l5 += tmp;
 
     for (size_t ii = 5; ii < obs.size(); ++ii)
@@ -168,11 +186,11 @@ void analyze_obs(const std::vector<int64_t> &obs, int &l0,
         d[5] = d[4] - p[4];
 
         l0 += l_sbase128(d[0]);
-        l1 += l_sbase128(d[1]);
-        l2 += l_sbase128(d[2]);
-        l3 += l_sbase128(d[3]);
-        l4 += l_sbase128(d[4]);
-        l5 += l_sbase128(d[5]);
+        l1 += l_sbase128_d(d[1], 0);
+        l2 += l_sbase128_d(d[2], 1);
+        l3 += l_sbase128_d(d[3], 2);
+        l4 += l_sbase128_d(d[4], 3);
+        l5 += l_sbase128_d(d[5], 4);
     }
 }
 
@@ -210,11 +228,13 @@ void process_file(struct rinex_parser *p, const char filename[])
     // Read the data into memory.
     while ((res = p->read(p)) > 0)
     {
-        if (p->epoch.flag != '0')
+        if (p->epoch.flag > '1' && p->epoch.flag < '6')
         {
-            printf("Warning: epoch flag %d for %d %d %d\n",
-                p->epoch.flag, p->epoch.yyyy_mm_dd, p->epoch.hh_mm,
-                p->epoch.sec_e7);
+            // Special events would be stored as a epoch index and the
+            // raw buffer (which includes the EVENT FLAG record).
+            grand_total += l_ubase128(epochs.size())
+                + l_ubase128(p->buffer_len)
+                + p->buffer_len;
             continue;
         }
 
@@ -261,10 +281,11 @@ void process_file(struct rinex_parser *p, const char filename[])
             l_lli = analyze_rle(ptr->lli);
             l_ssi = analyze_rle(ptr->ssi);
             tot_ssi += l_ssi;
-            // Need accessory counts: run length and (if run size has
-            // more than one element) delta level.
-            total = l_ubase128(ptr->obs.size())
-                + (ptr->obs.size() > 1 ? 1 : 0) + l_lli + l_ssi
+            // Need accessory values: start epoch, run length and (if
+            // run length > 1) delta level.
+            total = l_ubase128(ptr->base_epoch)
+                + l_ubase128(ptr->obs.size()) + l_lli + l_ssi
+                + (ptr->obs.size() > 1 ? 1 : 0)
                 + std::min(std::min(std::min(l0, l1), std::min(l2, l3)),
                     std::min(l4, l5));
             if (verbose)
@@ -283,4 +304,20 @@ void process_file(struct rinex_parser *p, const char filename[])
 
     printf("%s: %ld runs of %zu signals in %zu epochs: %ld bytes (%ld SSI)\n",
         filename, n_runs, sigs.size(), epochs.size(), grand_total, tot_ssi);
+}
+
+void finish()
+{
+    printf("zrange = [");
+    for (int ii = 0; ii < 5; ++ii)
+    {
+        printf(" %ld %ld;", min_s128[ii], max_s128[ii]);
+    }
+    printf(" ];\nlrsb = [");
+    for (int ii = 0; ii < 64; ++ii)
+    {
+        printf(" %d %lu %lu %lu %lu %lu;\n", ii, rlsb[0][ii],
+            rlsb[1][ii], rlsb[2][ii], rlsb[3][ii], rlsb[4][ii]);
+    }
+    printf("]\n");
 }
