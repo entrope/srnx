@@ -22,18 +22,13 @@
  * SOFTWARE.
  */
 
-#include "rinex.h"
-#include <cerrno>
+#include "driver.h"
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <map>
 #include <memory>
 #include <unordered_map>
 #include <vector>
 #include <x86intrin.h>
-
-static bool verbose;
 
 /* Discussion of the hash function:
  * rinex_signal_t has sv[4] and obs[4] fields.  sv[3] and obs[3] == 0.
@@ -202,7 +197,6 @@ int analyze_rle(const std::vector<char> &v)
     return len;
 }
 
-[[gnu::noinline]]
 void process_file(struct rinex_parser *p, const char filename[])
 {
     std::vector<rinex_epoch> epochs;
@@ -289,58 +283,4 @@ void process_file(struct rinex_parser *p, const char filename[])
 
     printf("%s: %ld runs of %zu signals in %zu epochs: %ld bytes (%ld SSI)\n",
         filename, n_runs, sigs.size(), epochs.size(), grand_total, tot_ssi);
-}
-
-int main(int argc, char *argv[])
-{
-    const char *filename;
-    struct rinex_stream *s;
-    struct rinex_parser *p = NULL;
-    enum rinex_error err;
-    int ii, use_mmap;
-
-    for (ii = 1, use_mmap = 1; ii < argc; ++ii)
-    {
-        if (!strcmp(argv[ii], "--mmap"))
-        {
-            use_mmap = 1;
-            continue;
-        }
-        if (!strcmp(argv[ii], "--stdio"))
-        {
-            use_mmap = 0;
-            continue;
-        }
-        if (!strcmp(argv[ii], "-v"))
-        {
-            verbose = true;
-            continue;
-        }
-
-        filename = argv[ii];
-        s = use_mmap
-            ? rinex_mmap_stream(filename)
-            : rinex_stdio_stream(filename);
-        if (!s)
-        {
-            printf("Unable to mmap %s: %s\n", filename, strerror(errno));
-            continue;
-        }
-
-        err = rinex_open(&p, s);
-        if (err != RINEX_SUCCESS)
-        {
-            printf("Unable to open %s: %d\n", filename, err);
-            continue;
-        }
-
-        process_file(p, filename);
-    }
-
-    if (p)
-    {
-        p->destroy(p);
-    }
-
-    return EXIT_SUCCESS;
 }

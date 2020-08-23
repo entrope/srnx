@@ -3,10 +3,11 @@
         "*.o": true,
         "hash_test": true,
         "librinex.a": true,
-        "rinex_scan": true,
         "perf.data": true,
         "perf.data.old": true,
         "rinex_analyze": true,
+        "rinex_n_obs": true,
+        "rinex_scan": true,
         "rinex_test": true
     },
     "files.associations": {

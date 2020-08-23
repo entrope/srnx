@@ -1,4 +1,4 @@
-/** rinex_scan.c - RINEX observation file scanning utility.
+/** driver.h - Interface for RINEX file processing driver.
  * Copyright 2020 Michael Poole.
  *
  * Permission is hereby granted, free of charge, to any person
@@ -22,30 +22,23 @@
  * SOFTWARE.
  */
 
-#include "driver.h"
-#include <stdio.h>
+#if !defined(DRIVER_H_aef69988_07fd_42c5_ba09_ae093fd43849)
+#define DRIVER_H_aef69988_07fd_42c5_ba09_ae093fd43849
 
-void process_file(struct rinex_parser *p, const char filename[])
-{
-    int count, max_sigs;
+#include "rinex.h"
 
-    for (count = max_sigs = 0; ; ++count)
-    {
-        int res = p->read(p);
-        if (res <= 0)
-        {
-            if (res < 0)
-            {
-                printf("Error parsing %s: %d (line %d)\n", filename,
-                    res, p->error_line);
-            }
-            break;
-        }
-        if (max_sigs < p->signal_len)
-        {
-            max_sigs = p->signal_len;
-        }
-    }
+#if defined(__cplusplus)
+extern "C" {
+#endif /* defined(__cplusplus) */
 
-    printf("%s: %d records, max %d signals\n", filename, count, max_sigs);
+extern int verbose;
+
+void process_file(struct rinex_parser *p, const char filename[]);
+void finish(void);
+
+#if defined(__cplusplus)
 }
+#endif /* defined(__cplusplus) */
+
+
+#endif /* !defined(DRIVER_H_aef69988_07fd_42c5_ba09_ae093fd43849) */
