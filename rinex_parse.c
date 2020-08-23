@@ -465,6 +465,7 @@ static rinex_error_t rnx_read_v2_observations(
                 p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
                 if (!p->base.buffer)
                 {
+                    p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
             }
@@ -475,6 +476,7 @@ static rinex_error_t rnx_read_v2_observations(
                     p->signal_alloc * sizeof p->base.signal[0]);
                 if (!p->base.signal)
                 {
+                    p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
             }
@@ -527,6 +529,7 @@ eol:
             {
                 if (*obs != '\n')
                 {
+                    p->base.error_line = __LINE__;
                     return RINEX_ERR_BAD_FORMAT;
                 }
                 obs++;
@@ -559,23 +562,31 @@ static int rnx_read_v2(struct rinex_parser *p_)
     res = rnx_get_newline(p->base.stream, &p->parse_ofs);
     if (res <= 0)
     {
+        p_->error_line = __LINE__;
         return res;
     }
     if (res < 33)
     {
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     line_len = res - 1 - p->parse_ofs;
     line = p->base.stream->buffer + p->parse_ofs;
 
     /* Parse the timestamp, epoch flag and "number of satellites" field. */
+    i64 = 0;
+    yy = mm = dd = hh = min = n_sats = 0;
     if ((line[28] < '0' || line[28] > '6')
         || parse_uint(&yy, line+1, 2) || parse_uint(&mm, line+4, 2)
         || parse_uint(&dd, line+7, 2) || parse_uint(&hh, line+10, 2)
         || parse_uint(&min, line+13, 2) || parse_uint(&n_sats, line+29, 3)
         || parse_fixed(&i64, line+15, 11, 7))
     {
-        return RINEX_ERR_BAD_FORMAT;
+        if (line[28] < '2' || line[28] == '6')
+        {
+            p_->error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
     }
     yy += (yy < 80) ? 2000 : 1900;
     p->base.epoch.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
@@ -593,11 +604,13 @@ static int rnx_read_v2(struct rinex_parser *p_)
     {
         if (parse_fixed(&p->base.epoch.clock_offset, line+68, 12, 9))
         {
+            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
     }
     else
     {
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
 
@@ -616,6 +629,7 @@ static int rnx_read_v2(struct rinex_parser *p_)
         }
         else if (res == 0)
         {
+            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         line = p->base.stream->buffer + p->parse_ofs;
@@ -626,19 +640,29 @@ static int rnx_read_v2(struct rinex_parser *p_)
 
     case '2': case '3': case '4': case '5':
         /* Get the data. */
-        p->parse_ofs = res;
-        res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
-        if (res < 0)
+        if ((res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats + 1)) < 0)
         {
             err = res;
         }
         else if (res == 0)
         {
+            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         else
         {
             p->base.buffer_len = res - p->parse_ofs;
+
+            while (p->buffer_alloc < p->base.buffer_len)
+            {
+                p->buffer_alloc <<= 1;
+            }
+            p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
+            if (!p->base.buffer)
+            {
+                p_->error_line = __LINE__;
+                return RINEX_ERR_SYSTEM;
+            }
             memcpy(p->base.buffer, p->base.stream->buffer + p->parse_ofs,
                 p->base.buffer_len);
             p->parse_ofs = res;
@@ -650,6 +674,7 @@ static int rnx_read_v2(struct rinex_parser *p_)
         return err;
     }
 
+    p_->error_line = __LINE__;
     assert(0 && "logic failure in rnx_read_v2");
     return RINEX_ERR_BAD_FORMAT;
 }
@@ -682,6 +707,7 @@ static rinex_error_t rnx_read_v3_observations(
         }
         if (kk == p->system_len)
         {
+            p->base.error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         obs += 3;
@@ -713,6 +739,7 @@ static rinex_error_t rnx_read_v3_observations(
                 p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
                 if (!p->base.buffer)
                 {
+                    p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
             }
@@ -723,6 +750,7 @@ static rinex_error_t rnx_read_v3_observations(
                     p->signal_alloc * sizeof p->base.signal[0]);
                 if (!p->base.signal)
                 {
+                    p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
             }
@@ -762,6 +790,7 @@ static rinex_error_t rnx_read_v3_observations(
 
         if (*obs != '\n')
         {
+            p->base.error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         obs++;
@@ -789,6 +818,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
     }
     if (res < 35)
     {
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     line_len = res - p->parse_ofs;
@@ -802,6 +832,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
         || parse_uint(&min, line+16, 2) || parse_uint(&n_sats, line+32, 3)
         || parse_fixed(&i64, line+18, 11, 7))
     {
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     p->base.epoch.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
@@ -819,11 +850,13 @@ static int rnx_read_v3(struct rinex_parser *p_)
     {
         if (parse_fixed(&p->base.epoch.clock_offset, line+44, 15, 12))
         {
+            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
     }
     else
     {
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
 
@@ -835,6 +868,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
     }
     else if (res == 0)
     {
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     line_len = res - p->parse_ofs;
@@ -855,6 +889,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
         return 1;
     }
 
+    p_->error_line = __LINE__;
     assert(0 && "logic failure in rnx_read_v3");
     return RINEX_ERR_BAD_FORMAT;
 }
@@ -872,22 +907,12 @@ static void rnx_free_v23(struct rinex_parser *p_)
     free(p);
 }
 
-/** Finds the start of the first line with the given header label.
- *
- * \warning Has undefined behavior for the first header.  This should
- *   not be a problem because the first header should be at p->buffer
- *   anyway.
- * \param[in] p RINEX parser with header in \a p->buffer.
- * \param[in] label Header label to search for.
- * \param[in] sizeof_label Size of \a label, including nul terminator.
- * \returns A pointer into \a rnx->header such that \a !strcmp(ptr+60,label),
- *   or NULL if there is no header with the requested label.
- */
-static const char *rnx_find_header
+/* Doc comment in rinex.h */
+const char *rinex_find_header
 (
     const struct rinex_parser *p,
     const char label[],
-    size_t sizeof_label
+    unsigned int sizeof_label
 )
 {
     char *pos;
@@ -909,19 +934,22 @@ static rinex_error_t rnx_open_v2(struct rnx_v23_parser *p)
     int res, ii, jj;
 
     /* Find the (first?) PRN / # OF OBS line. */
-    line = rnx_find_header(&p->base, n_obs, sizeof n_obs);
+    line = rinex_find_header(&p->base, n_obs, sizeof n_obs);
     if (!line)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     res = parse_uint(&p->obs_len, line, 6);
     if (res || (p->obs_len < 1))
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     p->obs = calloc(p->obs_len, sizeof p->obs[0]);
     if (!p->obs)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
 
@@ -935,12 +963,14 @@ static rinex_error_t rnx_open_v2(struct rnx_v23_parser *p)
             line = strchr(line, '\n');
             if (!line)
             {
+                p->base.error_line = __LINE__;
                 return RINEX_ERR_BAD_FORMAT;
             }
 
             /* Check the type of the next header line. */
             if (memcmp(++line + 60, n_obs, sizeof(n_obs) - 1))
             {
+                p->base.error_line = __LINE__;
                 return RINEX_ERR_BAD_FORMAT;
             }
         }
@@ -958,6 +988,7 @@ static rinex_error_t rnx_open_v2(struct rnx_v23_parser *p)
     p->base.signal = calloc(p->signal_alloc, sizeof p->base.signal[0]);
     if (!p->base.signal)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
 
@@ -972,9 +1003,10 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
     int res, ii, jj, kk, nn, n_obs, system_alloc, obs_alloc;
 
     /* Find the (first) SYS / # / OBS TYPES line. */
-    line = rnx_find_header(&p->base, sys_n_obs, sizeof sys_n_obs);
+    line = rinex_find_header(&p->base, sys_n_obs, sizeof sys_n_obs);
     if (!line)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
 
@@ -983,11 +1015,13 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
     p->system_id = calloc(system_alloc + 1, 1);
     if (!p->system_id)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
     p->system = calloc(system_alloc, sizeof p->system[0]);
     if (!p->system)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
 
@@ -996,6 +1030,7 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
     p->obs = calloc(obs_alloc, sizeof p->obs[0]);
     if (!p->obs)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
 
@@ -1006,6 +1041,7 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
         res = parse_uint(&n_obs, line + 3, 3);
         if (res || (n_obs < 1))
         {
+            p->base.error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
 
@@ -1017,6 +1053,7 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
             p->system = realloc(p->system, system_alloc * sizeof(p->system[0]));
             if (!p->system_id || !p->system)
             {
+                p->base.error_line = __LINE__;
                 return RINEX_ERR_SYSTEM;
             }
         }
@@ -1036,6 +1073,7 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
             p->obs = realloc(p->obs, obs_alloc * sizeof(p->obs[0]));
             if (!p->obs)
             {
+                p->base.error_line = __LINE__;
                 return RINEX_ERR_SYSTEM;
             }
         }
@@ -1053,6 +1091,7 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
                 if ((line[0] != ' ')
                     || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
                 {
+                    p->base.error_line = __LINE__;
                     return RINEX_ERR_BAD_FORMAT;
                 }
             }
@@ -1087,6 +1126,7 @@ static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
     p->base.signal = calloc(p->signal_alloc, sizeof p->base.signal[0]);
     if (!p->base.signal)
     {
+        p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
 

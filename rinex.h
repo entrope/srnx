@@ -179,6 +179,9 @@ struct rinex_parser
     /** signal_len is the number of observations from this epoch. */
     int signal_len;
 
+    /** error_line indicates where a parse error occurred. */
+    int error_line;
+
     /** buffer contains text related to the current data.
      *
      * Before #read is called, this holds the file header.
@@ -227,6 +230,24 @@ struct rinex_parser
  * \returns A rinex_error status code.
  */
 rinex_error_t rinex_open(struct rinex_parser **p_parser, struct rinex_stream *stream);
+
+/** Finds the start of the first line with the given header label.
+ *
+ * \warning Has undefined behavior for the first header.  This should
+ *   not be a problem because the first header should be at p->buffer
+ *   anyway.
+ * \param[in] p RINEX parser with header in \a p->buffer.
+ * \param[in] label Header label to search for.
+ * \param[in] sizeof_label Size of \a label, including nul terminator.
+ * \returns A pointer into \a rnx->header such that \a !strcmp(ptr+60,label),
+ *   or NULL if there is no header with the requested label.
+ */
+const char *rinex_find_header
+(
+    const struct rinex_parser *p,
+    const char label[],
+    unsigned int sizeof_label
+);
 
 /** rinex_parse_obs parses a 14-character observation code, and returns
  * the value times 1000.
