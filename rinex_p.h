@@ -1,4 +1,4 @@
-/** rinex_test.c - RINEX unit test file.
+/* rinex_p.h - Private definitions for RINEX observation parsing.
  * Copyright 2020 Michael Poole.
  *
  * Permission is hereby granted, free of charge, to any person
@@ -22,40 +22,33 @@
  * SOFTWARE.
  */
 
-#include "rinex.h"
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#if !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4)
+#define RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4
 
-struct {
-    const char *obs;
-    int64_t value;
-} obs_test[] = {
-    { "  23619095.450  ", 23619095450 },
-    { "          .300 8", 300 },
-    { "         -.353  ", -353 },
-    { "    -53875.632 8", -53875632 },
-    { NULL, 0 }
+#include "rinex.h"
+
+/** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
+#define RINEX_EXTRA 80
+
+/** BLOCK_SIZE is how much data we normally try to read into a buffer. */
+#define BLOCK_SIZE (1024 * 1024 - RINEX_EXTRA)
+
+/** rnx_v23_parser is a RINEX v2.xx or v3.xx parser. */
+struct rnx_v23_parser
+{
+    /** base is the standard rinex_parser contents. */
+    struct rinex_parser base;
+
+    /** buffer_alloc is the allocated length of #base.buffer. */
+    int buffer_alloc;
+
+    /** obs_alloc is the allocated length of #base.lli, #base.ssi and
+     * #base.obs.
+     */
+    int obs_alloc;
+
+    /** parse_ofs is the current read offset in base.stream->buffer. */
+    uint64_t parse_ofs;
 };
 
-int main(int argc, char *argv[])
-{
-    int ii;
-    int status = EXIT_SUCCESS;
-
-    for (ii = 0; obs_test[ii].obs; ++ii)
-    {
-        int64_t got = rinex_parse_obs(obs_test[ii].obs);
-        if (got != obs_test[ii].value)
-        {
-            printf("Mismatch: %s -> %ld, expected %ld\n", obs_test[ii].obs,
-                got, obs_test[ii].value);
-            status = EXIT_FAILURE;
-        }
-    }
-    printf(" ... performed %d tests\n", ii);
-
-    (void)argc; (void)argv;
-    return status;
-}
+#endif /* !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4) */

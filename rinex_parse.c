@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-#include "rinex.h"
+#include "rinex_p.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -34,52 +34,6 @@
 #ifdef __x86_64__
 # include <x86intrin.h>
 #endif
-
-#define BLOCK_SIZE (1024 * 1024 - RINEX_EXTRA)
-
-/** rnx_v23_parser is a RINEX v2.xx or v3.xx parser. */
-struct rnx_v23_parser
-{
-    /** base is the standard rinex_parser contents. */
-    struct rinex_parser base;
-
-    /** buffer_alloc is the allocated length of #base.buffer. */
-    int buffer_alloc;
-
-    /** signal_alloc is the allocated length of #base.signal. */
-    int signal_alloc;
-
-    /** system_len is the length of #system and #system_id.
-     *
-     * In the case of #system_id, this does not count the trailing '\0'.
-     */
-    int system_len;
-
-    /** obs_len is the length of #obs. */
-    int obs_len;
-
-    /** parse_ofs is the current read offset in base.stream->buffer. */
-    int parse_ofs;
-
-    /** system_id is a nul-terminated string identifying supported
-     * systems.  system_id[ii] is the system identifier of the ii'th
-     * satellite system.  system_id[system_len] is '\0'.
-     */
-    char *system_id;
-
-    /** system identifies the ending indexes of GNSS systems in #obs.
-     *
-     * The ii'th system starts at obs[ii ? system[ii-1] : 0] and ends at
-     * obs[system[ii]].
-     */
-    int *system;
-
-    /** obs is a vector containing the possible observations for each
-     * satellite in the file.  obs[ii].sv[0] may be the satellite system
-     * code or '\0'; obs[ii].sv[1..3] are all '\0'.
-     */
-    rinex_signal_t *obs;
-};
 
 /** Searches for \a needle in \a haystack.
  *
@@ -301,7 +255,7 @@ static int parse_fixed
  */
 static int rnx_get_newline(
     struct rinex_stream *s,
-    int *p_whence
+    uint64_t *p_whence
 )
 {
     int ii, res;
@@ -347,7 +301,7 @@ static int rnx_get_newline(
  */
 static int rnx_get_newlines(
     struct rinex_parser *p,
-    int *p_whence,
+    uint64_t *p_whence,
     int *p_body_ofs,
     int n_header,
     int n_body
@@ -425,6 +379,175 @@ static int rnx_get_newlines(
     return rnx_get_newlines(p, p_whence, p_body_ofs, n_header, n_body);
 }
 
+#if defined(__AVX2__)
+static __m256i rnx_parse_4(
+    __m256i p_0,
+    __m256i p_1
+)
+{
+    const __m256i v_atoi = _mm256_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8,
+        9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0);
+    const __m256i mul_1_10 = _mm256_setr_epi8(10, 1, 10, 1, 10, 1, 10,
+        1, 10, 1, 0, 1, 10, 1, 0, 0, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1,
+        0, 1, 10, 1, 0, 0);
+    const __m256i mul_1_100 = _mm256_setr_epi16(100, 1, 100, 1, 10, 1,
+        1, 0, 100, 1, 100, 1, 10, 1, 1, 0);
+    const __m256i weight_3 = _mm256_setr_epi16(10000, 1, 100, 1, 10000,
+        1, 100, 1, 10000, 1, 100, 1, 10000, 1, 100, 1);
+    const __m256i weight_4 = _mm256_setr_epi32(100000, 1, 100000, 1,
+        100000, 1, 100000, 1);
+    const __m256i v_minus = _mm256_setr_epi8('-', '-', '-', '-', '-',
+        '-', '-', '-', '-', '-', 0, 0, 0, 0, 0, 0, '-', '-', '-', '-',
+        '-', '-', '-', '-', '-', '-', 0, 0, 0, 0, 0, 0);
+
+    /* Convert digits to their values. */
+    const __m256i t0_0 = _mm256_shuffle_epi8(v_atoi, p_0);
+    const __m256i t0_1 = _mm256_shuffle_epi8(v_atoi, p_1);
+    /* Accumulate adjacent digits into two-digit int16_t's. */
+    const __m256i t1_0 = _mm256_maddubs_epi16(t0_0, mul_1_10);
+    const __m256i t1_1 = _mm256_maddubs_epi16(t0_1, mul_1_10);
+    /* Accumulate adjacent (two-digit) int16_t's into int32_t's. */
+    const __m256i t2_0 = _mm256_madd_epi16(t1_0, mul_1_100);
+    const __m256i t2_1 = _mm256_madd_epi16(t1_1, mul_1_100);
+    /* Our int32_t's are only in the range 0..9999, so pack down. */
+    const __m256i t3 = _mm256_packus_epi32(t2_0, t2_1);
+    /* Combine adjacent (four-digit) int16_t's into int32_t's. */
+    const __m256i t4 = _mm256_madd_epi16(t3, weight_3);
+    /* Scale the high-order 32-bit values by 1e5. */
+    const __m256i t5 = _mm256_mul_epu32(t4, weight_4);
+    /* Shift the low-order 32-bit values "down". */
+    const __m256i t6 = _mm256_srli_epi64(t4, 32);
+    /* Add the low- and high-order 32-bit values (extended to 64 bits). */
+    const __m256i t7 = _mm256_add_epi64(t5, t6);
+
+    /* There is no _mm256_sign_epi64, unfortunately... */
+    const __m256i v_zero = _mm256_setzero_si256();
+    const __m256i v_ones = _mm256_cmpeq_epi64(v_zero, v_zero);
+    __m256i mask = v_zero;
+    int neg_0 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v_minus, p_0));
+    if (neg_0 >> 16)
+    {
+        mask = _mm256_blend_epi32(mask, v_ones, 0x03);
+    }
+    if (neg_0 & 65535)
+    {
+        mask = _mm256_blend_epi32(mask, v_ones, 0x0c);
+    }
+    int neg_1 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v_minus, p_1));
+    if (neg_1 >> 16)
+    {
+        mask = _mm256_blend_epi32(mask, v_ones, 0x30);
+    }
+    if (neg_1 & 65535)
+    {
+        mask = _mm256_blend_epi32(mask, v_ones, 0xc0);
+    }
+    const __m256i t8 = _mm256_sub_epi64(v_zero, t7);
+    return _mm256_blendv_epi8(t7, t8, mask);
+}
+
+static const char *rnx_buffer_and_parse_obs
+(
+    struct rnx_v23_parser *p,
+    const char *obs,
+    __m256i *p_0,
+    __m256i *p_1,
+    int nn
+)
+{
+    const __m256i v_nl = _mm256_set1_epi8('\n');
+    const __m256i v_sp = _mm256_set1_epi8(' ');
+
+    __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
+    __m128i m_nl = _mm_cmpeq_epi8(v_obs, _mm256_castsi256_si128(v_nl));
+    int mask = _mm_movemask_epi8(m_nl);
+    int idx = __builtin_ctz(mask | 0x10000);
+    __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
+    __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
+    __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
+    __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
+    __m128i res = _mm_blendv_epi8(v_obs, _mm256_castsi256_si128(v_sp), m_sp);
+    p->base.lli[nn] = _mm_extract_epi8(res, 14);
+    p->base.ssi[nn] = _mm_extract_epi8(res, 15);
+    __m256i res_2;
+    switch (nn & 3)
+    {
+    case 0:
+        *p_0 = _mm256_inserti128_si256(*p_0, res, 0);
+        break;
+    case 1: /* Strange order here required by _mm256_packus_epi32(). */
+        *p_1 = _mm256_inserti128_si256(*p_1, res, 0);
+        break;
+    case 2:
+        *p_0 = _mm256_inserti128_si256(*p_0, res, 1);
+        break;
+    case 3:
+        *p_1 = _mm256_inserti128_si256(*p_1, res, 1);
+        res_2 = rnx_parse_4(*p_0, *p_1);
+        _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 3), res_2);
+        break;
+    }
+    return obs + idx;
+}
+#endif
+
+__attribute__((unused))
+static const char *rnx_parse_obs
+(
+    struct rnx_v23_parser *p,
+    const char *obs,
+    int nn
+)
+{
+    char buf[16];
+    int kk;
+
+    /* The first 11 characters must be present: space, digit or dot. */
+    for (kk = 0; kk < 10; ++kk)
+    {
+        if (*obs != ' ') break;
+        buf[kk] = *obs++;
+    }
+    for (; kk < 10; ++kk)
+    {
+        if (*obs < '0' || *obs > '9') break;
+        buf[kk] = *obs++;
+    }
+    if (kk != 10 || *obs++ != '.')
+    {
+        return NULL;
+    }
+    buf[kk++] = '.';
+    for (; kk < 16; ++kk)
+    {
+        buf[kk] = (*obs == '\n') ? ' ' : *obs++;
+    }
+
+    /* Save the LLI and SSI. */
+    p->base.lli[nn] = buf[14];
+    p->base.ssi[nn] = buf[15];
+
+    /* Parse the observation value. */
+#define DVAL(X) ((X == ' ') ? 0 : (X - '0'))
+    p->base.obs[nn] = DVAL(buf[13])
+        + 10 * DVAL(buf[12])
+        + 100 * DVAL(buf[11])
+        /* buf[10] == '.', at least in theory */
+        + 1000 * DVAL(buf[9])
+        + 10000 * DVAL(buf[8])
+        + 100000 * DVAL(buf[7])
+        + 1000000 * DVAL(buf[6])
+        + 10000000 * DVAL(buf[5])
+        + 100000000 * DVAL(buf[4])
+        + INT64_C(1000000000) * DVAL(buf[3])
+        + INT64_C(10000000000) * DVAL(buf[2])
+        + INT64_C(100000000000) * DVAL(buf[1])
+        + INT64_C(1000000000000) * DVAL(buf[0]);
+#undef DVAL
+
+    return obs;
+}
+
 static const char blank[] = "                ";
 
 /** rnx_read_v2_observations reads observations from \a p. */
@@ -434,18 +557,51 @@ static rinex_error_t rnx_read_v2_observations(
     const char *obs
 )
 {
-    rinex_signal_t *signal;
-    int ii, jj, kk, nn;
-#if defined(__SSE4_1__)
-    const __m128i v_nl = _mm_set1_epi8('\n');
-    const __m128i v_sp = _mm_set1_epi8(' ');
+#if defined(__AVX2__)
+    __m256i buf_0, buf_1;
 #endif
+    char *buffer;
+    int ii, jj, nn;
 
     /* Read observations for each satellite. */
+    p->base.buffer_len = 0;
+    buffer = p->base.buffer + p->base.buffer_len;
     for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
     {
+        /* Determine the satellite identifier. */
+        const char *sv_name = epoch + 32 + 3 * (ii % 12);
+        int n_obs = p->base.n_obs[sv_name[0] & 31];
+        char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
+        uint8_t obs_mask = 0; /* presence bitmask for observations */
+
+        /* There are 12 satellite names per header line. */
+        if (ii % 12 == 11)
+        {
+            epoch = strchr(epoch, '\n') + 1;
+        }
+
+        /* Grow buffer if needed. */
+        if (p->buffer_alloc < p->base.buffer_len + 2 + (n_obs + 7) / 8)
+        {
+            /* n_obs <= 25, so we need to add at most 6 bytes; but
+             * buffer_alloc was already big enough for the file header.
+             */
+            p->buffer_alloc <<= 1;
+            p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
+            if (!p->base.buffer)
+            {
+                p->base.error_line = __LINE__;
+                return RINEX_ERR_SYSTEM;
+            }
+            buffer = p->base.buffer + p->base.buffer_len;
+        }
+
+        /* Save satellite identifier. */
+        *buffer++ = sv_name[0];
+        *buffer++ = svn;
+
         /* Read each observation for this satellite. */
-        for (jj = 0; jj < p->obs_len; ++jj)
+        for (jj = 0; jj < n_obs; ++jj)
         {
             /* If at EOL or a blank, skip this observation. */
             if (*obs == '\n')
@@ -459,73 +615,45 @@ static rinex_error_t rnx_read_v2_observations(
             }
 
             /* Do we need more buffer space? */
-            if ((nn + 1) * 16 >= p->buffer_alloc)
+            if (nn >= p->obs_alloc)
             {
-                p->buffer_alloc *= 2;
-                p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
-                if (!p->base.buffer)
-                {
-                    p->base.error_line = __LINE__;
-                    return RINEX_ERR_SYSTEM;
-                }
-            }
-            if (nn >= p->signal_alloc)
-            {
-                p->signal_alloc *= 2;
-                p->base.signal = realloc(p->base.signal,
-                    p->signal_alloc * sizeof p->base.signal[0]);
-                if (!p->base.signal)
+                p->obs_alloc *= 2;
+                p->base.lli = realloc(p->base.lli, p->obs_alloc);
+                p->base.ssi = realloc(p->base.ssi, p->obs_alloc);
+                p->base.obs = realloc(p->base.obs,
+                    p->obs_alloc * sizeof p->base.obs[0]);
+                if (!p->base.lli || !p->base.ssi || !p->base.obs)
                 {
                     p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
             }
 
-            /* Record the signal name. */
-            signal = &p->base.signal[nn];
-            memcpy(signal, &p->obs[jj], sizeof *signal);
-            memcpy(signal->id.sv, epoch + 32 + 3 * (ii % 12), 3);
-
-            /* Copy the observation data. */
-#if defined(__SSE4_1__)
-            {
-                __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
-                __m128i m_nl = _mm_cmpeq_epi8(v_nl, v_obs);
-                int mask = _mm_movemask_epi8(m_nl);
-                int idx = __builtin_ctz(mask | 0x10000);
-                __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
-                __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
-                __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
-                __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
-                __m128i res = _mm_blendv_epi8(v_obs, v_sp, m_sp);
-                _mm_storeu_si128((__m128i *)(p->base.buffer + nn * 16), res);
-                obs += idx;
-            }
-            (void)kk;
-#elif 0
-            for (kk = 0; (kk < 16) && (*obs != '\n'); ++kk)
-            {
-                /* XXX: Check format? */
-                p->base.buffer[nn * 16 + kk] = *obs++;
-            }
-            for (; kk < 16; ++kk)
-            {
-                p->base.buffer[nn * 16 + kk] = ' ';
-            }
+#if defined(__AVX2__)
+            obs = rnx_buffer_and_parse_obs(p, obs, &buf_0, &buf_1, nn);
 #else
-            for (kk = 0; kk < 16; ++kk)
-            {
-                /* XXX: Check format? */
-                p->base.buffer[nn * 16 + kk] = (*obs == '\n') ? ' ' : *obs++;
-            }
+            obs = rnx_parse_obs(p, obs, nn);
 #endif
+            if (!obs)
+            {
+                p->base.error_line = __LINE__;
+                return RINEX_ERR_BAD_FORMAT;
+            }
 
-            /* Bump our count of signals recorded. */
+            /* Remember that we saw this signal. */
+            obs_mask |= 1 << (jj & 7);
             nn++;
 
 eol:
+            /* Update presence bitmasks. */
+            if (((jj + 1) == n_obs) || ((jj & 7) == 7))
+            {
+                *buffer++ = obs_mask;
+                obs_mask = 0;
+            }
+
             /* There are up to five observations per line. */
-            if ((jj % 5 == 4) || (jj + 1 == p->obs_len))
+            if (((jj + 1) == n_obs) || ((jj % 5) == 4))
             {
                 if (*obs != '\n')
                 {
@@ -536,15 +664,26 @@ eol:
             }
         }
 
-        /* There are 12 satellite names per header line. */
-        if (ii % 12 == 11)
-        {
-            epoch = strchr(epoch, '\n') + 1;
-        }
+        /* Make sure buffer_len is updated. */
+        p->base.buffer_len = buffer - p->base.buffer;
     }
 
-    p->base.buffer_len = nn * 16;
-    p->base.signal_len = nn;
+#if defined(__AVX2__)
+    if (nn & 3)
+    {
+        __m256i res = rnx_parse_4(buf_0, buf_1);
+        int64_t *base = p->base.obs + (nn & ~3);
+        base[0] = _mm256_extract_epi64(res, 0);
+        if ((nn & 3) > 1)
+        {
+            base[1] = _mm256_extract_epi64(res, 1);
+            if ((nn & 3) == 2)
+            {
+                base[2] = _mm256_extract_epi64(res, 2);
+            }
+        }
+    }
+#endif
 
     return 1;
 }
@@ -619,7 +758,7 @@ static int rnx_read_v2(struct rinex_parser *p_)
     {
     case '0': case '1': case '6':
         /* Get enough data. */
-        mm = (p->obs_len + 4) / 5; /* How many lines per satellite? */
+        mm = (p->base.n_obs[0] + 4) / 5; /* How many lines per satellite? */
         body_ofs = 0;
         res = rnx_get_newlines(p_, &p->parse_ofs, &body_ofs,
             (n_sats + 11) / 12, n_sats * mm);
@@ -668,7 +807,6 @@ static int rnx_read_v2(struct rinex_parser *p_)
             p->parse_ofs = res;
             err = 1;
         }
-        p->base.signal_len = 0;
 
         /* and we are done */
         return err;
@@ -685,39 +823,47 @@ static rinex_error_t rnx_read_v3_observations(
     const char obs[]
 )
 {
-    rinex_signal_t *signal;
-    const char *sv_id;
-    int ii, jj, kk, nn, prev_obs, last_obs;
-#if defined(__SSE4_1__)
-    const __m128i v_nl = _mm_set1_epi8('\n');
-    const __m128i v_sp = _mm_set1_epi8(' ');
+#if defined(__AVX2__)
+    __m256i buf_0, buf_1;
 #endif
+    char *buffer;
+    int ii, jj, nn;
 
     /* Read observations for each satellite. */
+    p->base.buffer_len = 0;
+    buffer = p->base.buffer + p->base.buffer_len;
     for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
     {
-        /* Figure out which satellite system this satellite belongs to. */
-        sv_id = obs;
-        for (kk = 0; kk < p->system_len; ++kk)
-        {
-            if (sv_id[0] == p->system_id[kk])
-            {
-                break;
-            }
-        }
-        if (kk == p->system_len)
-        {
-            p->base.error_line = __LINE__;
-            return RINEX_ERR_BAD_FORMAT;
-        }
+        /* Look up the satellite system's observation count. */
+        const char *sv_name = obs;
+        short n_obs = p->base.n_obs[sv_name[0] & 31];
+        char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
+        uint8_t obs_mask = 0; /* presence bitmask for observations */
         obs += 3;
 
-        /* Find the per-system observation list and count. */
-        prev_obs = kk ? p->system[kk-1] : 0;
-        last_obs = p->system[kk];
+        /* Grow buffer if needed. */
+        if (p->buffer_alloc < p->base.buffer_len + 2 + (n_obs + 7) / 8)
+        {
+            /* n_obs <= 999, so we need to add at most 128 bytes, and
+             * we know buffer_alloc will be at least that big to have
+             * held the file header.
+             */
+            p->buffer_alloc <<= 1;
+            p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
+            if (!p->base.buffer)
+            {
+                p->base.error_line = __LINE__;
+                return RINEX_ERR_SYSTEM;
+            }
+            buffer = p->base.buffer + p->base.buffer_len;
+        }
+
+        /* Save satellite identifier. */
+        *buffer++ = sv_name[0];
+        *buffer++ = svn;
 
         /* Read each observation for this satellite. */
-        for (jj = prev_obs; jj < last_obs; ++jj)
+        for (jj = 0; jj < n_obs; ++jj)
         {
             /* If at EOL, we are done for this satellite. */
             if (*obs == '\n')
@@ -733,60 +879,53 @@ static rinex_error_t rnx_read_v3_observations(
             }
 
             /* Do we need more buffer space? */
-            if ((nn + 1) * 16 >= p->buffer_alloc)
+            if (nn >= p->obs_alloc)
             {
-                p->buffer_alloc *= 2;
-                p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
-                if (!p->base.buffer)
+                p->obs_alloc *= 2;
+                p->base.lli = realloc(p->base.lli, p->obs_alloc);
+                p->base.ssi = realloc(p->base.ssi, p->obs_alloc);
+                p->base.obs = realloc(p->base.obs,
+                    p->obs_alloc * sizeof p->base.obs[0]);
+                if (!p->base.lli || !p->base.ssi || !p->base.obs)
                 {
                     p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
             }
-            if (nn >= p->signal_alloc)
-            {
-                p->signal_alloc *= 2;
-                p->base.signal = realloc(p->base.signal,
-                    p->signal_alloc * sizeof p->base.signal[0]);
-                if (!p->base.signal)
-                {
-                    p->base.error_line = __LINE__;
-                    return RINEX_ERR_SYSTEM;
-                }
-            }
-
-            /* Record the signal name. */
-            signal = &p->base.signal[nn];
-            memcpy(signal, &p->obs[jj], sizeof *signal);
-            memcpy(signal->id.sv, sv_id, 3);
 
             /* Copy the observation data. */
-#if defined(__SSE4_1__)
-            {
-                __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
-                __m128i m_nl = _mm_cmpeq_epi8(v_nl, v_obs);
-                int mask = _mm_movemask_epi8(m_nl);
-                int idx = __builtin_ctz(mask | 0x10000);
-                __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
-                __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
-                __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
-                __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
-                __m128i res = _mm_blendv_epi8(v_sp, v_obs, m_sp);
-                _mm_storeu_si128((__m128i *)(p->base.buffer + nn * 16), res);
-                obs += idx;
-            }
-            (void)kk;
+#if defined(__AVX2__)
+            obs = rnx_buffer_and_parse_obs(p, obs, &buf_0, &buf_1, nn);
 #else
-            for (kk = 0; kk < 16; ++kk)
-            {
-                /* XXX: Check format? */
-                p->base.buffer[nn * 16 + kk] = (*obs == '\n') ? ' ' : *obs++;
-            }
+            obs = rnx_parse_obs(p, obs, nn);
 #endif
+            if (!obs)
+            {
+                p->base.error_line = __LINE__;
+                return RINEX_ERR_BAD_FORMAT;
+            }
 
-            /* Bump our count of signals recorded. */
+            /* Remember that we saw this signal. */
+            obs_mask |= 1 << (jj & 7);
             nn++;
+
+            /* Update presence bitmasks. */
+            if (((jj & 7) == 7) || ((jj + 1) == n_obs))
+            {
+                *buffer++ = obs_mask;
+                obs_mask = 0;
+            }
         }
+
+        /* Finish writing presence bitmasks for a short line. */
+        for (; jj < n_obs; jj += 8)
+        {
+            *buffer++ = obs_mask;
+            obs_mask = 0;
+        }
+
+        /* Make sure buffer_len is updated. */
+        p->base.buffer_len = buffer - p->base.buffer;
 
         if (*obs != '\n')
         {
@@ -796,8 +935,22 @@ static rinex_error_t rnx_read_v3_observations(
         obs++;
     }
 
-    p->base.buffer_len = nn * 16;
-    p->base.signal_len = nn;
+#if defined(__AVX2__)
+    if (nn & 3)
+    {
+        __m256i res = rnx_parse_4(buf_0, buf_1);
+        int64_t *base = p->base.obs + (nn & ~3);
+        base[0] = _mm256_extract_epi64(res, 0);
+        if ((nn & 3) > 1)
+        {
+            base[1] = _mm256_extract_epi64(res, 1);
+            if ((nn & 3) == 2)
+            {
+                base[2] = _mm256_extract_epi64(res, 2);
+            }
+        }
+    }
+#endif
 
     return 1;
 }
@@ -885,7 +1038,6 @@ static int rnx_read_v3(struct rinex_parser *p_)
         /* We already did most of the work. */
         memcpy(p->base.buffer, line, line_len);
         p->base.buffer_len = line_len;
-        p->base.signal_len = 0;
         return 1;
     }
 
@@ -900,10 +1052,9 @@ static void rnx_free_v23(struct rinex_parser *p_)
     struct rnx_v23_parser *p = (struct rnx_v23_parser *)p_;
 
     free(p->base.buffer);
-    free(p->base.signal);
-    free(p->system_id);
-    free(p->system);
-    free(p->obs);
+    free(p->base.lli);
+    free(p->base.ssi);
+    free(p->base.obs);
     free(p);
 }
 
@@ -927,210 +1078,114 @@ const char *rinex_find_header
 }
 
 /** rnx_open_v2 reads the observation codes in \a p->base.header. */
-static rinex_error_t rnx_open_v2(struct rnx_v23_parser *p)
+static const char *rnx_open_v2(struct rnx_v23_parser *p)
 {
     static const char n_obs[] = "# / TYPES OF OBSERV";
     const char *line;
-    int res, ii, jj;
+    int res, value;
+    char obs_type;
+
+    /* What type of observations are in this file? */
+    obs_type = p->base.buffer[40];
+    if (!strchr(" GRSEM", obs_type))
+    {
+        return "Invalid satellite system for file";
+    }
 
     /* Find the (first?) PRN / # OF OBS line. */
     line = rinex_find_header(&p->base, n_obs, sizeof n_obs);
     if (!line)
     {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_BAD_FORMAT;
+        return "Could not find PRN / # OF OBS line";
     }
-    res = parse_uint(&p->obs_len, line, 6);
-    if (res || (p->obs_len < 1))
+    res = parse_uint(&value, line, 6);
+    if (res || (value < 1))
     {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_BAD_FORMAT;
+        return "Invalid number of observations";
     }
-    p->obs = calloc(p->obs_len, sizeof p->obs[0]);
-    if (!p->obs)
+    p->base.n_obs[' ' & 31] = value;
+    if (obs_type == 'M')
     {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
+        p->base.n_obs['E' & 31] = value;
+        p->base.n_obs['G' & 31] = value;
+        p->base.n_obs['R' & 31] = value;
+        p->base.n_obs['S' & 31] = value;
     }
-
-    /* Copy observation codes. */
-    for (ii = 0; ii < p->obs_len; )
+    else
     {
-        /* After the first line, find the next header and check it. */
-        if (ii)
+        p->base.n_obs[obs_type & 31] = value;
+        if (obs_type == ' ')
         {
-            /* Find this line's EOL. */
-            line = strchr(line, '\n');
-            if (!line)
-            {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_BAD_FORMAT;
-            }
-
-            /* Check the type of the next header line. */
-            if (memcmp(++line + 60, n_obs, sizeof(n_obs) - 1))
-            {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_BAD_FORMAT;
-            }
-        }
-
-        /* Copy observation codes from this line. */
-        for (jj = 0; (ii < p->obs_len) && (jj < 9); ++ii, ++jj)
-        {
-            p->obs[ii].id.obs[0] = line[10 + 6*jj];
-            p->obs[ii].id.obs[1] = line[11 + 6*jj];
+            p->base.n_obs['G' & 31] = value;
         }
     }
 
-    /* Initially assume 20 satellites is enough space. */
-    p->signal_alloc = 20 * p->obs_len;
-    p->base.signal = calloc(p->signal_alloc, sizeof p->base.signal[0]);
-    if (!p->base.signal)
+    /* Initially assume 500 observations/epoch is enough space. */
+    p->obs_alloc = 500;
+    p->base.lli = calloc(p->obs_alloc, 1);
+    p->base.ssi = calloc(p->obs_alloc, 1);
+    p->base.obs = calloc(p->obs_alloc, sizeof p->base.obs[0]);
+    if (!p->base.lli || !p->base.ssi || !p->base.obs)
     {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
+        return "Memory allocation failed";
     }
 
-    return RINEX_SUCCESS;
+    return NULL;
 }
 
 /** rnx_open_v3 reads the observation codes in \a p->base.header. */
-static rinex_error_t rnx_open_v3(struct rnx_v23_parser *p)
+static const char *rnx_open_v3(struct rnx_v23_parser *p)
 {
     static const char sys_n_obs[] = "SYS / # / OBS TYPES";
     const char *line;
-    int res, ii, jj, kk, nn, n_obs, system_alloc, obs_alloc;
+    int res, ii, n_obs;
+    char sys_id;
 
     /* Find the (first) SYS / # / OBS TYPES line. */
     line = rinex_find_header(&p->base, sys_n_obs, sizeof sys_n_obs);
     if (!line)
     {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_BAD_FORMAT;
-    }
-
-    /* Initially assume no more than eight satellite systems. */
-    system_alloc = 8;
-    p->system_id = calloc(system_alloc + 1, 1);
-    if (!p->system_id)
-    {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
-    }
-    p->system = calloc(system_alloc, sizeof p->system[0]);
-    if (!p->system)
-    {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
-    }
-
-    /* Initially (conservatively!) assume 20 observations per system. */
-    obs_alloc = 20 * system_alloc;
-    p->obs = calloc(obs_alloc, sizeof p->obs[0]);
-    if (!p->obs)
-    {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
+        return "Could not find SYS / # / OBS TYPES line";
     }
 
     /* Keep going until we find a different header label. */
-    for (kk = nn = 0; !memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1); )
+    while (!memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
     {
         /* How many observations for this system? */
+        sys_id = line[0];
         res = parse_uint(&n_obs, line + 3, 3);
         if (res || (n_obs < 1))
         {
-            p->base.error_line = __LINE__;
-            return RINEX_ERR_BAD_FORMAT;
+            return "Invalid number of observations";
         }
+        p->base.n_obs[sys_id & 31] = n_obs;
 
-        /* Do we need to increase system_alloc? */
-        if (kk >= system_alloc)
+        /* Scan past following lines, 13 observation codes per line. */
+        for (ii = 13; ii < n_obs; ii += 13)
         {
-            system_alloc *= 2;
-            p->system_id = realloc(p->system_id, system_alloc + 1);
-            p->system = realloc(p->system, system_alloc * sizeof(p->system[0]));
-            if (!p->system_id || !p->system)
+            line = strchr(line, '\n') + 1;
+            if ((line[0] != ' ')
+                || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
             {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_SYSTEM;
+                return "Expected a successor SYS / # / OBS TYPES line";
             }
         }
 
-        /* Update the per-system info in \a *p. */
-        p->system_id[kk] = line[0];
-        p->system[kk] = n_obs + (kk ? p->system[kk-1] : 0);
-
-        /* If necessary, increase the size of p->obs. */
-        if (p->system[kk] >= obs_alloc)
-        {
-            /* Increase obs_alloc as needed. */
-            while (p->system[kk] >= obs_alloc)
-            {
-                obs_alloc *= 2;
-            }
-            p->obs = realloc(p->obs, obs_alloc * sizeof(p->obs[0]));
-            if (!p->obs)
-            {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_SYSTEM;
-            }
-        }
-
-        /* Increment our system count. */
-        kk++;
-
-        /* Copy observation codes. */
-        for (ii = 0; ii < n_obs; )
-        {
-            /* After the first line, check that the next one is right. */
-            if (ii)
-            {
-                line = strchr(line, '\n') + 1;
-                if ((line[0] != ' ')
-                    || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
-                {
-                    p->base.error_line = __LINE__;
-                    return RINEX_ERR_BAD_FORMAT;
-                }
-            }
-
-            /* Copy observation codes from this line. */
-            for (jj = 0; (ii < n_obs) && (jj < 13); ++ii, ++jj, ++nn)
-            {
-                /* Zero-init because realloc() does not zero new areas. */
-                p->obs[nn].u64 = 0;
-                p->obs[nn].id.sv[0] = line[0];
-                p->obs[nn].id.obs[0] = line[7 + 4*jj];
-                p->obs[nn].id.obs[1] = line[8 + 4*jj];
-                p->obs[nn].id.obs[2] = line[9 + 4*jj];
-            }
-        }
+        /* Skip to the next line. */
         line = strchr(line, '\n') + 1;
     }
 
-    /* Shrink the arrays we allocated to fit their contents. */
-    p->system_len = kk;
-    p->system_id = realloc(p->system_id, p->system_len + 1);
-    p->system = realloc(p->system, p->system_len * sizeof(p->system[0]));
-
-    p->obs_len = nn;
-    p->obs = realloc(p->obs, p->obs_len * sizeof(p->obs[0]));
-
-    /* Initially assume 500 signals is enough space.
-     * (This is slightly under 2 KiB, which allows some overhead for a
-     * buddy-type allocator, without much internal fragmentation.)
-     */
-    p->signal_alloc = 500;
-    p->base.signal = calloc(p->signal_alloc, sizeof p->base.signal[0]);
-    if (!p->base.signal)
+    /* Initially assume 500 observations is enough. */
+    p->obs_alloc = 500;
+    p->base.lli = calloc(p->obs_alloc, 1);
+    p->base.ssi = calloc(p->obs_alloc, 1);
+    p->base.obs = calloc(p->obs_alloc, sizeof p->base.obs[0]);
+    if (!p->base.lli || !p->base.ssi || !p->base.obs)
     {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
+        return "Memory allocation failed";
     }
 
-    return RINEX_SUCCESS;
+    return NULL;
 }
 
 /** Copy \a in_len bytes of header from \a in to \a out.
@@ -1184,14 +1239,14 @@ static rinex_error_t rnx_copy_header
 }
 
 /* Doc comment is in rinex.h. */
-rinex_error_t rinex_open
+const char *rinex_open
 (
     struct rinex_parser **p_parser,
     struct rinex_stream *stream
 )
 {
     struct rnx_v23_parser *p;
-    rinex_error_t err;
+    const char *err;
     int res;
 
     if (*p_parser)
@@ -1203,8 +1258,7 @@ rinex_error_t rinex_open
     res = stream->advance(stream, BLOCK_SIZE, 0);
     if (res || stream->size < 80)
     {
-        errno = res;
-        return RINEX_ERR_SYSTEM;
+        return strerror(errno);
     }
 
     /* Is it an uncompressed RINEX file? */
@@ -1214,29 +1268,27 @@ rinex_error_t rinex_open
         /* Check that it's an observation file. */
         if (stream->buffer[20] != 'O')
         {
-            return RINEX_ERR_NOT_OBSERVATION;
+            return "Not an observation RINEX file";
         }
 
         /* Check for END OF HEADER. */
         res = find_end_of_header(stream->buffer, stream->size);
         if (res < 1)
         {
-            return RINEX_ERR_BAD_FORMAT;
+            return "Could not find end of header";
         }
 
         /* Allocate the parser structure. */
         if (memcmp("     2.", stream->buffer, 7)
             && memcmp("     3.", stream->buffer, 7))
         {
-            return RINEX_ERR_UNKNOWN_VERSION;
+            return "Unsupported RINEX version number";
         }
         p = calloc(1, sizeof(struct rnx_v23_parser));
         if (!p)
         {
-            errno = ENOMEM;
-            return RINEX_ERR_SYSTEM;
+            return "Memory allocation failed";
         }
-        p->base.signal = NULL;
         p->base.stream = stream;
         p->base.destroy = rnx_free_v23;
 
@@ -1246,9 +1298,8 @@ rinex_error_t rinex_open
         p->base.buffer = calloc(p->buffer_alloc, 1);
         if (!p->base.buffer)
         {
-            errno = ENOMEM;
             free(p);
-            return RINEX_ERR_SYSTEM;
+            return "Memory allocation failed";
         }
 
         /* Copy the header for the caller's use. */
@@ -1256,7 +1307,7 @@ rinex_error_t rinex_open
         if (res < 0)
         {
             free(p);
-            return (rinex_error_t)res;
+            return "Invalid header line detected";
         }
 
         p->base.buffer_len = res;
@@ -1277,65 +1328,12 @@ rinex_error_t rinex_open
         }
 
         *p_parser = &p->base;
-        return RINEX_SUCCESS;
+        return NULL;
     }
 
     /* TODO: support files using Hatanaka compression:
     if (!memcmp("CRX VERS   / TYPE", stream->buffer + 60, 20)) { .. }
      */
 
-    return RINEX_ERR_BAD_FORMAT;
-}
-
-/* Doc comment is in rinex.h. */
-int64_t rinex_parse_obs(const char c[])
-{
-    int64_t value;
-
-#if defined(__SSSE3__)
-    // See Wojciech Muła, http://0x80.pl/notesen/2014-10-15-parsing-decimal-numbers-part-2-sse.html.
-    // c[0..15] looks like "mlkjihgfed.cba__", which requires tweaks.
-    // v_atoi maps ' ' and '-' to 0, and maps ASCII digits to values.
-    const __m128i v_atoi = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-        0, 0, 0, 0, 0, 0);
-    const __m128i mul_1_10 = _mm_setr_epi8(10, 1, 10, 1, 10, 1, 10, 1,
-        10, 1, 0, 1, 10, 1, 0, 0);
-    const __m128i mul_1_100 = _mm_setr_epi16(100, 1, 100, 1,
-        10, 1, 1, 0);
-    const __m128i weight_3 = _mm_setr_epi16(10000, 1, 100, 1, 10000, 1, 100, 1);
-    const __m128i weight_4 = _mm_setr_epi32(100000, 1, 100000, 1);
-    const __m128i v_minus = _mm_setr_epi8('-', '-', '-', '-', '-', '-',
-        '-', '-', '-', '-', 0, 0, 0, 0, 0, 0);
-
-    const __m128i v_obs = _mm_loadu_si128((const __m128i *)c);
-    const __m128i t0 = _mm_shuffle_epi8(v_atoi, v_obs);
-    // t0 = | m | l | k | j | i | h | g | f | e | d | 0 | c | b | a | x | x |
-    const __m128i t1 = _mm_maddubs_epi16(t0, mul_1_10);
-    // t1 = | ml | kj | ih | gf | ed | 0c | ba | 0 |
-    const __m128i t2 = _mm_madd_epi16(t1, mul_1_100);
-    // t2 = | mlkj | ihgf | edc | ba |
-    // As Muła suggests, this could convert two observations together.
-    const __m128i t3 = _mm_packus_epi32(t2, t2);
-    // t3 = | mlkj | ihgf | edc | ba | mlkj | ihgf | edc | ba |
-    const __m128i t4 = _mm_madd_epi16(t3, weight_3);
-    // t4 = | mlkjihgf | edcba | mlkjihgf | edcba |
-    const __m128i t5 = _mm_mul_epu32(t4, weight_4);
-    // t5 = | mlkjihgf00000 | mlkjihgf00000 |
-    const __m128i t6 = _mm_srli_epi64(t4, 32);
-    // t6 = | edcba | edcba |
-    const __m128i t7 = _mm_add_epi64(t5, t6);
-    value = _mm_extract_epi64(t7, 0);
-
-    if (_mm_movemask_epi8(_mm_cmpeq_epi8(v_obs, v_minus)))
-    {
-        value = -value;
-    }
-#else
-    if (parse_fixed(&value, c, 14, 3))
-    {
-        value = INT64_MIN;
-    }
-#endif
-
-    return value;
+    return "Unrecognized file format";
 }

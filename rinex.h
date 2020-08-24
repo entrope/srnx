@@ -36,9 +36,6 @@
 extern "C" {
 #endif /* defined(__cplusplus) */
 
-/** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
-#define RINEX_EXTRA 31
-
 /** rinex_stream is a utility class that abstracts filesystem operations
  * from rinex_file_load().  It provides a buffered view into a stream
  * that can move forward in user-controlled step sizes.
@@ -75,38 +72,21 @@ struct rinex_stream
     unsigned int size;
 };
 
-/** rinex_signal identifies the combination of a satellite (SV) and a
- * signal from it.
- *
- * The #u64 value allows for easy comparison, hash indexing, and similar
- * operations.  The #id structure contains the SV number and observation
- * code in their normal RINEX 2.x or 3.x formats.
- */
-union rinex_signal
-{
-    /** Signal identifier as a single integer. */
-    uint64_t u64;
-
-    /** Signal identifier decomposed into satellite number and
-     * observation code.
-     */
-    struct
-    {
-        /** Satellite number from which this signal was observed. */
-        char sv[4];
-
-        /** Observation code for the measurement. */
-        char obs[4];
-    } id;
-};
-
-typedef union rinex_signal rinex_signal_t;
-
 /** rinex_epoch holds the date, time, epoch flag, count of satellites
  * (or special records or cycle slips), and receiver clock offset.
  */
 struct rinex_epoch
 {
+    /* These values could conceivably be packed into two 64-bit fields,
+     * but that would leave almost no room for growth and would be
+     * awkward to work with, so leave it slightly less compact.
+     *
+     * log2(10000 * 12 * 31 * 24 * 60) = 32.32 (yyyy .. mm)
+     * log2(2*609999999) = 30.2 (seconds)
+     * log2(1.1e14) = ~46.6 (clock offset)
+     * plus 4 bits for flag and 10 bits for n_sats
+     */
+
     /** Decimal-coded date.
      * Contains the sum year * 1000 + month * 100 + day.
      */
@@ -168,41 +148,67 @@ enum rinex_error
 
 typedef enum rinex_error rinex_error_t;
 
-/** rinex_parser is an abstract base type for loading data from
- * RINEX-like files.
+/** rinex_parser is an abstract base type for loading data from files
+ * containing RINEX observation-like data.
  */
 struct rinex_parser
 {
+    /** epoch identifies the current record's epoch. */
+    struct rinex_epoch epoch;
+
     /** buffer_len is the number of bytes of data in #buffer. */
     int buffer_len;
-
-    /** signal_len is the number of observations from this epoch. */
-    int signal_len;
 
     /** error_line indicates where a parse error occurred. */
     int error_line;
 
-    /** buffer contains text related to the current data.
+    /** buffer contains text related to the current record.
      *
      * Before #read is called, this holds the file header.
      *
      * When a special event is read, this holds the event records;
-     * zero or more lines, counted by \a epoch.n_sats, with '\n' as the
-     * line terminator.
+     * zero or more lines, counted by \a epoch.n_sats plus one, with
+     * '\n' as the line terminator.  The first line holds the epoch
+     * information (in case, for example, the presence or absence of a
+     * timestamp is significant).
      *
      * When an observation or cycle slip record is read, this holds the
-     * observation data (#signal_len entries, each 16 bytes long).
+     * satellite names and signal-presence bitfields.  For each observed
+     * satellite, this contains the satellite system identifier (one
+     * character) followed by the satellite number (one byte, where 'A'
+     * corresponds to satellite 65 because 65 is the ASCII code point
+     * for 'A') followed by (N+7)/8 bytes, where N is the number of
+     * observation codes defined in the file header for the satellite
+     * system.  The first observation code is present when the LSB of
+     * the first byte is set, the second observation code is present
+     * when the next LSB of the first byte is set, and so forth.
      */
     char *buffer;
 
-    /** signal contains the signal identifiers for each signal. */
-    rinex_signal_t *signal;
+    /** lli contains the loss-of-lock indicators.  lli[n] corresponds to
+     * the n'th "observation present" bit set in #buffer.
+     */
+    char *lli;
+
+    /** ssi contains the signal strength indocators.  ssi[n] corresponds
+     * to the n'th "observation present" bit set in #buffer.
+     */
+    char *ssi;
+
+    /** obs contains the parsed observation values, times 1000.  obs[n]
+     * corresponds to the n'th "observation present" bit set in #buffer.
+     */
+    int64_t *obs;
+
+    /** n_obs counts the possible observations per satellite system.
+     *
+     * For the satellite system with identifier 'A', n_obs['A' & 31]
+     * indicates the number of observations possible for it.
+     */
+    short n_obs[32];
 
     /** stream is the source of data for this file parser. */
     struct rinex_stream *stream;
-
-    /** epoch identifies the current record's epoch. */
-    struct rinex_epoch epoch;
 
     /** read is the reader function.  It is called to retrieve the next
      * epoch-level record from the file.
@@ -227,9 +233,9 @@ struct rinex_parser
  *   this is not null, rinex_open() first calls rinex_parser.destroy()
  *   on the old parser.
  * \param[in] stream Input stream to use for the parser.
- * \returns A rinex_error status code.
+ * \returns NULL on success, else an explanation of the failure.
  */
-rinex_error_t rinex_open(struct rinex_parser **p_parser, struct rinex_stream *stream);
+const char *rinex_open(struct rinex_parser **p_parser, struct rinex_stream *stream);
 
 /** Finds the start of the first line with the given header label.
  *
@@ -249,30 +255,11 @@ const char *rinex_find_header
     unsigned int sizeof_label
 );
 
-/** rinex_parse_obs parses a 14-character observation code, and returns
- * the value times 1000.
- *
- * \param[in] c A RINEX observation value in F14.3 format.
- * \returns The value times 1000, or INT64_MIN on format error.
- */
-int64_t rinex_parse_obs(const char c[]);
-
 struct rinex_stream *rinex_mmap_stream(const char *filename);
 struct rinex_stream *rinex_stdio_stream(const char *filename);
 struct rinex_stream *rinex_stdin_stream(void);
 
 #if defined(__cplusplus)
-
-inline bool operator<(rinex_signal a, rinex_signal b)
-{
-    return a.u64 < b.u64;
-}
-
-inline bool operator==(rinex_signal a, rinex_signal b)
-{
-    return a.u64 == b.u64;
-}
-
 }
 #endif /* defined(__cplusplus) */
 

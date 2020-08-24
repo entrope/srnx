@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-#include "rinex.h"
+#include "rinex_p.h"
 
 #include <errno.h>
 #include <limits.h>

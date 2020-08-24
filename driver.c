@@ -42,7 +42,7 @@ int main(int argc, char *argv[])
     const char *filename;
     struct rinex_stream *s = NULL;
     struct rinex_parser *p = NULL;
-    enum rinex_error err;
+    const char *err;
     int ii, use_mmap;
 
     for (ii = 1, use_mmap = 1; ii < argc; ++ii)
@@ -78,9 +78,9 @@ int main(int argc, char *argv[])
         }
 
         err = rinex_open(&p, s);
-        if (err != RINEX_SUCCESS)
+        if (err)
         {
-            printf("Unable to open %s: %d\n", filename, err);
+            printf("Unable to open %s: %s\n", filename, err);
             continue;
         }
 

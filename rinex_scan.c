@@ -27,9 +27,10 @@
 
 void process_file(struct rinex_parser *p, const char filename[])
 {
-    int count, max_sigs;
+    int count, max_obs, max_sats, ii, jj, n_obs, sys_obs;
+    const char *buffer;
 
-    for (count = max_sigs = 0; ; ++count)
+    for (count = max_obs = max_sats = 0; ; ++count)
     {
         int res = p->read(p);
         if (res <= 0)
@@ -41,11 +42,41 @@ void process_file(struct rinex_parser *p, const char filename[])
             }
             break;
         }
-        if (max_sigs < p->signal_len)
+
+        /* Ignore lines that do not include observations. */
+        if (p->epoch.flag != '0' && p->epoch.flag != '1')
         {
-            max_sigs = p->signal_len;
+            continue;
+        }
+        if (max_sats < p->epoch.n_sats)
+        {
+            max_sats = p->epoch.n_sats;
+        }
+
+        buffer = p->buffer;
+        for (ii = n_obs = 0; ii < p->epoch.n_sats; ++ii)
+        {
+            sys_obs = p->n_obs[buffer[0] & 31];
+            for (jj = 0; jj < (sys_obs + 7) >> 3; ++jj)
+            {
+                n_obs += __builtin_popcount(buffer[2+jj] & 255);
+            }
+            buffer += 2 + jj;
+        }
+
+        if (max_obs < n_obs)
+        {
+            max_obs = n_obs;
+        }
+
+        if (verbose)
+        {
+            printf("%08d %04d %9d %2d %3d\n",
+                p->epoch.yyyy_mm_dd, p->epoch.hh_mm, p->epoch.sec_e7,
+                p->epoch.n_sats, n_obs);
         }
     }
 
-    printf("%s: %d records, max %d signals\n", filename, count, max_sigs);
+    printf("%s: %d records, max %d observations from %d satellites\n",
+        filename, count, max_obs, max_sats);
 }
