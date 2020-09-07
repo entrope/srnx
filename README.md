@@ -1,20 +1,20 @@
-= File format notes
+# File format notes
 
-== Epoch flags
+## Epoch flags
 
 Both RINEX 2.11 and 3.04 define seven epoch flags: 0, 1 and 6 use the
 respective observation format; 2 through 5 use the special event format.
 
-== Satellite names
+## Satellite names
 
 RINEX 2.11 defines four satellite system identifiers; RINEX 3.04 defines
 seven.  Each identifies up to 100 satellites, although 00 is presumably
-reserved, and the likely count is much smaller.
+reserved, and the typical count is much smaller.
 
 For example, SBAS PRNs range from 120 through 158 inclusive, so never
 use 00 through 19 or above 58; QZSS uses only 01 through 09.
 
-== Observation codes
+## Observation codes
 
 RINEX 2.11 defines 26 observation codes, out of about 40 potential names
 using the general naming scheme.
@@ -28,64 +28,37 @@ potential names (potentially 936 considering the whole alphabet).
 Defined: See the RINEX 3.xx specification.
 Pattern: {C,L,D,S}{1,2,3,4,5,6,7,8,9}{A,B,C,D,E,I,L,M,N,P,Q,S,W,X,Y,Z}
 
-== Satellite indexing
+## Satellite indexing
 
 RINEX v2.11 defines four satellite system codes: G, R, S, E, and for
 GPS-only observation files, blank.
 RINEX v3.04 adds J, C, and I.
 
-These are unique in their five LSBs: ' '=0x20, 'C'=0x43, 'E'=0x45,
-'G'=0x47, 'I'=0x49, 'J'=0x4A, 'R'=0x52, 'S'=0x53.  We can use this to
-speed up per-system information lookups; this extends to other capital
-letters, should more be assigned.
+Letters plus space will be distinct in the five LSBs, allowing for easy
+lookup into a reasonably-sized table.
 
-= Other notes
+# In-memory storage
 
-== In-memory storage
+Rather than hashing sv+obs, it is better to use a lookup tree: Index by
+system identifier & 31 to get an offset into a table of all satellites.
 
-Rather than hashing sv+obs, it is probably better to use a lookup tree:
-Index by system identifier & 31, which has tables for each satellite
-observed for that system (1..N).  Each satellite has per-signal tables:
+Each satellite has per-signal tables:
  - Number of observations used & allocated
- - Padding/reserved word (or satellite name?)
  - Number of runs
  - Latest epoch # observed
- - Interleaved gap/run length array (w/ used & allocated)
+ - Interleaved gap/run length array
  - Observations (across all runs)
  - LLI (across all runs)
  - SSI (across all runs)
-Or maybe (system id) & 31 provides a base index and SV count, and all
-satellites are then in one table.
 
-== Generating flame graphs
+# Generating flame graphs
 
 perf record -F399 -g ...
 perf script | stackcollapse-perf.pl > out.perf-folded && flamegraph.pl out.perf-folded > perf-scan.svg
 
-== Compression thoughts
+# Empirical data from day 2020/200
 
-Candidate encoding schemes:
- - Observation epochs: quasi-RLE over HH:MM:SS.SSSSSSS, assuming
-   60-second minutes (i.e. break out of RLE for leap seconds and at the
-   end of each day)
- - Epoch indexes: RLE over presence bits
- - LLI, SSI: RLE
- - Observation data: Nth-order delta (1..5? typically 2..3) followed by:
-   (1) base128 or (2) BP32 (with leftovers using base128).
-   - State reset between runs or not?
-
-Maybe the ideal compression is to use BP32-like encoding from Lemire &
-Boytsov [1] with SIMD bit transpositions [2].  We can probably do better
-than [2] by exploiting knowledge of our "matrix" width, particularly in
-the common case that values can all be represented by s32 integers.
-(Load 256-bit vectors w/ VPERMD, VPMOVMSKB w/ shifts, VPSRLD, repeat
-last two steps as needed.)
-
-[1]- https://onlinelibrary.wiley.com/doi/full/10.1002/spe.2203
-[2]- https://mischasan.wordpress.com/2011/10/03/the-full-sse2-bit-matrix-transpose-routine/
-
-== Empirical data from day 2020/200
-
+```
 zrange = [ -336042201777 361882386254; -670837676888 669131761241; -1211061312768 1215589743403; -2420368136452 2421537307808; -4841905444260 4839570043541; ];
 lrsb = [ 20 0 0 0 0 162;
  21 0 0 0 212 351103;
@@ -137,3 +110,4 @@ lrsb = [ 20 0 0 0 0 162;
 ./rinex_scan ~/misc/crx/p052/p0520??0.20o  14.56s user 1.10s system 99% cpu 15.671 total
 ( for foo in ~/misc/crx/p052/p0520??0.20o; do; echo $foo; rnx2crx $foo - > ; )  246.94s user 4.43s system 99% cpu 4:11.65 total
 ./rinex_analyze ~/misc/crx/p052/p0520??0.20o  63.11s user 1.97s system 99% cpu 1:05.11 total
+```
