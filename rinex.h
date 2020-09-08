@@ -88,7 +88,7 @@ struct rinex_epoch
      */
 
     /** Decimal-coded date.
-     * Contains the sum year * 1000 + month * 100 + day.
+     * Contains the sum year * 10000 + month * 100 + day.
      */
     int yyyy_mm_dd;
 
