@@ -35,126 +35,6 @@
 # include <x86intrin.h>
 #endif
 
-/** Searches for \a needle in \a haystack.
- *
- * \param[in] haystack Data to search in.
- * \param[in] h_size Number of bytes in \a haystack.
- * \param[in] needle Data to search for.
- * \param[in] n_size Number of bytes in \a needle.
- * \returns A pointer to the first instance of \a needle within
- *   \a haystack, or NULL if \a haystack does not contain \a needle.
- */
-static void *memmem
-(
-    const char *haystack, size_t h_size,
-    const char *needle, size_t n_size
-)
-{
-    size_t ii;
-
-    if (n_size > h_size)
-    {
-        assert(n_size <= h_size);
-        return NULL;
-    }
-
-    for (ii = 0; ii < h_size - n_size; ++ii)
-    {
-        if (!memcmp(haystack + ii, needle, n_size))
-        {
-            return (void *)haystack + ii;
-        }
-    }
-
-    return NULL;
-}
-
-/** Search for the RINEX "END OF HEADER" line.
- * 
- * \param[in] in Buffer containing the entire plausible header.
- * \param[in] in_size Length of \a in.
- * \returns RINEX error code on failure, length of the header otherwise.
- */
-static int find_end_of_header
-(
-    const char in[],
-    size_t in_size
-)
-{
-    static const char end_of_header[] = "END OF HEADER";
-    char *pos;
-    int ofs = 0, ii;
-
-    while (1)
-    {
-        pos = memmem(in + ofs, in_size, end_of_header, sizeof end_of_header - 1);
-        if (!pos || pos < in + 60)
-        {
-            return RINEX_ERR_BAD_FORMAT;
-        }
-        if (pos[-61] != '\n')
-        {
-            ofs = (pos - in) + 1;
-            continue;
-        }
-
-        for (ii = sizeof end_of_header - 1; ii < 21; ++ii)
-        {
-            if (pos[ii] != ' ')
-            {
-                break;
-            }
-        }
-
-        if (pos[ii] != '\n')
-        {
-            return RINEX_ERR_BAD_FORMAT;
-        }
-        ofs = (pos - in) + 1 + ii;
-        return ofs;
-    }
-}
-
-/** Parses an unsigned integer field of \a width bytes starting at
- * \a start.
- *
- * If the field is all spaces (' '), writes 0 to \a *p_out and returns 0.
- *
- * \param[out] p_out Receives the parsed integer.
- * \param[in] start Start of the text field to parse.
- * \param[in] width Width of field in characters.
- * \returns Zero on success, else EINVAL if the field had any characters
- *   except spaces and digits or if a space followed a digit.
- */
-static int parse_uint
-(
-    int *p_out,
-    const char *start,
-    int width
-)
-{
-    int value = 0;
-
-    /* Skip past leading whitespace. */
-    for (; width > 0 && *start == ' '; width--, start++) 
-    {
-        /* no operation */
-    }
-
-    for (; width > 0; width--, start++)
-    {
-        if (!isdigit(*start))
-        {
-            return EINVAL;
-        }
-
-        value = value * 10 + *start - '0';
-    }
-
-    *p_out = value;
-    return 0;
-}
-
 /** Parses a fixed-point decimal field.
  *
  * A valid field consists of \a width - \a frac - 1 characters as a
@@ -1066,15 +946,15 @@ const char *rinex_find_header
     unsigned int sizeof_label
 )
 {
-    char *pos;
+    int ofs;
 
-    pos = memmem(p->buffer + 61, p->buffer_len - 61, label, sizeof_label - 1);
-    if (!pos || pos[-61] != '\n')
+    ofs = rnx_find_header(p->buffer, p->buffer_len, label, sizeof_label);
+    if (ofs < 0)
     {
         return NULL;
     }
 
-    return pos - 60;
+    return p->buffer + ofs;
 }
 
 /** rnx_open_v2 reads the observation codes in \a p->base.header. */
@@ -1245,6 +1125,7 @@ const char *rinex_open
     struct rinex_stream *stream
 )
 {
+    static const char end_of_header[] = "END OF HEADER";
     struct rnx_v23_parser *p;
     const char *err;
     int res;
@@ -1272,11 +1153,13 @@ const char *rinex_open
         }
 
         /* Check for END OF HEADER. */
-        res = find_end_of_header(stream->buffer, stream->size);
+        res = rnx_find_header(stream->buffer, stream->size, end_of_header,
+            sizeof end_of_header);
         if (res < 1)
         {
             return "Could not find end of header";
         }
+        res = strchr(stream->buffer + res, '\n') - stream->buffer + 1;
 
         /* Allocate the parser structure. */
         if (memcmp("     2.", stream->buffer, 7)

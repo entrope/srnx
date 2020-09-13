@@ -52,14 +52,6 @@ struct rinex_stream_mmap
     int fd;
 };
 
-/** dev_zero is a file descriptor for /dev/zero, used to mmap empty
- * pages past the end of real data (when needed).
- */
-static int dev_zero = -1;
-
-/** page_size is the value of sysconf(_SC_PAGE_SIZE). */
-static long page_size = 0;
-
 static int rinex_mmap_advance(
     struct rinex_stream *stream_base,
     unsigned int req_size,
@@ -142,13 +134,9 @@ success:
         return 0;
     }
 
-    stream->map = mmap(NULL, stream->total, PROT_READ, MAP_SHARED, dev_zero, 0);
+    stream->map = rnx_mmap_padded(stream->fd, base_offset,
+        eff_len - base_offset, stream->total);
     if (stream->map == MAP_FAILED)
-    {
-        return errno;
-    }
-    if (MAP_FAILED == mmap(stream->map, eff_len - base_offset, PROT_READ,
-        MAP_SHARED | MAP_FIXED, stream->fd, base_offset))
     {
         return errno;
     }
@@ -184,19 +172,9 @@ struct rinex_stream *rinex_mmap_stream(const char *filename)
         return NULL;
     }
 
-    if (dev_zero < 0)
+    if (!page_size && rnx_mmap_init())
     {
-        dev_zero = open("/dev/zero", O_RDONLY);
-        if (dev_zero < 0)
-        {
-            return NULL;
-        }
-
-        page_size = sysconf(_SC_PAGE_SIZE);
-        if (page_size <= 0)
-        {
-            return NULL;
-        }
+        return NULL;
     }
 
     str->fd = open(filename, O_RDONLY);

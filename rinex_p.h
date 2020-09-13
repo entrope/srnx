@@ -25,6 +25,9 @@
 #if !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4)
 #define RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4
 
+#include <fcntl.h>
+#include <stddef.h>
+
 #include "rinex.h"
 
 /** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
@@ -32,6 +35,9 @@
 
 /** BLOCK_SIZE is how much data we normally try to read into a buffer. */
 #define BLOCK_SIZE (1024 * 1024 - RINEX_EXTRA)
+
+/** page_size is the value of sysconf(_SC_PAGE_SIZE). */
+extern long page_size;
 
 /** rnx_v23_parser is a RINEX v2.xx or v3.xx parser. */
 struct rnx_v23_parser
@@ -50,5 +56,73 @@ struct rnx_v23_parser
     /** parse_ofs is the current read offset in base.stream->buffer. */
     uint64_t parse_ofs;
 };
+
+/** Initializes #page_size and other internal mmap state.
+ *
+ * \returns Zero on success, non-zero (setting errno) on failure.
+ */
+int rnx_mmap_init(void);
+
+/** Memory-maps a zero-padded block from \a fd for reading.
+ *
+ * \warning \a offset and \a tot_len must be aligned to multiples of #page_size.
+ * \param[in] fd File descriptor to map from.
+ * \param[in] offset Byte offset within file to map at.
+ * \param[in] len Length of file region to map.
+ * \param[in] tot_len Total length of region to memory-map.
+ * \returns MAP_FAILED on failure (setting errno), otherwise a non-null
+ *   pointer to the memory-mapped file contents.
+ */
+void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len);
+
+/** Searches for \a needle in \a haystack.
+ *
+ * \param[in] haystack Data to search in.
+ * \param[in] h_size Number of bytes in \a haystack.
+ * \param[in] needle Data to search for.
+ * \param[in] n_size Number of bytes in \a needle.
+ * \returns A pointer to the first instance of \a needle within
+ *   \a haystack, or NULL if \a haystack does not contain \a needle.
+ */
+void *memmem
+(
+    const char *haystack, size_t h_size,
+    const char *needle, size_t n_size
+);
+
+/** Search for a RINEX header line.
+ *
+ * \param[in] in Buffer containing the entire plausible header.
+ * \param[in] in_size Length of \a in.
+ * \param[in] header Text of header to search for.
+ * \param[in] sizeof_header sizeof(header), including trailing NULL.
+ * \returns RINEX error code on failure, otherwise the offset of the
+ *   start of the header line.
+ */
+int rnx_find_header
+(
+    const char in[],
+    size_t in_size,
+    const char header[],
+    size_t sizeof_header
+);
+
+/** Parses an unsigned integer field of \a width bytes starting at
+ * \a start.
+ *
+ * If the field is all spaces (' '), writes 0 to \a *p_out and returns 0.
+ *
+ * \param[out] p_out Receives the parsed integer.
+ * \param[in] start Start of the text field to parse.
+ * \param[in] width Width of field in characters.
+ * \returns Zero on success, else EINVAL if the field had any characters
+ *   except spaces and digits or if a space followed a digit.
+ */
+int parse_uint
+(
+    int *p_out,
+    const char *start,
+    int width
+);
 
 #endif /* !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4) */
