@@ -6,7 +6,8 @@ CFLAGS = -Wall -Wextra -Werror -O3 -g -march=native
 clean:
 	rm -f librinex.a *.o rinex_analyze rinex_scan
 
-librinex.a: driver.o rinex_mmap.o rinex_p.o rinex_parse.o rinex_stdio.o
+librinex.a: driver.o rinex_mmap.o rinex_p.o rinex_parse.o rinex_stdio.o \
+	srnx.o
 	ar crs $@ $?
 
 rinex_analyze: rinex_analyze.c librinex.a
