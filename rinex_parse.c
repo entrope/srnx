@@ -1115,7 +1115,7 @@ static rinex_error_t rnx_copy_header
         ++jj;
     }
 
-    return 0;
+    return jj;
 }
 
 /* Doc comment is in rinex.h. */
