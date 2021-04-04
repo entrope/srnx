@@ -209,9 +209,10 @@ Conceptually, the observation data is divided by the scale, then
 its nth-order deltas are calculated (for 0 <= `n` < 8), and the deltas
 are block-encoded.
 
-The packed observation data begins with a ULEB128 value that identifies
-the encoding schema: `n` for the delta order, plus 8 if an explicit
-scaling value is present.
+The packed observation data begins with a ULEB128 value that gives the
+length of the remaining packed observation data, followed by a ULEB128
+value that identifies the encoding schema: the sum of the delta order `n`
+and either 8 (if an explicit scaling value is present) or 0 (otherwise).
 
 If an explicit scale is used, it is stored as a ULEB128 indicating the
 scale times 1000.
@@ -233,18 +234,18 @@ Each block begins with one byte that identifies the block packing.
 | `000kkkkk` | 8*`(k+1)` bit matrix |
 | `001kkkkk` | 16*`(k+1)` bit matrix |
 | `010kkkkk` | 32*`(k+1)` bit matrix |
-| `011kkkkk` | 64*`(k+1)` bit matrix |
 | `11111110` | ULEB128 count-minus-1 of empty values |
 | `11111111` | ULEB128 count-minus-1 of SLEB128 values |
 | others | reserved |
 
 An `m*(k+1)` bit matrix is stored as `m` values, each with `k+1` bits in
 the file, in bitwise transposed order.
-That is, the least significant bit from each value is stored first, with
-the LSB of the first value in the LSB of the first byte and continuing
-for `m/8` bytes.
-The `k+1` bits are in two's-complement format, so the `k+1`'th bit may
-need to be repeated to sign-extend the values.
+That is, the most significant bit from each value is stored first, with
+the MSB of the first value in the MSB of the first byte and continuing
+for `m/8` bytes.  (Thus the `m*(k+1)` bit matrix is represented as `k+1`
+values, each `m` bits long, in big-endian bit and byte order.)
+The `k+1` bits are in two's-complement format, so the first (most
+significant) bit is repeated to sign-extend the values.
 
 The use of this bit matrix representation was inspired by
 [Lemire and Boytsov, 2013](https://onlinelibrary.wiley.com/doi/full/10.1002/spe.2203).

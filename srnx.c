@@ -59,13 +59,15 @@ struct srnx_system_info
     int codes_len;
 };
 
+/* Doc comment in srnx.h. */
 struct srnx_reader
 {
     /** Pointer to the memory-mapped file data. */
     const char *data;
 
-    /** Valid length of #data, excluding the file digest and one
-     * chunk digest.
+    /** Valid length of #data, excluding the file digest and one chunk
+     * digest.  (This means it is just past the end of the last valid
+     * chunk, simplifying bounds checking.)
      */
     size_t data_size;
 
@@ -110,6 +112,7 @@ struct srnx_reader
     struct srnx_system_info sys_info[33];
 };
 
+/* Doc comment in srnx.h. */
 struct srnx_obs_reader
 {
     /** SRNX reader that this reader is associated with. */
@@ -332,7 +335,7 @@ static int srnx_parse_rhdr_v2(
     }
 
     /* Load the observation code names.
-     * ii counts total observation codes loaded, jj is per-line count.
+     * ii counts total observation codes loaded, jj counts per line.
      */
     for (ii = jj = 0; ii < n_obs; ++ii, ++jj)
     {
@@ -500,11 +503,6 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[])
             free((*p_srnx)->sys_info[ul].code);
             (*p_srnx)->sys_info[ul].code = NULL;
             (*p_srnx)->sys_info[ul].codes_len = 0;
-        }
-
-        if ((*p_srnx)->sys_info)
-        {
-            free((*p_srnx)->sys_info);
         }
 
         memset(*p_srnx, 0, sizeof **p_srnx);
@@ -691,7 +689,7 @@ int srnx_get_header(
  *
  * \param[in] srnx SRNX file to read.
  * \param[in] fourcc Four-character code identifying the chunk type.
- * \param[in] whence Starting offset to search at.
+ * \param[in] whence Starting offset to search at.  Must be a chunk start.
  * \param[out] p_payload Receives pointer to target chunk's payload.
  * \param[out] p_len Receives length of chunk's payload.
  * \param[out] p_start If not NULL, receives the offset of the chunk start.
@@ -1455,42 +1453,6 @@ int srnx_read_obs_ssi_lli(
     return decompress_indicators(*p_ssi, n_values, inds, inds + u64);
 }
 
-/** Transposes and sign-extends an 8 by `n` bit matrix.
- *
- * \param[out] out Receives transposed, sign-extended values.
- * \param[in] in Transposed input matrix.
- * \param[in] bits Number of bits (uint8_t's) in \a in.
- */
-static void transpose_8(int64_t *out, const char *in, int bits)
-{}
-
-/** Transposes and sign-extends a 16 by `n` bit matrix.
- *
- * \param[out] out Receives transposed, sign-extended values.
- * \param[in] in Transposed input matrix.
- * \param[in] bits Number of bits (uint16_t's) in \a in.
- */
-static void transpose_16(int64_t *out, const char *in, int bits)
-{}
-
-/** Transposes and sign-extends a 32 by `n` bit matrix.
- *
- * \param[out] out Receives transposed, sign-extended values.
- * \param[in] in Transposed input matrix.
- * \param[in] bits Number of bits (uint32_t's) in \a in.
- */
-static void transpose_32(int64_t *out, const char *in, int bits)
-{}
-
-/** Transposes and sign-extends a 64 by `n` bit matrix.
- *
- * \param[out] out Receives transposed, sign-extended values.
- * \param[in] in Transposed input matrix.
- * \param[in] bits Number of bits (uint8_t's) in \a in.
- */
-static void transpose_64(int64_t *out, const char *in, int bits)
-{}
-
 /** Attempts to decode observations from the SRNX file into \a p_socd.
  *
  * This reads observations from \a p_socd->data_offset into
@@ -1589,11 +1551,11 @@ static int decode_observations(
         }
 
         /* It looks like a transposed bit matrix. */
-        count = 8 << (count >> 5); /* number of output values */
+        count = 8 << (ch >> 5); /* number of output values */
         bits = (ch & 31) + 1; /* bits per output value */
 
         /* Is the word count valid?  Do we have enough data? */
-        if ((count > 64) || (data + (count >> 3) * bits > end))
+        if ((count > 32) || (data + (count >> 3) * bits > end))
         {
             res = SRNX_CORRUPT;
             goto out;
@@ -1606,13 +1568,7 @@ static int decode_observations(
         }
 
         /* Transpose the matrix. */
-        switch (count)
-        {
-        case  8: transpose_8 (p_socd->obs + idx, data, bits); break;
-        case 16: transpose_16(p_socd->obs + idx, data, bits); break;
-        case 32: transpose_32(p_socd->obs + idx, data, bits); break;
-        case 64: transpose_64(p_socd->obs + idx, data, bits); break;
-        }
+        transpose(p_socd->obs + idx, data, bits, count);
 
         /* Update bookkeeping. */
         avail -= bits;
