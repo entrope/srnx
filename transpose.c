@@ -27,7 +27,7 @@
 #include <string.h>
 
 #ifdef __x86_64__
-#include <x86intrin.h>
+# include <x86intrin.h>
 #endif
 
 #include "transpose.h"

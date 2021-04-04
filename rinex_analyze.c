@@ -24,8 +24,12 @@
 
 #include "driver.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <x86intrin.h>
+
+#ifdef __x86_64__
+# include <x86intrin.h>
+#endif
 
 /** run_info identifies the start epoch and length of a contiguous set
  * of epochs.
@@ -620,8 +624,8 @@ static void analyze_compression(const char filename[], int64_t grand_total)
         grand_total += sv_total;
     }
 
-    printf("%s: %d signals in %d epochs: %ld bytes\n",
-        filename, n_sigs, data.n_epoch, grand_total);
+    printf("%s: %d signals in %d epochs: %lld bytes\n",
+        filename, n_sigs, data.n_epoch, (long long)grand_total);
 }
 
 void process_file(struct rinex_parser *p, const char filename[])
@@ -680,13 +684,15 @@ void finish()
     printf("\nzrange = [");
     for (int ii = 0; ii < 5; ++ii)
     {
-        printf(" %ld %ld;", min_s128[ii], max_s128[ii]);
+        printf(" %lld %lld;", (long long)min_s128[ii], (long long)max_s128[ii]);
     }
     printf(" ];\nlrsb = [");
     for (int ii = 0; ii < 64; ++ii)
     {
-        printf(" %d %lu %lu %lu %lu %lu;\n", ii, rlsb[0][ii],
-            rlsb[1][ii], rlsb[2][ii], rlsb[3][ii], rlsb[4][ii]);
+        printf(" %d %llu %llu %llu %llu %llu;\n", ii,
+            (long long)rlsb[0][ii], (long long)rlsb[1][ii],
+            (long long)rlsb[2][ii], (long long)rlsb[3][ii],
+            (long long)rlsb[4][ii]);
     }
     printf("]\n");
 }

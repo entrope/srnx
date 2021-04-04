@@ -34,7 +34,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <x86intrin.h>
+
+#ifdef __x86_64__
+# include <x86intrin.h>
+#endif
 
 #if !defined(O_CLOEXEC)
 # define O_CLOEXEC 0

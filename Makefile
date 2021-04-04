@@ -1,10 +1,11 @@
 all: librinex.a rinex_analyze rinex_scan transpose_test
 
+CC = aarch64-linux-gnu-gcc
 CFLAGS = -Wall -Wextra -Werror -O3 -g
 
 .PHONY: clean
 clean:
-	rm -f librinex.a *.o rinex_analyze rinex_scan transpose_test
+	rm -f librinex.a *.o *.s rinex_analyze rinex_scan transpose_test
 
 librinex.a: driver.o rinex_mmap.o rinex_p.o rinex_parse.o rinex_stdio.o \
 	srnx.o transpose.o
@@ -18,9 +19,11 @@ rinex_scan: rinex_scan.c librinex.a
 
 transpose_test: transpose_test.c librinex.a
 
+%.s: %.c
+	$(CC) $(CFLAGS) -S -o $@ $<
+
 # For performance analysis, do something like this:
-# make transpose.o
-# objdump -d --no-show-raw-insn transpose.o | cut -d':' -f2 > transpose.s
+# make transpose.s
 # (edit transpose.s to insert # LLVM-MCA-BEGIN / # LLVM-MCA-END pairs)
 # llvm-mca --bottleneck-analysis --mcpu=cascadelake transpose.s
 #
