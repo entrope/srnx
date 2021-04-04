@@ -268,6 +268,14 @@ int srnx_read_obs_value(
     int64_t *p_value
 );
 
+/** Unallocates resources used by \a p_socd.
+ *
+ * \param[in] p_socd Pointer to observation-reader object to free.
+ */
+void srnx_free_obs_reader(
+    struct srnx_obs_reader *p_socd
+);
+
 /** Converts a vector of int64_t to a vector of double¸ in place.
  *
  * This function is specific to RINEX-type data: in addition to scaling

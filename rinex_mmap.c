@@ -174,6 +174,7 @@ struct rinex_stream *rinex_mmap_stream(const char *filename)
 
     if (!page_size && rnx_mmap_init())
     {
+        free(str);
         return NULL;
     }
 

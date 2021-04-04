@@ -1349,10 +1349,10 @@ int srnx_open_obs_by_index(
     data_end = rptr - srnx->data + u64;
 
     /* Allocate *p_rdr if necessary. */
-    if (*p_rdr)
+    if (!*p_rdr)
     {
         *p_rdr = malloc(sizeof **p_rdr);
-        if (!p_rdr)
+        if (!*p_rdr)
         {
             srnx->error_line = __LINE__;
             return ENOMEM;
@@ -1367,6 +1367,11 @@ int srnx_open_obs_by_index(
     (*p_rdr)->data_offset = rptr - srnx->data;
     (*p_rdr)->data_end = data_end;
     return 0;
+}
+
+void srnx_free_obs_reader(struct srnx_obs_reader *p_socd)
+{
+    free(p_socd);
 }
 
 /** Decompresses indicators from [\a in, \a end) into \a out.
@@ -1512,7 +1517,6 @@ static int decode_observations(
                     if (data > end)
                     {
                         p_socd->block_left -= ii;
-                        avail -= ii;
                         res = SRNX_CORRUPT;
                         goto out;
                     }
@@ -1571,7 +1575,6 @@ static int decode_observations(
         transpose(p_socd->obs + idx, data, bits, count);
 
         /* Update bookkeeping. */
-        avail -= bits;
         data += bits;
         idx += count;
     }
@@ -1747,6 +1750,7 @@ int srnx_get_obs_by_index(
         if (res)
         {
             srnx->error_line = __LINE__;
+            srnx_free_obs_reader(p_socd);
             return res;
         }
 
@@ -1755,6 +1759,7 @@ int srnx_get_obs_by_index(
         if (!obs)
         {
             srnx->error_line = __LINE__;
+            srnx_free_obs_reader(p_socd);
             return ENOMEM;
         }
         p_obs[ii] = obs;
@@ -1766,6 +1771,7 @@ int srnx_get_obs_by_index(
             if (res)
             {
                 srnx->error_line = __LINE__;
+                srnx_free_obs_reader(p_socd);
                 return res;
             }
 
@@ -1781,6 +1787,9 @@ int srnx_get_obs_by_index(
             jj += count;
         }
     }
+
+    /* Deallocate the reader. */
+    srnx_free_obs_reader(p_socd);
 
     return 0;
 }
