@@ -47,7 +47,7 @@
 #define MATRIX_16X 0x20
 #define MATRIX_32X 0x40
 #define MATRIX_64X 0x60
-#define BLOCK_EMPTY 0xFE
+#define BLOCK_ZERO 0xFE
 #define BLOCK_SLEB128 0xFF
 
 /** srnx_system_info holds information about a satellite system's
@@ -124,11 +124,20 @@ struct srnx_obs_reader
     /** Number of valid elements in #obs. */
     unsigned short obs_valid;
 
+    /* Manually control the location of padding. */
+    unsigned char pad[3];
+
     /** Read pointer within #obs. */
     unsigned char obs_idx;
 
+    /** Order of delta coding (0 to 7 inclusive). */
+    unsigned char order;
+
     /** When block_left > 0, what type is the block? */
-    char block_code;
+    unsigned char block_code;
+
+    /** Observation scaling value. */
+    unsigned int scale;
 
     /** If we are in the middle of decoding a block of observations, how
      * many are left?
@@ -138,21 +147,23 @@ struct srnx_obs_reader
     /** Number of observation values in the SOCD chunk. */
     uint64_t n_values;
 
-    /** Observation scaling value. */
-    uint64_t scale;
-
-    /* The following offsets are all relative to \a parent->data. */
-
-    /** Offset of (RLE-compressed) LLI indicator block. */
+    /** Offset of (RLE-compressed) LLI indicator block, relative to \a parent->data. */
     uint64_t lli_offset;
 
-    /** Offset of next observation read position. */
+    /** Offset of next observation read position, relative to \a parent->data. */
     uint64_t data_offset;
 
     /** End of SOCD payload. */
     uint64_t data_end;
 
-    /* TODO: Add scaling factor, delta coding state. */
+    /** Delta coding state vector.
+     *
+     * \a delta[0] is the last raw value to be written to \a obs,
+     * \a delta[1] is \a delta[0] minus the previous raw value written,
+     * \a delta[2] is \a delta[1] minus the previous \a delta[1],
+     * and so forth, up to \a delta[order] .
+     */
+    int64_t delta[8];
 
     /** Decoded observation values. */
     int64_t obs[256];
@@ -483,7 +494,10 @@ static int srnx_parse_rhdr(
 }
 
 /* Doc comment in srnx.h. */
-/* TODO: Optionally check file and chunk digests. */
+/* TODO: Optionally check file and chunk digests.
+ * (Default to checking chunk digests, but allow the app to disable
+ * that.  Provide a function to check the whole-file digest.)
+ */
 int srnx_open(struct srnx_reader **p_srnx, const char filename[])
 {
     struct stat sbuf;
@@ -1270,6 +1284,37 @@ static int64_t srnx_find_socd(
     return SRNX_UNKNOWN_CODE;
 }
 
+/** Reads the initial delta decoder state in \a *p_socd.
+ *
+ * This reads the first \a p_socd->order delta decoder values into
+ * \a p_socd->delta, so that #undelta_and_scale() can be called.
+ *
+ * \param[in,out] p_socd Observation reader object to initialize.
+ */
+static int prime_delta_decoder(
+    struct srnx_obs_reader *p_socd
+)
+{
+    const char *end;
+    const char *rptr;
+    int ii;
+
+    end = p_socd->parent->data + p_socd->data_end;
+    rptr = p_socd->parent->data + p_socd->data_offset;
+    for (ii = 0; ii < p_socd->order; ++ii)
+    {
+        p_socd->delta[ii] = sleb128(&rptr);
+        if (rptr > end)
+        {
+            return SRNX_CORRUPT;
+        }
+    }
+
+    /* Update data_offset and report success. */
+    p_socd->data_offset = rptr - p_socd->parent->data;
+    return 0;
+}
+
 /* Doc comment in srnx.h. */
 int srnx_open_obs_by_index(
     struct srnx_reader *srnx,
@@ -1279,10 +1324,10 @@ int srnx_open_obs_by_index(
 )
 {
     const char *rptr;
-    uint64_t u64, n_values, lli_offset, data_end;
+    uint64_t u64, n_values, lli_offset, data_end, scale_order, scale;
     int64_t socd_offset;
     struct srnx_obs_code code;
-    int sys_idx;
+    int sys_idx, err;
 
     /* Is the satellite system known for this file? */
     sys_idx = srnx->sys_idx[name.name[0] & 31];
@@ -1351,6 +1396,26 @@ int srnx_open_obs_by_index(
     }
     data_end = rptr - srnx->data + u64;
 
+    /* Read the scale-presence and order value. */
+    scale_order = uleb128(&rptr);
+    if (scale_order > 15 || rptr > srnx->data + srnx->data_size)
+    {
+        srnx->error_line = __LINE__;
+        return SRNX_CORRUPT;
+    }
+
+    /* Is there a scale value? */
+    scale = 1;
+    if (scale_order & 8)
+    {
+        scale = uleb128(&rptr);
+        if (scale > 1000000000 || rptr > srnx->data + srnx->data_size)
+        {
+            srnx->error_line = __LINE__;
+            return SRNX_CORRUPT;
+        }
+    }
+
     /* Allocate *p_rdr if necessary. */
     if (!*p_rdr)
     {
@@ -1362,16 +1427,28 @@ int srnx_open_obs_by_index(
         }
     }
 
-    /* Initialize everything we need to keep. */
+    /* Store everything we need to keep. */
     memset(*p_rdr, 0, sizeof **p_rdr);
+    (*p_rdr)->order = scale_order & 7;
     (*p_rdr)->parent = srnx;
     (*p_rdr)->n_values = n_values;
+    (*p_rdr)->scale = scale;
     (*p_rdr)->lli_offset = lli_offset;
     (*p_rdr)->data_offset = rptr - srnx->data;
     (*p_rdr)->data_end = data_end;
+
+    /* Initialize the delta decoder. */
+    err = prime_delta_decoder(*p_rdr);
+    if (err)
+    {
+        srnx->error_line = __LINE__;
+        return err;
+    }
+
     return 0;
 }
 
+/* Doc comment in srnx.h. */
 void srnx_free_obs_reader(struct srnx_obs_reader *p_socd)
 {
     free(p_socd);
@@ -1461,6 +1538,121 @@ int srnx_read_obs_ssi_lli(
     return decompress_indicators(*p_ssi, n_values, inds, inds + u64);
 }
 
+/** Reverses delta filtering and scales the outputs in \a p_socd.
+ *
+ * \param[in,out] p_socd Observation reader object.
+ * \param[in] idx One past the last observation to decode.
+ */
+static void undelta_and_scale(
+    struct srnx_obs_reader *p_socd,
+    int idx
+)
+{
+    unsigned int scale = p_socd->scale;
+    int64_t y0, y1, y2, y3, y4, y5, y6;
+    int ii;
+
+    /* Load current delta state. */
+    switch (p_socd->order)
+    {
+    case 7: y6 = p_socd->delta[6]; /* fall through */
+    case 6: y5 = p_socd->delta[5]; /* fall through */
+    case 5: y4 = p_socd->delta[4]; /* fall through */
+    case 4: y3 = p_socd->delta[3]; /* fall through */
+    case 3: y2 = p_socd->delta[2]; /* fall through */
+    case 2: y1 = p_socd->delta[1]; /* fall through */
+    case 1: y0 = p_socd->delta[0]; break;
+    }
+
+    /* Do the delta decoding and scaling. */
+    switch (p_socd->order)
+    {
+    case 0:
+        /* values are encoded directly, just update y0 */
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y0 = p_socd->obs[ii];
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 1:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y0 += p_socd->obs[ii];
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 2:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y1 += p_socd->obs[ii];
+            y0 += y1;
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 3:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y2 += p_socd->obs[ii];
+            y1 += y2; y0 += y1;
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 4:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y3 += p_socd->obs[ii];
+            y2 += y3; y1 += y2; y0 += y1;
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 5:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y4 += p_socd->obs[ii];
+            y3 += y4; y2 += y3; y1 += y2; y0 += y1;
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 6:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y5 += p_socd->obs[ii];
+            y4 += y5; y3 += y4; y2 += y3; y1 += y2; y0 += y1;
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+
+    case 7:
+        for (ii = p_socd->obs_valid; ii < idx; ++ii)
+        {
+            y6 += p_socd->obs[ii];
+            y5 += y6; y4 += y5; y3 += y4; y2 += y3; y1 += y2; y0 += y1;
+            p_socd->obs[ii] = y0 * scale;
+        }
+        break;
+    }
+
+    /* Update *p_socd. */
+    p_socd->obs_valid = idx;
+    switch (p_socd->order)
+    {
+    case 7: p_socd->delta[6] = y6; /* fall through */
+    case 6: p_socd->delta[5] = y5; /* fall through */
+    case 5: p_socd->delta[4] = y4; /* fall through */
+    case 4: p_socd->delta[3] = y3; /* fall through */
+    case 3: p_socd->delta[2] = y2; /* fall through */
+    case 2: p_socd->delta[1] = y1; /* fall through */
+    case 1: p_socd->delta[0] = y0; break;
+    }
+}
+
 /** Attempts to decode observations from the SRNX file into \a p_socd.
  *
  * This reads observations from \a p_socd->data_offset into
@@ -1491,7 +1683,7 @@ static int decode_observations(
                 p_socd->obs_valid * sizeof(p_socd->obs[0]));
         }
     }
-    idx = 0;
+    idx = p_socd->obs_valid;
 
     /* Try to read more until we cannot read any more. */
     data = p_socd->parent->data + p_socd->data_offset;
@@ -1512,7 +1704,7 @@ static int decode_observations(
             }
 
             /* Decode according to block encoding scheme. */
-            if ((unsigned char)p_socd->block_code == BLOCK_SLEB128)
+            if (p_socd->block_code == BLOCK_SLEB128)
             {
                 for (ii = 0; ii < count; ++ii)
                 {
@@ -1525,7 +1717,7 @@ static int decode_observations(
                     }
                 }
             }
-            else if ((unsigned char)p_socd->block_code == BLOCK_EMPTY)
+            else if (p_socd->block_code == BLOCK_ZERO)
             {
                 ii = count;
                 memset(p_socd->obs + idx, 0, ii * sizeof(p_socd->obs[0]));
@@ -1543,7 +1735,7 @@ static int decode_observations(
 
         /* The next byte indicates the encoding scheme. */
         ch = *data++;
-        if ((unsigned char)ch == BLOCK_EMPTY
+        if ((unsigned char)ch == BLOCK_ZERO
             || (unsigned char)ch == BLOCK_SLEB128)
         {
             u64 = uleb128(&data);
@@ -1582,7 +1774,8 @@ static int decode_observations(
         idx += count;
     }
 
-    /* TODO: Decode deltas and scale observations. */
+    /* Decode deltas and scale observations. */
+    undelta_and_scale(p_socd, idx);
     res = 0;
 
 out:

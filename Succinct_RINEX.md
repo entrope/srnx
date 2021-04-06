@@ -220,6 +220,7 @@ For example, an explicit scale of 500 indicates that observation values
 are quantized to half-unit values.
 If no explicit scale is used, it is the same as 1: observation values
 are multiplied by 1000 before delta encoding.
+The maximum scale is 1e6, represented as one billion in ULEB128.
 The scaled values MUST all be integers.
 
 Following this are `n` SLEB128 values representing the initial state of
@@ -234,9 +235,12 @@ Each block begins with one byte that identifies the block packing.
 | `000kkkkk` | 8*`(k+1)` bit matrix |
 | `001kkkkk` | 16*`(k+1)` bit matrix |
 | `010kkkkk` | 32*`(k+1)` bit matrix |
-| `11111110` | ULEB128 count-minus-1 of empty values |
+| `11111110` | ULEB128 count-minus-1 of zero values |
 | `11111111` | ULEB128 count-minus-1 of SLEB128 values |
 | others | reserved |
+
+[//]: # (We might want a ULEB128 count-minus-1 of zero/absent values AFTER delta)
+[//]: # (decoding, but this makes the decoding logic somewhat trickier.)
 
 An `m*(k+1)` bit matrix is stored as `m` values, each with `k+1` bits in
 the file, in bitwise transposed order.
@@ -259,10 +263,13 @@ The use of this bit matrix representation was inspired by
 | 0 | 0 | Null digest |
 | 2 | 4 | CRC32C |
 | 6 | 32 | SHA-256 |
+| 20 | 16 | BLAKE2b, 16-byte output |
+| 21 | 32 | BLAKE2b, 32-byte output |
+| 22 | 64 | BLAKE2b, 64-byte output |
 
 Other digest values are reserved for future definition.
 However, excluding the null digest, the four LSBs of the identifier are
-inteneded to indicate the digest length in bytes:
+intended to indicate the digest length in bytes:
 
 | LSBs | Length |
 | :--: | :----- |
@@ -290,6 +297,17 @@ A formal definition is given in [RFC 3720](https://tools.ietf.org/html/rfc3720),
 The SHA-256 digest is a cryptographic message digest defined by the
 United States government.
 A formal definition is given in [FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final).
+
+## <a name="digest-20"></a>Digest 20: BLAKE2b, 16-byte output
+## <a name="digest-21"></a>Digest 21: BLAKE2b, 32-byte output
+## <a name="digest-22"></a>Digest 22: BLAKE2b, 64-byte output
+
+The BLAKE2b digest is a cryptographic message digest defined by the
+cryptographic research community with different tradeoffs than the SHA
+family of digests.
+The [libsodium](https://doc.libsodium.org/) library provides a convenient
+implementation of these variants of BLAKE2b.
+A formal definition is given in [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.txt).
 
 ## Rationale for digest choices
 
