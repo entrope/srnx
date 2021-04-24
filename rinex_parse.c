@@ -31,11 +31,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__x86_64__)
+#if defined(__AVX2__)
 # include <x86intrin.h>
 #elif defined(__aarch64__)
 /* We want to use the 128-bit NEON registers that are new to, and
- * mandatory in, AArch64. */
+ * mandatory in, AArch64. We do not support 32-bit NEON.
+ */
 # include <arm_neon.h>
 #endif
 
@@ -130,46 +131,70 @@ static int parse_fixed
     return 0;
 }
 
-/** rnx_get_newline tries to find the first newline in \a s->buffer.
+/** rnx_get_n_newlines tries to ensure multiple lines are in \a p->stream.
  *
- * \param[in,out] s Stream needing a newline.
- * \param[in] p_whence Offset at which to start counting.
- * \returns Byte offset of the first newline, or non-positive
- *   rinex_error_t value on failure.
+ * \param[in,out] p Parser needing data to be copied.
+ * \param[in] whence Offset at which to start counting.
+ * \param[in] n_lines Number of lines to fetch.
+ * \returns Number of bytes in p->stream needed to get \a n_lines
+ *   newlines, or non-positive rinex_error_t value on failure.
  */
-static int rnx_get_newline(
-    struct rinex_stream *s,
-    uint64_t *p_whence
+static int rnx_get_n_newlines(
+    struct rinex_parser *p,
+    uint64_t whence,
+    int n_lines
 )
 {
-    int ii, res;
+#if defined(__AVX2__)
+    const __m256i v_nl = _mm256_broadcastb_epi8(_mm_set1_epi8('\n'));
+#endif
+    const char * restrict buffer = p->stream->buffer;
+    int jj = 0;
 
-    /* Scanning for the first EOL is easy. */
-    for (ii = *p_whence; ii < (int)s->size; ++ii)
+#if defined(__AVX2__)
+    for (; whence + 64 < p->stream->size; whence += 64)
     {
-        if (s->buffer[ii] == '\n')
+        const __m256i v_p_2 = _mm256_loadu_si256((__m256i const *)(buffer + whence + 32));
+        const __m256i m_nl_2 = _mm256_cmpeq_epi8(v_nl, v_p_2);
+        const __m256i v_p = _mm256_loadu_si256((__m256i const *)(buffer + whence));
+        const __m256i m_nl = _mm256_cmpeq_epi8(v_nl, v_p);
+        uint64_t kk = ((uint64_t)_mm256_movemask_epi8(m_nl_2) << 32)
+            | (uint32_t)_mm256_movemask_epi8(m_nl);
+
+        const int nn = __builtin_popcountll(kk);
+        if (jj + nn < n_lines)
         {
-            return ii + 1;
+            jj += nn;
+            continue;
+        }
+
+        while (1)
+        {
+            int r = __builtin_ctzll(kk);
+            kk &= (kk - 1);
+            ++jj;
+            if (jj == n_lines)
+            {
+                return whence + r + 1;
+            }
+        }
+    }
+#endif
+
+    for (; whence < p->stream->size; ++whence)
+    {
+        /* Was it a newline? */
+        if (buffer[whence] == '\n')
+        {
+            ++jj;
+            if (jj == n_lines)
+            {
+                return whence + 1;
+            }
         }
     }
 
-    /* We should advance the stream (reading more data) and try again,
-     * but if there is no old data to discard, we must have hit EOF.
-     */
-    if (*p_whence == 0)
-    {
-        return RINEX_EOF;
-    }
-
-    res = s->advance(s, BLOCK_SIZE, *p_whence);
-    if (res)
-    {
-        errno = res;
-        return RINEX_ERR_SYSTEM;
-    }
-    *p_whence = 0;
-
-    return rnx_get_newline(s, p_whence);
+    return 0;
 }
 
 /** rnx_get_newlines tries to ensure multiple lines are in \a p->stream.
@@ -191,57 +216,28 @@ static int rnx_get_newlines(
     int n_body
 )
 {
-    const char * restrict buffer = p->stream->buffer;
-    int ii, jj, res, n_total;
-#if defined(__AVX2__)
-    const __m256i v_nl = _mm256_broadcastb_epi8(_mm_set1_epi8('\n'));
-#endif
+    int ii = *p_whence, jj, res;
 
-    ii = *p_whence;
-    jj = 0;
-    n_total = n_header + n_body;
-
-#if defined(__AVX2__)
-    for (; ii + 64 < (int)p->stream->size; ii += 64)
+    if (n_header > 0)
     {
-        __m256i v_p   = _mm256_loadu_si256((__m256i const *)(buffer + ii));
-        __m256i v_p_2 = _mm256_loadu_si256((__m256i const *)(buffer + ii + 32));
-        __m256i m_nl   = _mm256_cmpeq_epi8(v_nl, v_p);
-        __m256i m_nl_2 = _mm256_cmpeq_epi8(v_nl, v_p_2);
-        uint64_t kk = (uint32_t)_mm256_movemask_epi8(m_nl)
-            | ((uint64_t)_mm256_movemask_epi8(m_nl_2) << 32);
-        while (kk)
+        ii = rnx_get_n_newlines(p, ii, n_header);
+        if (ii > 0)
         {
-            int r = __builtin_ctzll(kk);
-            kk &= (kk - 1);
-            ++jj;
-            if (jj == n_header)
-            {
-                *p_body_ofs = ii + r + 1;
-            }
-            if (jj == n_total)
-            {
-                return ii + r + 1;
-            }
+            *p_body_ofs = ii;
+            jj = rnx_get_n_newlines(p, ii, n_body);
+        }
+        else
+        {
+            jj = 0;
         }
     }
-#endif
-
-    for (; ii < (int)p->stream->size; ++ii)
+    else
     {
-        /* Was it a newline? */
-        if (buffer[ii] == '\n')
-        {
-            ++jj;
-            if (jj == n_header)
-            {
-                *p_body_ofs = ii + 1;
-            }
-            if (jj == n_total)
-            {
-                return ii + 1;
-            }
-        }
+        jj = rnx_get_n_newlines(p, ii, n_body);
+    }
+    if (jj > 0)
+    {
+        return jj;
     }
 
     /* We should advance the stream (reading more data) and try again,
@@ -267,8 +263,7 @@ static int rnx_get_newlines(
 
 #if defined(__AVX2__)
 static __m256i rnx_parse_4(
-    __m256i p_0,
-    __m256i p_1
+    const __m128i *v_obs
 )
 {
     const __m256i v_atoi = _mm256_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8,
@@ -285,6 +280,8 @@ static __m256i rnx_parse_4(
     const __m256i v_minus = _mm256_setr_epi8('-', '-', '-', '-', '-',
         '-', '-', '-', '-', '-', 0, 0, 0, 0, 0, 0, '-', '-', '-', '-',
         '-', '-', '-', '-', '-', '-', 0, 0, 0, 0, 0, 0);
+    const __m256i p_0 = _mm256_loadu_si256((const __m256i *)(v_obs + 0));
+    const __m256i p_1 = _mm256_loadu_si256((const __m256i *)(v_obs + 2));
 
     /* Convert digits to their values. */
     const __m256i t0_0 = _mm256_shuffle_epi8(v_atoi, p_0);
@@ -334,45 +331,31 @@ static __m256i rnx_parse_4(
 
 static const char *rnx_buffer_and_parse_obs
 (
-    struct rnx_v23_parser *p,
     const char *obs,
-    __m256i *p_0,
-    __m256i *p_1,
-    int nn
+    __m128i *p_out
 )
 {
-    const __m256i v_nl = _mm256_set1_epi8('\n');
-    const __m256i v_sp = _mm256_set1_epi8(' ');
+    const __m128i v_nl = _mm_set1_epi8('\n');
+    const __m128i v_sp = _mm_set1_epi8(' ');
 
     __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
-    __m128i m_nl = _mm_cmpeq_epi8(v_obs, _mm256_castsi256_si128(v_nl));
-    int mask = _mm_movemask_epi8(m_nl);
-    int idx = __builtin_ctz(mask | 0x10000);
+#if 1
+    __m128i m_nl = _mm_cmpeq_epi8(v_obs, v_nl);
+    const int mask = _mm_movemask_epi8(m_nl);
+    const int idx = __builtin_ctz(mask | 0x10000);
     __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
     __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
     __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
     __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
-    __m128i res = _mm_blendv_epi8(v_obs, _mm256_castsi256_si128(v_sp), m_sp);
-    p->base.lli[nn] = _mm_extract_epi8(res, 14);
-    p->base.ssi[nn] = _mm_extract_epi8(res, 15);
-    __m256i res_2;
-    switch (nn & 3)
-    {
-    case 0:
-        *p_0 = _mm256_inserti128_si256(*p_0, res, 0);
-        break;
-    case 1: /* Strange order here required by _mm256_packus_epi32(). */
-        *p_1 = _mm256_inserti128_si256(*p_1, res, 0);
-        break;
-    case 2:
-        *p_0 = _mm256_inserti128_si256(*p_0, res, 1);
-        break;
-    case 3:
-        *p_1 = _mm256_inserti128_si256(*p_1, res, 1);
-        res_2 = rnx_parse_4(*p_0, *p_1);
-        _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 3), res_2);
-        break;
-    }
+#else
+    /* This turns out to be significantly slower than the code above on
+     * both Zen 2 and Skylake processors.
+     */
+    __m128i m_sp = _mm_cmpistrm(v_obs, v_nl, 0x48);
+    const int mask = _mm_movemask_epi8(m_sp);
+    const int idx = __builtin_ctz(mask | 0x10000);
+#endif
+    *p_out = _mm_blendv_epi8(v_obs, v_sp, m_sp);
     return obs + idx;
 }
 #endif
@@ -448,7 +431,7 @@ static rinex_error_t rnx_read_v2_observations(
 )
 {
 #if defined(__AVX2__)
-    __m256i buf_0, buf_1;
+    __m128i v_obs[8];
 #endif
     char *buffer;
     int ii, jj, nn;
@@ -521,7 +504,24 @@ static rinex_error_t rnx_read_v2_observations(
 
             /* Copy the observation data. */
 #if defined(__AVX2__)
-            obs = rnx_buffer_and_parse_obs(p, obs, &buf_0, &buf_1, nn);
+            obs = rnx_buffer_and_parse_obs(obs, v_obs + (nn & 7));
+            if ((nn & 7) == 7)
+            {
+                __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]);
+                __m128i lli_ssi_23 = _mm_unpackhi_epi8(v_obs[2], v_obs[3]);
+                __m128i lli_ssi_45 = _mm_unpackhi_epi8(v_obs[4], v_obs[5]);
+                __m128i lli_ssi_67 = _mm_unpackhi_epi8(v_obs[6], v_obs[7]);
+                __m128i lli_ssi_03 = _mm_unpackhi_epi16(lli_ssi_01, lli_ssi_23);
+                __m128i lli_ssi_47 = _mm_unpackhi_epi16(lli_ssi_45, lli_ssi_67);
+                __m128i lli_ssi = _mm_unpackhi_epi32(lli_ssi_03, lli_ssi_47);
+                _mm_storel_epi64((__m128i *)(p->base.lli + nn - 7), lli_ssi);
+                _mm_storel_epi64((__m128i *)(p->base.ssi + nn - 7),
+                    _mm_shuffle_epi32(lli_ssi, 0xB1));
+                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 7),
+                    rnx_parse_4(v_obs));
+                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 3),
+                    rnx_parse_4(v_obs + 4));
+            }
 #else
             obs = rnx_parse_obs(p, obs, nn);
 #endif
@@ -560,18 +560,49 @@ eol:
     }
 
 #if defined(__AVX2__)
-    if (nn & 3)
+    if (nn & 7)
     {
-        __m256i res = rnx_parse_4(buf_0, buf_1);
-        int64_t *base = p->base.obs + (nn & ~3);
-        base[0] = _mm256_extract_epi64(res, 0);
-        if ((nn & 3) > 1)
+        __m256i res_lo = rnx_parse_4(v_obs + 0);
+        __m256i res_hi = rnx_parse_4(v_obs + 4);
+        int64_t *base = p->base.obs + (nn & ~7);
+        char *lli = p->base.lli + (nn & ~7);
+        char *ssi = p->base.ssi + (nn & ~7);
+        switch (nn & 7)
         {
-            base[1] = _mm256_extract_epi64(res, 1);
-            if ((nn & 3) == 2)
-            {
-                base[2] = _mm256_extract_epi64(res, 2);
-            }
+        case 7:
+            lli[6] = _mm_extract_epi8(v_obs[6], 14);
+            ssi[6] = _mm_extract_epi8(v_obs[6], 15);
+            base[6] = _mm256_extract_epi64(res_hi, 2);
+            /* fall through */
+        case 6:
+            lli[5] = _mm_extract_epi8(v_obs[5], 14);
+            ssi[5] = _mm_extract_epi8(v_obs[5], 15);
+            base[5] = _mm256_extract_epi64(res_hi, 1);
+            /* fall through */
+        case 5:
+            lli[4] = _mm_extract_epi8(v_obs[4], 14);
+            ssi[4] = _mm_extract_epi8(v_obs[4], 15);
+            base[4] = _mm256_extract_epi64(res_hi, 0);
+            /* fall through */
+        case 4:
+            lli[3] = _mm_extract_epi8(v_obs[3], 14);
+            ssi[3] = _mm_extract_epi8(v_obs[3], 15);
+            base[3] = _mm256_extract_epi64(res_lo, 3);
+            /* fall through */
+        case 3:
+            lli[2] = _mm_extract_epi8(v_obs[2], 14);
+            ssi[2] = _mm_extract_epi8(v_obs[2], 15);
+            base[2] = _mm256_extract_epi64(res_lo, 2);
+            /* fall through */
+        case 2:
+            lli[1] = _mm_extract_epi8(v_obs[1], 14);
+            ssi[1] = _mm_extract_epi8(v_obs[1], 15);
+            base[1] = _mm256_extract_epi64(res_lo, 1);
+            /* fall through */
+        case 1:
+            lli[0] = _mm_extract_epi8(v_obs[0], 14);
+            ssi[0] = _mm_extract_epi8(v_obs[0], 15);
+            base[0] = _mm256_extract_epi64(res_lo, 0);
         }
     }
 #endif
@@ -589,10 +620,9 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     int res, yy, mm, dd, hh, min, n_sats, body_ofs, line_len;
 
     /* Make sure we have an epoch to parse. */
-    res = rnx_get_newline(p->base.stream, &p->parse_ofs);
+    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
     if (res <= RINEX_EOF)
     {
-        p_->error_line = __LINE__;
         return res;
     }
     if (res < 33)
@@ -716,7 +746,7 @@ static rinex_error_t rnx_read_v3_observations(
 )
 {
 #if defined(__AVX2__)
-    __m256i buf_0, buf_1;
+    __m128i v_obs[8];
 #endif
     char *buffer;
     int ii, jj, nn;
@@ -787,7 +817,24 @@ static rinex_error_t rnx_read_v3_observations(
 
             /* Copy the observation data. */
 #if defined(__AVX2__)
-            obs = rnx_buffer_and_parse_obs(p, obs, &buf_0, &buf_1, nn);
+            obs = rnx_buffer_and_parse_obs(obs, v_obs + (nn & 7));
+            if ((nn & 7) == 7)
+            {
+                __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]);
+                __m128i lli_ssi_23 = _mm_unpackhi_epi8(v_obs[2], v_obs[3]);
+                __m128i lli_ssi_45 = _mm_unpackhi_epi8(v_obs[4], v_obs[5]);
+                __m128i lli_ssi_67 = _mm_unpackhi_epi8(v_obs[6], v_obs[7]);
+                __m128i lli_ssi_03 = _mm_unpackhi_epi16(lli_ssi_01, lli_ssi_23);
+                __m128i lli_ssi_47 = _mm_unpackhi_epi16(lli_ssi_45, lli_ssi_67);
+                __m128i lli_ssi = _mm_unpackhi_epi32(lli_ssi_03, lli_ssi_47);
+                _mm_storel_epi64((__m128i *)(p->base.lli + nn - 7), lli_ssi);
+                _mm_storel_epi64((__m128i *)(p->base.ssi + nn - 7),
+                    _mm_shuffle_epi32(lli_ssi, 0xB1));
+                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 7),
+                    rnx_parse_4(v_obs));
+                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 3),
+                    rnx_parse_4(v_obs + 4));
+            }
 #else
             obs = rnx_parse_obs(p, obs, nn);
 #endif
@@ -828,18 +875,49 @@ static rinex_error_t rnx_read_v3_observations(
     }
 
 #if defined(__AVX2__)
-    if (nn & 3)
+    if (nn & 7)
     {
-        __m256i res = rnx_parse_4(buf_0, buf_1);
-        int64_t *base = p->base.obs + (nn & ~3);
-        base[0] = _mm256_extract_epi64(res, 0);
-        if ((nn & 3) > 1)
+        __m256i res_lo = rnx_parse_4(v_obs + 0);
+        __m256i res_hi = rnx_parse_4(v_obs + 4);
+        int64_t *base = p->base.obs + (nn & ~7);
+        char *lli = p->base.lli + (nn & ~7);
+        char *ssi = p->base.ssi + (nn & ~7);
+        switch (nn & 7)
         {
-            base[1] = _mm256_extract_epi64(res, 1);
-            if ((nn & 3) == 2)
-            {
-                base[2] = _mm256_extract_epi64(res, 2);
-            }
+        case 7:
+            lli[6] = _mm_extract_epi8(v_obs[6], 14);
+            ssi[6] = _mm_extract_epi8(v_obs[6], 15);
+            base[6] = _mm256_extract_epi64(res_hi, 2);
+            /* fall through */
+        case 6:
+            lli[5] = _mm_extract_epi8(v_obs[5], 14);
+            ssi[5] = _mm_extract_epi8(v_obs[5], 15);
+            base[5] = _mm256_extract_epi64(res_hi, 1);
+            /* fall through */
+        case 5:
+            lli[4] = _mm_extract_epi8(v_obs[4], 14);
+            ssi[4] = _mm_extract_epi8(v_obs[4], 15);
+            base[4] = _mm256_extract_epi64(res_hi, 0);
+            /* fall through */
+        case 4:
+            lli[3] = _mm_extract_epi8(v_obs[3], 14);
+            ssi[3] = _mm_extract_epi8(v_obs[3], 15);
+            base[3] = _mm256_extract_epi64(res_lo, 3);
+            /* fall through */
+        case 3:
+            lli[2] = _mm_extract_epi8(v_obs[2], 14);
+            ssi[2] = _mm_extract_epi8(v_obs[2], 15);
+            base[2] = _mm256_extract_epi64(res_lo, 2);
+            /* fall through */
+        case 2:
+            lli[1] = _mm_extract_epi8(v_obs[1], 14);
+            ssi[1] = _mm_extract_epi8(v_obs[1], 15);
+            base[1] = _mm256_extract_epi64(res_lo, 1);
+            /* fall through */
+        case 1:
+            lli[0] = _mm_extract_epi8(v_obs[0], 14);
+            ssi[0] = _mm_extract_epi8(v_obs[0], 15);
+            base[0] = _mm256_extract_epi64(res_lo, 0);
         }
     }
 #endif
@@ -856,10 +934,9 @@ static rinex_error_t rnx_read_v3(struct rinex_parser *p_)
     int res, yy, mm, dd, hh, min, n_sats, line_len;
 
     /* Make sure we have an epoch to parse. */
-    res = rnx_get_newline(p->base.stream, &p->parse_ofs);
-    if (res <= 0)
+    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
+    if (res <= RINEX_EOF)
     {
-        p_->error_line = __LINE__;
         return res;
     }
     if (res < 35)

@@ -116,23 +116,23 @@ lrsb = [ 20 0 0 0 0 162;
 
 For `./rinex_scan 2020_200/m*.20o`, with ~42091 MB of input:
  - AMD Threadripper 3960X, -O3 -mavx2:
-   `./rinex_scan_avx2 2020_200/m*.20o  18.75s user 2.52s system 99% cpu 21.280 total`
-   2245 MB/sec user, 1979 MB/sec user+system, 1978 MB/sec wall clock
+   `./rinex_scan 2020_200/m*.20o  14.96s user 1.37s system 99% cpu 16.334 total`
+   2814 MB/sec user, 2578 MB/sec user+system, 2577 MB/sec wall clock
  - AMD Threadripper 3960X, -O3 but no -mavx2:
-   `./rinex_scan_o3 2020_200/m*.20o  51.64s user 1.64s system 99% cpu 53.294 total`
-   815 MB/sec user, 790 MB/sec user+system, 790 MB/sec wall clock
+   `./rinex_scan 2020_200/m*.20o  49.35s user 1.46s system 99% cpu 50.822 total`
+   853 MB/sec user, 828 MB/sec user+system, 828 MB/sec user+system
  - Intel Core i7-6700HQ, -O3 -mavx2:
-   `./rinex_scan_avx2 2020_200/m*.20o  28.06s user 9.55s system 84% cpu 44.684 total`
-   1500 MB/sec user, 1119 MB/sec user+system, 942 MB/sec wall clock
+   TODO
+   1729 MB/sec user, 1239 MB/sec user+system, 969 MB/sec wall clock
  - Intel Core i7-6700HQ, -O3 but no -mavx2:
-   `./rinex_scan_o3 2020_200/m*.20o  88.98s user 7.59s system 99% cpu 1:36.79 total`
-   473 MB/sec user, 436 MB/sec user+system, 435 MB/sec wall clock
+   TODO
+   515 MB/sec user, 465 MB/sec user+system, 464 MB/sec wall clock
  - Jetson Nano (MAXN / 10 W mode):
-   `./rinex_scan 2020_200/m*.20o  308.63s user 32.11s system 69% cpu 8:11.67 total`
-   136 MB/sec user, 124 MB/sec user+system, 85.6 MB/sec wall clock
+   `./rinex_scan 2020_200/m*.20o  308.50s user 29.02s system 67% cpu 8:21.16 total`
+   136 MB/sec user, 125 MB/sec user+system, 84.0 MB/sec wall clock
  - Jetson Nano (5 W mode):
-   `./rinex_scan 2020_200/m*.20o  449.44s user 36.72s system 89% cpu 9:01.08 total`
-   93.7 MB/sec user, 86.6 MB/sec user+system, 77.8 MB/sec wall clock
+   `./rinex_scan 2020_200/m*.20o  433.83s user 36.90s system 88% cpu 8:54.03 total`
+   97.0 MB/sec user, 89.4 MB/sec user+system, 78.8 MB/sec wall clock
 
 Note the apparent disk bottlenecks for the laptop (AVX2 version) and
 Jetson.  The workstation had 64 GiB RAM, allowing these files to be
