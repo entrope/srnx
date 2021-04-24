@@ -556,7 +556,9 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
     }
     if (res < 0)
     {
-        printf("Failure %d reading %s\n", res, filename);
+        printf("Failure %d reading %s (source line %d, around %02d:%02d:%02d)\n",
+            res, filename, p->error_line, p->epoch.hh_mm / 100,
+            p->epoch.hh_mm % 100, p->epoch.sec_e7 / 10000000);
     }
 
     return grand_total;

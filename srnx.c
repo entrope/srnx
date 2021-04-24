@@ -23,7 +23,8 @@
  */
 
 #include "srnx.h"
-#include "rinex_p.h"
+#include "rinex_p.h" /* page_size, rnx_find_header(), etc. */
+#include "transpose.h"
 
 #include <errno.h>
 #include <fcntl.h>

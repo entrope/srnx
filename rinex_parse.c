@@ -31,8 +31,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef __x86_64__
+#if defined(__x86_64__)
 # include <x86intrin.h>
+#elif defined(__aarch64__)
+/* We want to use the 128-bit NEON registers that are new to, and
+ * mandatory in, AArch64. */
+# include <arm_neon.h>
 #endif
 
 /** Parses a fixed-point decimal field.
@@ -130,8 +134,8 @@ static int parse_fixed
  *
  * \param[in,out] s Stream needing a newline.
  * \param[in] p_whence Offset at which to start counting.
- * \returns Byte offset of the first newline, or 0 for EOF, or
- *   (negative) rinex_error_t value on failure.
+ * \returns Byte offset of the first newline, or non-positive
+ *   rinex_error_t value on failure.
  */
 static int rnx_get_newline(
     struct rinex_stream *s,
@@ -154,7 +158,7 @@ static int rnx_get_newline(
      */
     if (*p_whence == 0)
     {
-        return 0;
+        return RINEX_EOF;
     }
 
     res = s->advance(s, BLOCK_SIZE, *p_whence);
@@ -177,7 +181,7 @@ static int rnx_get_newline(
  * \param[in] n_header Number of "header" lines to fetch.
  * \param[in] n_body Number of "body" lines to fetch.
  * \returns Number of bytes in p->stream needed to get \a n_header +
- *   \a n_body newlines, or 0 for EOF, or rinex_error_t value on failure.
+ *   \a n_body newlines, or non-positive rinex_error_t value on failure.
  */
 static int rnx_get_newlines(
     struct rinex_parser *p,
@@ -245,13 +249,15 @@ static int rnx_get_newlines(
      */
     if (*p_whence == 0)
     {
-        return 0;
+        p->error_line = __LINE__;
+        return RINEX_EOF;
     }
 
     res = p->stream->advance(p->stream, BLOCK_SIZE, *p_whence);
     if (res)
     {
         errno = res;
+        p->error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
     *p_whence = 0;
@@ -382,11 +388,15 @@ static const char *rnx_parse_obs
     char buf[16];
     int kk;
 
-    /* The first 11 characters must be present: space, digit or dot. */
+    /* The first 11 characters must be present: space, minus, digit or dot. */
     for (kk = 0; kk < 10; ++kk)
     {
         if (*obs != ' ') break;
         buf[kk] = *obs++;
+    }
+    if (kk < 10 && *obs == '-')
+    {
+        buf[kk++] = *obs++;
     }
     for (; kk < 10; ++kk)
     {
@@ -509,6 +519,7 @@ static rinex_error_t rnx_read_v2_observations(
                 }
             }
 
+            /* Copy the observation data. */
 #if defined(__AVX2__)
             obs = rnx_buffer_and_parse_obs(p, obs, &buf_0, &buf_1, nn);
 #else
@@ -565,11 +576,11 @@ eol:
     }
 #endif
 
-    return 1;
+    return RINEX_SUCCESS;
 }
 
 /** rnx_read_v2 reads an observation data record from \a p_. */
-static int rnx_read_v2(struct rinex_parser *p_)
+static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
 {
     struct rnx_v23_parser *p = (struct rnx_v23_parser *)p_;
     const char *line;
@@ -579,7 +590,7 @@ static int rnx_read_v2(struct rinex_parser *p_)
 
     /* Make sure we have an epoch to parse. */
     res = rnx_get_newline(p->base.stream, &p->parse_ofs);
-    if (res <= 0)
+    if (res <= RINEX_EOF)
     {
         p_->error_line = __LINE__;
         return res;
@@ -642,14 +653,14 @@ static int rnx_read_v2(struct rinex_parser *p_)
         body_ofs = 0;
         res = rnx_get_newlines(p_, &p->parse_ofs, &body_ofs,
             (n_sats + 11) / 12, n_sats * mm);
-        if (res < 0)
+        if (res <= RINEX_EOF)
         {
-            return res;
-        }
-        else if (res == 0)
-        {
+            if (res == RINEX_EOF)
+            {
+                res = RINEX_ERR_BAD_FORMAT;
+            }
             p_->error_line = __LINE__;
-            return RINEX_ERR_BAD_FORMAT;
+            return res;
         }
         line = p->base.stream->buffer + p->parse_ofs;
         p->parse_ofs = res;
@@ -659,14 +670,15 @@ static int rnx_read_v2(struct rinex_parser *p_)
 
     case '2': case '3': case '4': case '5':
         /* Get the data. */
-        if ((res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats + 1)) < 0)
+        res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats + 1);
+        if (res <= 0)
         {
-            err = res;
-        }
-        else if (res == 0)
-        {
+            if (res == RINEX_EOF)
+            {
+                res = RINEX_ERR_BAD_FORMAT;
+            }
             p_->error_line = __LINE__;
-            return RINEX_ERR_BAD_FORMAT;
+            err = res;
         }
         else
         {
@@ -685,7 +697,7 @@ static int rnx_read_v2(struct rinex_parser *p_)
             memcpy(p->base.buffer, p->base.stream->buffer + p->parse_ofs,
                 p->base.buffer_len);
             p->parse_ofs = res;
-            err = 1;
+            err = RINEX_SUCCESS;
         }
 
         /* and we are done */
@@ -832,11 +844,11 @@ static rinex_error_t rnx_read_v3_observations(
     }
 #endif
 
-    return 1;
+    return RINEX_SUCCESS;
 }
 
 /** rnx_read_v3 reads an observation data record from \a p_. */
-static int rnx_read_v3(struct rinex_parser *p_)
+static rinex_error_t rnx_read_v3(struct rinex_parser *p_)
 {
     struct rnx_v23_parser *p = (struct rnx_v23_parser *)p_;
     const char *line;
@@ -847,6 +859,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
     res = rnx_get_newline(p->base.stream, &p->parse_ofs);
     if (res <= 0)
     {
+        p_->error_line = __LINE__;
         return res;
     }
     if (res < 35)
@@ -895,14 +908,9 @@ static int rnx_read_v3(struct rinex_parser *p_)
 
     /* Get enough data. */
     res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
-    if (res < 0)
+    if (res <= RINEX_EOF)
     {
         return res;
-    }
-    else if (res == 0)
-    {
-        p_->error_line = __LINE__;
-        return RINEX_ERR_BAD_FORMAT;
     }
     line_len = res - p->parse_ofs;
     line = p->base.stream->buffer + p->parse_ofs;
@@ -918,7 +926,7 @@ static int rnx_read_v3(struct rinex_parser *p_)
         /* We already did most of the work. */
         memcpy(p->base.buffer, line, line_len);
         p->base.buffer_len = line_len;
-        return 1;
+        return RINEX_SUCCESS;
     }
 
     p_->error_line = __LINE__;
@@ -1204,7 +1212,7 @@ const char *rinex_open
             p->base.read = rnx_read_v3;
             err = rnx_open_v3(p);
         }
-        if (err != RINEX_SUCCESS)
+        if (err != NULL)
         {
             rnx_free_v23(&p->base);
             return err;

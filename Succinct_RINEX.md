@@ -15,8 +15,9 @@ An SRNX file consists of a sequence of chunks, optionally followed by a
 file-level digest to detect accidental corruption of the file.
 
 Each chunk is identified by a four-byte tag (FOURCC).
-The length of the chunk payload follows the FOURCC tag, allowing for
-easy processing and walking of the file.
+The length of the chunk payload follows the FOURCC tag, allowing quick
+seeks to chunks.
+The chunk payload follows the payload length.
 After the chunk payload is an optional per-chunk digest; when present,
 this is calculated over the concatenation of the FOURCC, the payload
 length, and the payload.
@@ -37,11 +38,21 @@ Odd ULEB128 values correspond to negative SLEB128 values, and the upper
 bits indicate the magnitude of the value.
 Google's Protocol Buffers refers to this as ZigZag encoding.
 
+Many chunks contain an "offset" of a different chunk within the SRNX file.
+Each offset is encoded in ULEB128 as the byte offset from the start of
+the file.
+
 Conversion to and from SRNX format often changes the file contents, but
 preserves the semantics.
 For example, it ensures newlines are in Unix format, does not preserve
 the order of satellites observed in each epoch, and does not preserve
 leading zeros in observation values.
+
+## Mandatory and Prohibitive Words
+
+The key words MUST, MUST NOT, SHOULD and MAY are intended to be
+interpreted as described in [RFC 2119](https://tools.ietf.org/html/rfc2119)
+when, and only when, they appear in all capitals.
 
 ## SRNX FOURCC Codes
 
@@ -52,32 +63,38 @@ occur in a single SRNX file.
 | :----: | :----------: | :---------- |
 | [SRNX](#srnx) | 1 | Succinct RINEX header |
 | [RHDR](#rhdr) | 1 | RINEX (2.x or 3.x) file header |
-| [SDIR](#sdir) | 0..1 | Satellite directory |
 | [EPOC](#epoc) | 0..1 | Epoch record information |
 | [EVTF](#evtf) | Any | Special event flag and data |
-| [SATE](#sate) | Any | Satellite observation metadata |
 | [SOCD](#socd) | Any | Satellite observation code data |
+| [SATE](#sate) | Any | Satellite observation metadata |
+| [SDIR](#sdir) | 0..1 | Satellite directory |
 
 The first chunk of an SRNX file MUST be `SRNX`.
 The second chunk of an SRNX file MUST be `RHDR`.
-If an `EPOC` chunk is not present, the file MUST not have any `EVTF`,
+If an `EPOC` chunk is not present, the file MUST NOT have any `EVTF`,
 `SATE` or `SOCD` chunks (it has no special events or observations).
 
 Additional chunks, if any are present, MAY appear in any order, but:
- - If an `SDIR` chunk is present, it SHOULD be the third chunk.
- - The `EPOC` chunk SHOULD follow `SDIR` (or `RHDR`).
+ - The `EPOC` chunk, if present, SHOULD be the third chunk.
  - The file SHOULD store `EVTF` chunks consecutively.
+ - The order of the table above means most offsets point "backwards"
+   in the file, simplifying the creation of the SRNX file.
+ - Chunks with different FOURCC codes MAY be interleaved.
+   This is helpful in reducing the offsets stored in the `SATE` chunks.
 
 # Chunk Payload Definitions
 
 ## <a name="srnx"></a>SRNX: Succinct RINEX Header
 
-The `SRNX` payload consists of four ULEB128 values, in this order:
+The `SRNX` payload consists of five ULEB128 values and optional padding,
+in this order:
 
 1. A major version identifier, currently 1.
 1. A minor version identifier, currently 0.
 1. A per-chunk digest identifier, from [below](#digests).
 1. A file-level digest identifier.
+1. The file offset of the `SDIR` chunk, or zero if there is no such chunk.
+1. Optional padding, which MUST be ignored when reading.
 
 The per-chunk and file-level digest identifiers identify a message
 digest or checksum function.
@@ -85,6 +102,11 @@ The per-chunk digest is described above; the file-level digest is
 calculated over the entire rest of the file.
 (The length of the file for the file-level digest should be derived from
 an external source, such as the file system that holds the SRNX file.)
+
+When creating the SRNX file, the offset of the SDIR chunk might be
+unknown until all the other chunks are written.
+Padding in this chunk provides for enough space to store that offset
+once it is known.
 
 ## <a name="rhdr"></a>RHDR: RINEX Header
 
@@ -101,7 +123,8 @@ sequence of satellite directory entries.
 If the `EVTF` file offset is zero, no special events are present.
 
 Each satellite directory entry contains the three-character satellite
-identifier, followed by the file offset of its `SATE` chunk.
+identifier as used in RINEX, followed by the file offset of the
+satellite's `SATE` chunk.
 
 ## <a name="evtf"></a>EVTF: Event Flag or Special Record
 
@@ -109,17 +132,19 @@ The `EVTF` payload consists of an epoch index, followed by the event
 record in standard RINEX format, including all newlines.
 
 The epoch index is a ULEB128 indication of where the event record
-exists relative to epochs: 0 indicates before the first epoch, 1
-indicates between the first and second epoch, and so forth.
+exists relative to observation epochs: 0 indicates before the first
+epoch, 1 indicates between the first and second epoch, and so forth.
+
+`EVTF` chunks SHOULD be stored in order of increasing epoch index.
 
 As in the `RHDR` chunk, each newline is represented as a single LF.
 
 ## <a name="epoc"></a>EPOC: Epoch records
 
 The `EPOC` payload consists of a ULEB128 count of epochs, one or more
-run-length-encoded (RLE'd) epoch spans, followed by RLE-encoded receiver
-clock offsets.
-For a RINEX 2.x-based file, the clock offsets should all be zero.
+epoch spans, and run-length-encoded (RLE-encoded) receiver clock offsets.
+For a RINEX 2.x-based file, the clock offsets SHOULD be omitted, which
+(as described below) implies they are all zero.
 
 Each epoch span consists of a SLEB128 interval between epochs, the
 ULEB128 count-minus-1 of epochs in the span, the date, and the initial
@@ -129,7 +154,7 @@ A negative interval represents the negated number of seconds between epochs.
 A positive interval represents the interval in seconds times 1e7.
 
 The ULEB128 for date is year times 10000 plus month times 100 plus day.
-(Years less than 100 are interpreted as in RINEX 2.x.)
+Years less than 100 are interpreted as in RINEX 2.x.
 
 The ULEB128 for the initial time-of-day is hours times 1e11 plus minutes
 times 1e9 plus seconds times 1e7.
@@ -137,14 +162,15 @@ times 1e9 plus seconds times 1e7.
 When adding the interval to the previous epoch's timestamp, minutes and
 seconds reset to zero when the new sum is exactly 60, but hours do not
 wrap.
-Thus, leap seconds and day boundaries must be represented in a new RLE
+Thus, leap seconds and day boundaries MUST be represented in a new RLE
 entry.
-Sub-second intervals during a leap second must not reset to 0 seconds.
+Sub-second intervals during a leap second MUST NOT reset to 0 seconds.
 
-The RLE-encoded receiver clock offsets are represented by a receiver
-clock offset, represented as SLEB128 of the original value times 1e12,
+The RLE-encoded receiver clock offsets are stored as a receiver clock
+offset, represented as SLEB128 of the original value times 1e12,
 followed by a ULEB count-minus-1 indicate the repeat count.
-If not all receiver clock offsets are set, the remainder are zero.
+If there are fewer receiver clock offsets than epochs in the EPOC chunk,
+the remainding receiver clock offsets are zero.
 
 The number of satellites observed in each epoch is not directly
 represented in the SRNX file.
@@ -154,22 +180,27 @@ represented in the SRNX file.
 The `SATE` payload lists the observation times and codes for a single
 satellite.
 It consists of the satellite name with a trailing '\0' byte, SLEB128
-file offsets for each observation code's `SOCD` block (relative to the
-start of the `SATE` block), and epoch presence data, in that order.
-The number of signals is controlled by the `RHDR` payload.
+file offsets for each observation code's `SOCD` chunk (relative to the
+start of the `SATE` chunk's FOURCC), and epoch presence data, in that
+order.
+The number of signals is controlled by the `RHDR` chunk payload.
 A zero file offset means that signal was never observed.
 
 `SATE` chunks at different places in a file MUST NOT have the same name.
 
-### Signal epoch presence
+### Satellite epoch presence
 
-The epoch presence data is represented as a ULEB128 count-minus-1 of
-runs, followed by interleaved counts-minus-1 of how many epochs the
-satellite was absent and present, in that order.
+The epoch presence data within a `SATE` chunk is represented as a
+count-minus-1 of runs, followed by interleaved counts-minus-1 of how
+many epochs the satellite was absent and present, in that order.
+All of these count-minus-1 values are encoded as ULEB128s.
 
-For example, if this consists of the values 0 2 5, the satellite was
-observed for six (5+1) epochs, starting at the third (2+1) epoch
-described in the `EPOC` chunk.
+For example, if this consists of the values `1 2 5 4 6`, the satellite
+was observed during two (1+1) spans of epochs:
+ - six (5+1) epochs starting at the third (2+1) epoch described in the
+   `EPOC` chunk, and
+ - seven (6+1) epochs starting at the 14th epoch (4+1 epochs after the
+   last epoch in the first span).
 
 ## <a name="socd"></a>SOCD: Satellite observation code data
 

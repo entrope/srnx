@@ -111,3 +111,29 @@ lrsb = [ 20 0 0 0 0 162;
 ( for foo in ~/misc/crx/p052/p0520??0.20o; do; echo $foo; rnx2crx $foo - > ; )  246.94s user 4.43s system 99% cpu 4:11.65 total
 ./rinex_analyze ~/misc/crx/p052/p0520??0.20o  63.11s user 1.97s system 99% cpu 1:05.11 total
 ```
+
+## Throughput benchmarks:
+
+For `./rinex_scan 2020_200/m*.20o`, with ~42091 MB of input:
+ - AMD Threadripper 3960X, -O3 -mavx2:
+   `./rinex_scan_avx2 2020_200/m*.20o  18.75s user 2.52s system 99% cpu 21.280 total`
+   2245 MB/sec user, 1979 MB/sec user+system, 1978 MB/sec wall clock
+ - AMD Threadripper 3960X, -O3 but no -mavx2:
+   `./rinex_scan_o3 2020_200/m*.20o  51.64s user 1.64s system 99% cpu 53.294 total`
+   815 MB/sec user, 790 MB/sec user+system, 790 MB/sec wall clock
+ - Intel Core i7-6700HQ, -O3 -mavx2:
+   `./rinex_scan_avx2 2020_200/m*.20o  28.06s user 9.55s system 84% cpu 44.684 total`
+   1500 MB/sec user, 1119 MB/sec user+system, 942 MB/sec wall clock
+ - Intel Core i7-6700HQ, -O3 but no -mavx2:
+   `./rinex_scan_o3 2020_200/m*.20o  88.98s user 7.59s system 99% cpu 1:36.79 total`
+   473 MB/sec user, 436 MB/sec user+system, 435 MB/sec wall clock
+ - Jetson Nano (MAXN / 10 W mode):
+   `./rinex_scan 2020_200/m*.20o  308.63s user 32.11s system 69% cpu 8:11.67 total`
+   136 MB/sec user, 124 MB/sec user+system, 85.6 MB/sec wall clock
+ - Jetson Nano (5 W mode):
+   `./rinex_scan 2020_200/m*.20o  449.44s user 36.72s system 89% cpu 9:01.08 total`
+   93.7 MB/sec user, 86.6 MB/sec user+system, 77.8 MB/sec wall clock
+
+Note the apparent disk bottlenecks for the laptop (AVX2 version) and
+Jetson.  The workstation had 64 GiB RAM, allowing these files to be
+processed from RAM.

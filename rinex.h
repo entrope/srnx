@@ -25,7 +25,7 @@
 #if !defined(RINEX_H_b56f2d84_3a1e_4708_b3c2_6655d0b571c5)
 #define RINEX_H_b56f2d84_3a1e_4708_b3c2_6655d0b571c5
 
-#include <stdint.h>
+#include "rinex_epoch.h"
 
 /* The design for this API is to provide a simple "pull"-based API for
  * reading data from a RINEX-like file, one epoch or event at a time,
@@ -72,51 +72,13 @@ struct rinex_stream
     unsigned int size;
 };
 
-/** rinex_epoch holds the date, time, epoch flag, count of satellites
- * (or special records or cycle slips), and receiver clock offset.
- */
-struct rinex_epoch
-{
-    /* These values could conceivably be packed into two 64-bit fields,
-     * but that would leave almost no room for growth and would be
-     * awkward to work with, so leave it slightly less compact.
-     *
-     * log2(10000 * 12 * 31 * 24 * 60) = 32.32 (yyyy .. mm)
-     * log2(2*609999999) = 30.2 (seconds)
-     * log2(1.1e14) = ~46.6 (clock offset)
-     * plus 4 bits for flag and 10 bits for n_sats
-     */
-
-    /** Decimal-coded date.
-     * Contains the sum year * 10000 + month * 100 + day.
-     */
-    int yyyy_mm_dd;
-
-    /** Decimal-coded minute of day.
-     * Contains the sum of hour * 100 + minute.
-     */
-    short hh_mm;
-
-    /** Epoch flag (normally '0' through '6'). */
-    char flag;
-
-    /** Seconds of minute times 1e7. */
-    int sec_e7;
-
-    /** Number of satellites or special event records. */
-    int n_sats;
-
-    /** Fractional clock offset, times 1e12. */
-    int64_t clock_offset;
-};
-
 /** rinex_error indicates the result of parsing a RINEX file. */
 enum rinex_error
 {
     /** RINEX_ERR_NOT_OBSERVATION indicates that the RINEX file is
      * not an observation-type file.
      */
-    RINEX_ERR_NOT_OBSERVATION = -6,
+    RINEX_ERR_NOT_OBSERVATION = -4,
 
     /** RINEX_ERR_UNKNOWN_VERSION indicates that the RINEX file is
      * not supported.  (Currently supported: 2.xx and 3.xx.)
@@ -132,18 +94,18 @@ enum rinex_error
      * When reading observations:
      * - EPOCH/SAT or EVENT FLAG record is invalid.
      */
-    RINEX_ERR_BAD_FORMAT = -4,
+    RINEX_ERR_BAD_FORMAT = -2,
 
     /** RINEX_ERR_SYSTEM indicates a system-level failure, as indicated
      * in errno.
      */
-    RINEX_ERR_SYSTEM = -2,
+    RINEX_ERR_SYSTEM = -1,
 
     /** RINEX_EOF indicates the end of file was reached. */
-    RINEX_EOF = -1,
+    RINEX_EOF = 0,
 
     /** RINEX_SUCCESS indicates that no error occurred. */
-    RINEX_SUCCESS = 0
+    RINEX_SUCCESS = 1
 };
 
 typedef enum rinex_error rinex_error_t;
@@ -164,13 +126,13 @@ struct rinex_parser
 
     /** buffer contains text related to the current record.
      *
-     * Before #read is called, this holds the file header.
+     * Before #read is called, this holds the file header.  After #read
+     * is called, this holds a record type indicated by \a epoch.flag.
      *
      * When a special event is read, this holds the event records;
-     * zero or more lines, counted by \a epoch.n_sats plus one, with
-     * '\n' as the line terminator.  The first line holds the epoch
-     * information (in case, for example, the presence or absence of a
-     * timestamp is significant).
+     * \a epoch.n_sats+1 lines, with '\n' as the line terminator.
+     * The first line holds the epoch information (in case, for example,
+     * the presence or absence of a timestamp is significant).
      *
      * When an observation or cycle slip record is read, this holds the
      * satellite names and signal-presence bitfields.  For each observed
@@ -214,10 +176,9 @@ struct rinex_parser
      * epoch-level record from the file.
      *
      * \param[in] p Parser to read from.
-     * \returns A rinex_error status code on failure, 0 on EOF, 1 on
-     *   success.
+     * \returns A rinex_error status code.
      */
-    int (*read)(struct rinex_parser *p);
+    rinex_error_t (*read)(struct rinex_parser *p);
 
     /** destroy frees any dynamically allocated memory and deallocates
      * the parser.
