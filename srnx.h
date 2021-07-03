@@ -27,7 +27,6 @@
 #include <stddef.h>
 
 #include "rinex_epoch.h"
-/*#include "transpose.h"*/
 
 /* Note that ALL memory (de-)allocations are performed by the library.
  * This is significant on platforms like Microsoft Windows, where the
