@@ -102,6 +102,11 @@ static void rinex_stdio_destroy(
 {
     struct rinex_stream_stdio *stream = (struct rinex_stream_stdio *)stream_base;
 
+    if (stream->base.buffer)
+    {
+        free(stream->base.buffer);
+    }
+
     if (stream->f != stdin)
     {
         fclose(stream->f);

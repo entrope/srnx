@@ -64,10 +64,6 @@ int main(int argc, char *argv[])
         }
 
         filename = argv[ii];
-        if (s)
-        {
-            s->destroy(s);
-        }
         s = !strcmp(filename, "-") ? rinex_stdin_stream()
             : use_mmap ? rinex_mmap_stream(filename)
             : rinex_stdio_stream(filename);
@@ -85,6 +81,7 @@ int main(int argc, char *argv[])
         }
 
         process_file(p, filename);
+        s->destroy(s);
     }
 
     if (p)
