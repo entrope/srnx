@@ -120,6 +120,57 @@ static const char *rnx_buffer_and_parse_obs
     return obs + idx;
 }
 
+static void rnx_parse_final_avx2
+(
+    const __m128i v_obs[8],
+    int64_t *base,
+    char *lli,
+    char *ssi,
+    int count
+)
+{
+    __m256i res_lo = rnx_parse_4(v_obs + 0);
+    __m256i res_hi = rnx_parse_4(v_obs + 4);
+
+    switch (count)
+    {
+    case 7:
+        lli[6] = _mm_extract_epi8(v_obs[6], 14);
+        ssi[6] = _mm_extract_epi8(v_obs[6], 15);
+        base[6] = _mm256_extract_epi64(res_hi, 2);
+        /* fall through */
+    case 6:
+        lli[5] = _mm_extract_epi8(v_obs[5], 14);
+        ssi[5] = _mm_extract_epi8(v_obs[5], 15);
+        base[5] = _mm256_extract_epi64(res_hi, 1);
+        /* fall through */
+    case 5:
+        lli[4] = _mm_extract_epi8(v_obs[4], 14);
+        ssi[4] = _mm_extract_epi8(v_obs[4], 15);
+        base[4] = _mm256_extract_epi64(res_hi, 0);
+        /* fall through */
+    case 4:
+        lli[3] = _mm_extract_epi8(v_obs[3], 14);
+        ssi[3] = _mm_extract_epi8(v_obs[3], 15);
+        base[3] = _mm256_extract_epi64(res_lo, 3);
+        /* fall through */
+    case 3:
+        lli[2] = _mm_extract_epi8(v_obs[2], 14);
+        ssi[2] = _mm_extract_epi8(v_obs[2], 15);
+        base[2] = _mm256_extract_epi64(res_lo, 2);
+        /* fall through */
+    case 2:
+        lli[1] = _mm_extract_epi8(v_obs[1], 14);
+        ssi[1] = _mm_extract_epi8(v_obs[1], 15);
+        base[1] = _mm256_extract_epi64(res_lo, 1);
+        /* fall through */
+    case 1:
+        lli[0] = _mm_extract_epi8(v_obs[0], 14);
+        ssi[0] = _mm_extract_epi8(v_obs[0], 15);
+        base[0] = _mm256_extract_epi64(res_lo, 0);
+    }
+}
+
 #elif defined(__ARM_NEON)
 
 static const char *rnx_parse_obs_neon
@@ -401,48 +452,8 @@ eol:
 #if defined(__AVX2__)
     if (nn & 7)
     {
-        __m256i res_lo = rnx_parse_4(v_obs + 0);
-        __m256i res_hi = rnx_parse_4(v_obs + 4);
-        int64_t *base = p->base.obs + (nn & ~7);
-        char *lli = p->base.lli + (nn & ~7);
-        char *ssi = p->base.ssi + (nn & ~7);
-        switch (nn & 7)
-        {
-        case 7:
-            lli[6] = _mm_extract_epi8(v_obs[6], 14);
-            ssi[6] = _mm_extract_epi8(v_obs[6], 15);
-            base[6] = _mm256_extract_epi64(res_hi, 2);
-            /* fall through */
-        case 6:
-            lli[5] = _mm_extract_epi8(v_obs[5], 14);
-            ssi[5] = _mm_extract_epi8(v_obs[5], 15);
-            base[5] = _mm256_extract_epi64(res_hi, 1);
-            /* fall through */
-        case 5:
-            lli[4] = _mm_extract_epi8(v_obs[4], 14);
-            ssi[4] = _mm_extract_epi8(v_obs[4], 15);
-            base[4] = _mm256_extract_epi64(res_hi, 0);
-            /* fall through */
-        case 4:
-            lli[3] = _mm_extract_epi8(v_obs[3], 14);
-            ssi[3] = _mm_extract_epi8(v_obs[3], 15);
-            base[3] = _mm256_extract_epi64(res_lo, 3);
-            /* fall through */
-        case 3:
-            lli[2] = _mm_extract_epi8(v_obs[2], 14);
-            ssi[2] = _mm_extract_epi8(v_obs[2], 15);
-            base[2] = _mm256_extract_epi64(res_lo, 2);
-            /* fall through */
-        case 2:
-            lli[1] = _mm_extract_epi8(v_obs[1], 14);
-            ssi[1] = _mm_extract_epi8(v_obs[1], 15);
-            base[1] = _mm256_extract_epi64(res_lo, 1);
-            /* fall through */
-        case 1:
-            lli[0] = _mm_extract_epi8(v_obs[0], 14);
-            ssi[0] = _mm_extract_epi8(v_obs[0], 15);
-            base[0] = _mm256_extract_epi64(res_lo, 0);
-        }
+        rnx_parse_final_avx2(v_obs, p->base.obs + (nn & ~7),
+            p->base.lli + (nn & ~7), p->base.ssi + (nn & ~7), nn & 7);
     }
 #elif defined(__ARM_NEON)
     if (nn & 15)
@@ -732,48 +743,8 @@ static rinex_error_t rnx_read_v3_observations(
 #if defined(__AVX2__)
     if (nn & 7)
     {
-        __m256i res_lo = rnx_parse_4(v_obs + 0);
-        __m256i res_hi = rnx_parse_4(v_obs + 4);
-        int64_t *base = p->base.obs + (nn & ~7);
-        char *lli = p->base.lli + (nn & ~7);
-        char *ssi = p->base.ssi + (nn & ~7);
-        switch (nn & 7)
-        {
-        case 7:
-            lli[6] = _mm_extract_epi8(v_obs[6], 14);
-            ssi[6] = _mm_extract_epi8(v_obs[6], 15);
-            base[6] = _mm256_extract_epi64(res_hi, 2);
-            /* fall through */
-        case 6:
-            lli[5] = _mm_extract_epi8(v_obs[5], 14);
-            ssi[5] = _mm_extract_epi8(v_obs[5], 15);
-            base[5] = _mm256_extract_epi64(res_hi, 1);
-            /* fall through */
-        case 5:
-            lli[4] = _mm_extract_epi8(v_obs[4], 14);
-            ssi[4] = _mm_extract_epi8(v_obs[4], 15);
-            base[4] = _mm256_extract_epi64(res_hi, 0);
-            /* fall through */
-        case 4:
-            lli[3] = _mm_extract_epi8(v_obs[3], 14);
-            ssi[3] = _mm_extract_epi8(v_obs[3], 15);
-            base[3] = _mm256_extract_epi64(res_lo, 3);
-            /* fall through */
-        case 3:
-            lli[2] = _mm_extract_epi8(v_obs[2], 14);
-            ssi[2] = _mm_extract_epi8(v_obs[2], 15);
-            base[2] = _mm256_extract_epi64(res_lo, 2);
-            /* fall through */
-        case 2:
-            lli[1] = _mm_extract_epi8(v_obs[1], 14);
-            ssi[1] = _mm_extract_epi8(v_obs[1], 15);
-            base[1] = _mm256_extract_epi64(res_lo, 1);
-            /* fall through */
-        case 1:
-            lli[0] = _mm_extract_epi8(v_obs[0], 14);
-            ssi[0] = _mm_extract_epi8(v_obs[0], 15);
-            base[0] = _mm256_extract_epi64(res_lo, 0);
-        }
+        rnx_parse_final_avx2(v_obs, p->base.obs + (nn & ~7),
+            p->base.lli + (nn & ~7), p->base.ssi + (nn & ~7), nn & 7);
     }
 #elif defined(__ARM_NEON)
     if (nn & 15)
