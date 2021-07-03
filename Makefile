@@ -1,7 +1,7 @@
 all: librinex.a rinex_analyze rinex_scan transpose_test
 
 # CC = aarch64-linux-gnu-gcc
-CFLAGS = -Wall -Wextra -Werror -g -O3 -mavx2
+CFLAGS = -Wall -Wextra -Werror -g -flto -O3 -mavx2
 
 .PHONY: clean
 clean:
