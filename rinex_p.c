@@ -37,6 +37,7 @@ long page_size;
  */
 static int dev_zero;
 
+/* Documentation comment in rinex_p.h. */
 int rnx_mmap_init(void)
 {
     if (!page_size)
@@ -57,6 +58,7 @@ int rnx_mmap_init(void)
     return 0;
 }
 
+/* Documentation comment in rinex_p.h. */
 void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
 {
     void *addr;
@@ -79,6 +81,7 @@ void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
     return addr;
 }
 
+/* Documentation comment in rinex_p.h. */
 void *memmem
 (
     const char *haystack, size_t h_size,
@@ -110,6 +113,30 @@ void *memmem
     return NULL;
 }
 
+/* Documentation comment in rinex_p.h. */
+int rnx_copy_text(
+    struct rnx_v23_parser *p,
+    int eol_ofs
+)
+{
+    p->base.buffer_len = eol_ofs - p->parse_ofs;
+
+    while (p->buffer_alloc < p->base.buffer_len)
+    {
+        p->buffer_alloc <<= 1;
+    }
+    p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
+    if (!p->base.buffer)
+    {
+        p->base.error_line = __LINE__;
+        return RINEX_ERR_SYSTEM;
+    }
+    memcpy(p->base.buffer, p->base.stream->buffer + p->parse_ofs,
+        p->base.buffer_len);
+    return RINEX_SUCCESS;
+}
+
+/* Documentation comment in rinex_p.h. */
 int rnx_find_header
 (
     const char in[],
@@ -286,6 +313,7 @@ static int rnx_get_n_newlines(
     return 0;
 }
 
+/* Documentation comment in rinex_p.h. */
 int rnx_get_newlines(
     struct rinex_parser *p,
     uint64_t *p_whence,
@@ -339,6 +367,7 @@ int rnx_get_newlines(
     return rnx_get_newlines(p, p_whence, p_body_ofs, n_header, n_body);
 }
 
+/* Documentation comment in rinex_p.h. */
 int parse_fixed
 (
     int64_t *p_out,
@@ -410,6 +439,7 @@ int parse_fixed
     return 0;
 }
 
+/* Documentation comment in rinex_p.h. */
 int parse_uint
 (
     int *p_out,

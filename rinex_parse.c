@@ -1,5 +1,5 @@
 /** rinex_parse.c - RINEX parsing utilities.
- * Copyright 2020 Michael Poole.
+ * Copyright 2020-2021 Michael Poole.
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -568,22 +568,11 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
         }
         else
         {
-            p->base.buffer_len = res - p->parse_ofs;
-
-            while (p->buffer_alloc < p->base.buffer_len)
+            err = rnx_copy_text(p, res);
+            if (err == RINEX_SUCCESS)
             {
-                p->buffer_alloc <<= 1;
+                p->parse_ofs = res;
             }
-            p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
-            if (!p->base.buffer)
-            {
-                p_->error_line = __LINE__;
-                return RINEX_ERR_SYSTEM;
-            }
-            memcpy(p->base.buffer, p->base.stream->buffer + p->parse_ofs,
-                p->base.buffer_len);
-            p->parse_ofs = res;
-            err = RINEX_SUCCESS;
         }
 
         /* and we are done */
@@ -1035,6 +1024,71 @@ static rinex_error_t rnx_copy_header
     return jj;
 }
 
+const char *rnx_open_v23
+(
+    struct rnx_v23_parser *p,
+    struct rinex_stream *stream,
+    int hdr_ofs
+)
+{
+    static const char end_of_header[] = "END OF HEADER";
+    const char *err;
+    int res;
+
+    /* Check that it's an observation file. */
+    if (stream->buffer[hdr_ofs + 20] != 'O')
+    {
+        return "Not an observation RINEX file";
+    }
+
+    /* Check for END OF HEADER. */
+    res = rnx_find_header(stream->buffer, stream->size, end_of_header,
+        sizeof end_of_header);
+    if (res < 1)
+    {
+        return "Could not find end of header";
+    }
+    res = strchr(stream->buffer + res, '\n') - stream->buffer + 1;
+
+    /* Allocate the parser structure. */
+    p->base.stream = stream;
+
+    /* Copy the header. */
+    p->parse_ofs = res;
+    p->buffer_alloc = res;
+    p->base.buffer = calloc(p->buffer_alloc, 1);
+    if (!p->base.buffer)
+    {
+        return "Memory allocation failed";
+    }
+
+    /* Copy the header for the caller's use. */
+    res = rnx_copy_header(p->base.buffer, stream->buffer, res);
+    p->base.buffer_len = res;
+    if (res < 0)
+    {
+        err = "Invalid header line detected";
+    }
+    else if (!memcmp("     2.", stream->buffer, 7))
+    {
+        p->base.read = rnx_read_v2;
+        err = rnx_open_v2(p);
+    }
+    else if (!memcmp("      3.x", stream->buffer, 7))
+    {
+        p->base.read = rnx_read_v3;
+        err = rnx_open_v3(p);
+    }
+    else
+    {
+        err = "Unsupported RINEX version number";
+    }
+
+    return err;
+}
+
+static const char rinex_version_type[] = "RINEX VERSION / TYPE";
+
 /* Doc comment is in rinex.h. */
 const char *rinex_open
 (
@@ -1042,8 +1096,6 @@ const char *rinex_open
     struct rinex_stream *stream
 )
 {
-    static const char end_of_header[] = "END OF HEADER";
-    struct rnx_v23_parser *p;
     const char *err;
     int res;
 
@@ -1060,80 +1112,35 @@ const char *rinex_open
     }
 
     /* Is it an uncompressed RINEX file? */
-    p = NULL;
-    if (!memcmp("RINEX VERSION / TYPE", stream->buffer + 60, 20))
+    if (!memcmp(rinex_version_type, stream->buffer + 60, 20))
     {
-        /* Check that it's an observation file. */
-        if (stream->buffer[20] != 'O')
-        {
-            return "Not an observation RINEX file";
-        }
+        struct rnx_v23_parser *p;
 
-        /* Check for END OF HEADER. */
-        res = rnx_find_header(stream->buffer, stream->size, end_of_header,
-            sizeof end_of_header);
-        if (res < 1)
-        {
-            return "Could not find end of header";
-        }
-        res = strchr(stream->buffer + res, '\n') - stream->buffer + 1;
-
-        /* Allocate the parser structure. */
-        if (memcmp("     2.", stream->buffer, 7)
-            && memcmp("     3.", stream->buffer, 7))
-        {
-            return "Unsupported RINEX version number";
-        }
         p = calloc(1, sizeof(struct rnx_v23_parser));
         if (!p)
         {
             return "Memory allocation failed";
         }
-        p->base.stream = stream;
+
+        p->base.lli = NULL;
+        p->base.ssi = NULL;
+        p->base.obs = NULL;
         p->base.destroy = rnx_free_v23;
 
-        /* Copy the header. */
-        p->parse_ofs = res;
-        p->buffer_alloc = res;
-        p->base.buffer = calloc(p->buffer_alloc, 1);
-        if (!p->base.buffer)
-        {
-            free(p);
-            return "Memory allocation failed";
-        }
-
-        /* Copy the header for the caller's use. */
-        res = rnx_copy_header(p->base.buffer, stream->buffer, res);
-        if (res < 0)
-        {
-            free(p);
-            return "Invalid header line detected";
-        }
-
-        p->base.buffer_len = res;
-        if (!memcmp("     2.", stream->buffer, 7))
-        {
-            p->base.read = rnx_read_v2;
-            err = rnx_open_v2(p);
-        }
-        else
-        {
-            p->base.read = rnx_read_v3;
-            err = rnx_open_v3(p);
-        }
-        if (err != NULL)
-        {
-            rnx_free_v23(&p->base);
-            return err;
-        }
-
         *p_parser = &p->base;
-        return NULL;
+        err = rnx_open_v23(p, stream, 0);
+    }
+    /* TODO: support files using Hatanaka compression */
+    else /* what is it? */
+    {
+        err = "Unrecognized file format";
     }
 
-    /* TODO: support files using Hatanaka compression:
-    if (!memcmp("CRX VERS   / TYPE", stream->buffer + 60, 20)) { .. }
-     */
+    if (err && *p_parser)
+    {
+        (*p_parser)->destroy(*p_parser);
+        *p_parser = NULL;
+    }
 
-    return "Unrecognized file format";
+    return err;
 }

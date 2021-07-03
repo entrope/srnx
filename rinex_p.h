@@ -132,6 +132,21 @@ int rnx_get_newlines(
     int n_body
 );
 
+/** rnx_copy_line copies text to \a p->base.buffer.
+ *
+ * This copies text in the range [ \a p->parse_ofs, \a eol_ofs ).
+ *
+ * \param[in,out] p Parser that has a line of text.
+ * \param[in] eol_ofs One past the the end-of-line character,
+ *   relative to \a p->base.stream->buffer.
+ * \return RINEX_ERR_SYSTEM on memory allocation failure, or else
+ *   RINEX_SUCCESS.
+ */
+int rnx_copy_text(
+    struct rnx_v23_parser *p,
+    int eol_ofs
+);
+
 /** Parses a fixed-point decimal field.
  *
  * A valid field consists of \a width - \a frac - 1 characters as a
