@@ -30,6 +30,12 @@
 
 #include "rinex.h"
 
+#if defined(__AVX2__)
+# include <x86intrin.h>
+#elif defined(__ARM_NEON)
+# include <arm_neon.h>
+#endif
+
 /** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
 #define RINEX_EXTRA 80
 
@@ -105,6 +111,53 @@ int rnx_find_header
     size_t in_size,
     const char header[],
     size_t sizeof_header
+);
+
+/** rnx_get_newlines tries to ensure multiple lines are in \a p->stream.
+ *
+ * \param[in,out] p Parser needing data to be copied.
+ * \param[in] p_whence Offset at which to start counting.
+ * \param[out] p_body_ofs Receives offset of body data within
+ *   \a p->stream->buffer.
+ * \param[in] n_header Number of "header" lines to fetch.
+ * \param[in] n_body Number of "body" lines to fetch.
+ * \returns Number of bytes in p->stream needed to get \a n_header +
+ *   \a n_body newlines, or non-positive rinex_error_t value on failure.
+ */
+int rnx_get_newlines(
+    struct rinex_parser *p,
+    uint64_t *p_whence,
+    int *p_body_ofs,
+    int n_header,
+    int n_body
+);
+
+/** Parses a fixed-point decimal field.
+ *
+ * A valid field consists of \a width - \a frac - 1 characters as a
+ * signed integer, a decimal point ('.'), and \a frac characters as a
+ * fractional part.
+ *
+ * The signed integer is zero or more spaces, an optional minus sign
+ * ('-'), and zero or more digits. The fractional part has zero or more
+ * digits followed by zero or more spaces (or a newline).
+ *
+ * Some examples of valid fixed-point decimals from the RINEX 2.11 and
+ * 3.04 specifications are (between the double quotes):
+ * "  4375274.   " and "         -.120".
+ *
+ * \param[out] p_out Receives the parsed value, times \a 10**point.
+ * \param[in] start Start of the text field to parse.
+ * \param[in] width Width of the total field in characters.
+ * \param[in] frac Width of the fractional part in characters.
+ * \returns Zero on success, else EINVAL if the field was invalid.
+ */
+int parse_fixed
+(
+    int64_t *p_out,
+    const char *start,
+    int width,
+    int frac
 );
 
 /** Parses an unsigned integer field of \a width bytes starting at
