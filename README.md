@@ -56,62 +56,6 @@ Each satellite has per-signal tables:
 perf record -F399 -g ...
 perf script | stackcollapse-perf.pl > out.perf-folded && flamegraph.pl out.perf-folded > perf-scan.svg
 
-# Empirical data from day 2020/200
-
-```
-zrange = [ -336042201777 361882386254; -670837676888 669131761241; -1211061312768 1215589743403; -2420368136452 2421537307808; -4841905444260 4839570043541; ];
-lrsb = [ 20 0 0 0 0 162;
- 21 0 0 0 212 351103;
- 22 0 0 456 366859 1557736;
- 23 0 1512 558309 1930226 4059101;
- 24 4333 454455 1916376 4685195 5256099;
- 25 1353177 2513312 3722603 5426531 8372009;
- 26 2701594 4866723 7368281 9424434 7134406;
- 27 3117138 5573723 5471323 4392735 2953751;
- 28 3546261 4850099 4147415 3740274 3526953;
- 29 119132 200190 225899 274853 408335;
- 30 65379 118493 169238 392326 691791;
- 31 77281 139306 357862 429548 389273;
- 32 247725 473644 552108 662908 1429722;
- 33 102376 190998 510194 864591 665359;
- 34 343889 661199 816162 989259 1319603;
- 35 197965 315444 557391 796691 1117741;
- 36 1918900 436506 728821 928329 1409173;
- 37 33965251 567508 910555 1254160 1778968;
- 38 61286221 623339 1130375 1307001 2013773;
- 39 161115252 917346 1440117 1918350 3492622;
- 40 170007065 1266706 2095429 3020883 4615526;
- 41 1347485073 3024202 3892120 4848562 7752889;
- 42 986213175 4726517 5731802 8158539 11725756;
- 43 1606598836 9296251 9805604 12263196 14175470;
- 44 1531796880 13676220 12912403 14537231 17917668;
- 45 640850736 24620485 14371984 16709300 17282188;
- 46 311936252 57828945 17687789 18201052 16305973;
- 47 154698267 50157516 14822679 14448841 21212298;
- 48 78214175 98979794 14164391 22591011 63785918;
- 49 39691698 141904502 23214352 71008832 286416695;
- 50 25280529 118429167 82136980 311523548 829488546;
- 51 36830906 241633757 359236317 883712946 1336499442;
- 52 80676462 478676125 924809626 1334695277 1398197194;
- 53 283438540 1588266235 1380654767 1429044591 1391939785;
- 54 661760572 2261866749 1494516804 1433180373 1444949800;
- 55 623507465 1851322054 1404182678 1420313145 1328906723;
- 56 566239942 1469164588 1417583729 1281626604 887828813;
- 57 191441881 793854869 1279446697 896096361 526137454;
- 58 2104808 333601156 793720070 470572922 258471749;
- 59 1036666 87549130 244583296 137548936 74075636;
- 60 517238 44281328 124322590 69093910 37084716;
- 61 256987 20100748 61375558 34491379 18539930;
- 62 122838 8989029 31202143 17309868 9258941;
- 63 782177112 666231890 644604263 446181570 339772382;
-]
-./rinex_analyze ~/misc/crx/2020_200/*.20o  392.65s user 39.35s system 96% cpu 7:29.50 total
-
-./rinex_scan ~/misc/crx/p052/p0520??0.20o  14.56s user 1.10s system 99% cpu 15.671 total
-( for foo in ~/misc/crx/p052/p0520??0.20o; do; echo $foo; rnx2crx $foo - > ; )  246.94s user 4.43s system 99% cpu 4:11.65 total
-./rinex_analyze ~/misc/crx/p052/p0520??0.20o  63.11s user 1.97s system 99% cpu 1:05.11 total
-```
-
 ## Throughput benchmarks:
 
 For `./rinex_scan 2020_200/m*.20o`, with ~42091 MB of input:
@@ -122,18 +66,25 @@ For `./rinex_scan 2020_200/m*.20o`, with ~42091 MB of input:
    `./rinex_scan 2020_200/m*.20o  49.35s user 1.46s system 99% cpu 50.822 total`
    853 MB/sec user, 828 MB/sec user+system, 828 MB/sec user+system
  - Intel Core i7-6700HQ, -O3 -mavx2:
-   TODO
-   1729 MB/sec user, 1239 MB/sec user+system, 969 MB/sec wall clock
+   `./rinex_scan 2020_200/m*.20o  23.49s user 8.65s system 83% cpu 38.621 total`
+   1792 MB/sec user, 1310 MB/sec user+system, 1090 MB/sec wall clock
  - Intel Core i7-6700HQ, -O3 but no -mavx2:
-   TODO
-   515 MB/sec user, 465 MB/sec user+system, 464 MB/sec wall clock
- - Jetson Nano (MAXN / 10 W mode):
-   `./rinex_scan 2020_200/m*.20o  308.50s user 29.02s system 67% cpu 8:21.16 total`
-   136 MB/sec user, 125 MB/sec user+system, 84.0 MB/sec wall clock
- - Jetson Nano (5 W mode):
-   `./rinex_scan 2020_200/m*.20o  433.83s user 36.90s system 88% cpu 8:54.03 total`
-   97.0 MB/sec user, 89.4 MB/sec user+system, 78.8 MB/sec wall clock
+   `./rinex_scan 2020_200/m*.20o  73.44s user 7.98s system 99% cpu 1:21.54 total`
+   573 MB/sec user, 517 MB/sec user+system, 516 MB/sec wall clock
+ - Jetson Nano (MaxN mode, ARM Cortex-A57 up to 1479 MHz):
+   `./rinex_scan 2020_200/m*.20o  284.48s user 77.68s system 95% cpu 6:18.62 total`
+   148 MB/sec user, 116 MB/sec user+system, 111 MB/sec wall clock
+ - Jetson Nano (5W mode, ARM Cortex-A57 up to 918 MHz):
+   `./rinex_scan 2020_200/m*.20o  412.55s user 111.94s system 90% cpu 9:41.93 total`
+   102 MB/sec user, 80 MB/sec user+system, 72 MB/sec wall clock
+ - Raspberry Pi 4 Model B (ARM Cortex-A72), 64-bit mode, 1.5 GHz:
+   4m10.758 user, 1m17.239 system, 5m42.485 total
+   168 MB/sec user, 128 MB/sec user+system, 123 MB/sec wall clock
+ - Jetson Nano (MaxN mode, with current NEON optimizations):
+   `./rinex_scan 2020_200/m*.20o  217.00s user 71.00s system 97% cpu 4:55.27 total`
+   194 MB/sec user, 146 MB/sec user+system, 143 MB/sec wall clock
 
-Note the apparent disk bottlenecks for the laptop (AVX2 version) and
-Jetson.  The workstation had 64 GiB RAM, allowing these files to be
-processed from RAM.
+Note the apparent disk bottlenecks for the laptop AVX2 version.
+The workstation had 64 GiB RAM, allowing these files to be processed
+from RAM.  The ARM platforms ran from a USB3-attached SSD, with more
+read throughput than the parser could support.
