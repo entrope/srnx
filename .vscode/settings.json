@@ -5,6 +5,7 @@
         "perf.data": true,
         "perf.data.old": true,
         "rinex_analyze": true,
+        "rinex_maxima": true,
         "rinex_n_obs": true,
         "rinex_scan": true,
         "transpose_test": true

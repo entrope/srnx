@@ -65,7 +65,6 @@ struct signal_obs
 };
 
 /** sv_obs contains the observations from a single satellite. */
-/* XXX: Maybe include satellite name? */
 struct sv_obs
 {
     /** name is the three-character name of the satellite, plus '\0'. */

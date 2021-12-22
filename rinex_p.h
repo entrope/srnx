@@ -63,6 +63,40 @@ struct rnx_v23_parser
     uint64_t parse_ofs;
 };
 
+/** crx_v23_parser is a CRX (Hatanaka compressed) v2.xx or v3.xx parser. */
+struct crx_v23_parser
+{
+    /** base describes the uncompressed RINEX content. */
+    struct rnx_v23_parser base;
+
+    /** epoch_alloc is the allocated length of #epoch_text. */
+    int epoch_alloc;
+
+    /** max_order is the maximum differential order for any (active)
+     * observation.
+     */
+    int max_order;
+
+    /** epoch_text is the current uncompressed epoch header line, ending
+     * with a line feed ('\n') character.
+     */
+    char *epoch_text;
+
+    /** order is a pair of entries for each observation. \a order[2*n+0]
+     * is the differential order of each observation, up to 9.
+     * \a order[2*n+1] is how much of #diff is valid for the observation.
+     * The allocated length of `order` is 2*#base.obs_alloc.
+     */
+    unsigned char *order;
+
+    /** diff holds the differential state for each observation.  The
+     * allocated length is #base.obs_alloc * 10, in order-major layout.
+     * That is, \a diff[obs+n*base.obs_alloc] is the \a n'th-order
+     * history for observation \a obs.  Unused space is zero-filled.
+     */
+    int *diff;
+};
+
 /** Initializes #page_size and other internal mmap state.
  *
  * \returns Zero on success, non-zero (setting errno) on failure.

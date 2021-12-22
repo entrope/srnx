@@ -1,6 +1,7 @@
 *.o
 /librinex.a
 /rinex_analyze
+/rinex_maxima
 /rinex_n_obs
 /rinex_scan
 /rinex_test

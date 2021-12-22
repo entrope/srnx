@@ -1,4 +1,4 @@
-all: librinex.a rinex_analyze rinex_scan transpose_test
+all: librinex.a rinex_analyze rinex_maxima rinex_scan transpose_test
 
 # CC = aarch64-linux-gnu-gcc
 CFLAGS = -Wall -Wextra -Werror -g -flto -O3 -mavx2
@@ -12,6 +12,8 @@ librinex.a: driver.o rinex_mmap.o rinex_p.o rinex_parse.o rinex_stdio.o \
 	ar crs $@ $?
 
 rinex_analyze: rinex_analyze.c librinex.a
+
+rinex_maxima: rinex_maxima.c librinex.a
 
 rinex_n_obs: rinex_n_obs.c librinex.a
 

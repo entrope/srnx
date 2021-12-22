@@ -77,6 +77,6 @@ void process_file(struct rinex_parser *p, const char filename[])
         }
     }
 
-    printf("%s: %d records, max %d observations from %d satellites\n",
-        filename, count, max_obs, max_sats);
+    printf("%s: %d records, max %d observations from %d satellites, %d obs/sat\n",
+        filename, count, max_obs, max_sats, p->n_obs[0]);
 }
