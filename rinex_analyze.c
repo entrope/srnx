@@ -680,7 +680,7 @@ void process_file(struct rinex_parser *p, const char filename[])
     analyze_compression(filename, grand_total);
 }
 
-void finish()
+void finish(void)
 {
     printf("\nzrange = [");
     for (int ii = 0; ii < 5; ++ii)

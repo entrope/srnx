@@ -1,11 +1,12 @@
-all: librinex.a rinex_analyze rinex_maxima rinex_scan transpose_test
+EXE = rinex_analyze rinex_maxima rinex_scan transpose_test
+all: librinex.a $(EXE)
 
 # CC = aarch64-linux-gnu-gcc
 CFLAGS = -Wall -Wextra -Werror -g -flto -O3 -mavx2
 
 .PHONY: clean
 clean:
-	rm -f librinex.a *.o *.s rinex_analyze rinex_scan transpose_test
+	rm -f librinex.a *.o *.s $(EXE)
 
 librinex.a: driver.o rinex_mmap.o rinex_p.o rinex_parse.o rinex_stdio.o \
 	srnx.o transpose.o

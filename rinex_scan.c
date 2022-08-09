@@ -24,13 +24,18 @@
 
 #include "driver.h"
 #include <stdio.h>
+#include <string.h>
 
 void process_file(struct rinex_parser *p, const char filename[])
 {
-    int count, max_obs, max_sats, ii, jj, n_obs, sys_obs;
+    static uint64_t sat_obs[100 * 32];
+    uint64_t tmp_sat_obs;
+    int count, max_obs, tot_obs, max_sats, ii, jj, n_obs, sys_obs;
+    int sys_idx, sat_idx, act_obs;
     const char *buffer;
 
-    for (count = max_obs = max_sats = 0; ; ++count)
+    memset(sat_obs, 0, sizeof(sat_obs));
+    for (count = max_obs = max_sats = tot_obs = 0; ; ++count)
     {
         int res = p->read(p);
         if (res <= 0)
@@ -56,14 +61,20 @@ void process_file(struct rinex_parser *p, const char filename[])
         buffer = p->buffer;
         for (ii = n_obs = 0; ii < p->epoch.n_sats; ++ii)
         {
-            sys_obs = p->n_obs[buffer[0] & 31];
+            sys_idx = buffer[0] & 31;
+            sat_idx = buffer[1] * 32 + sys_idx;
+            tmp_sat_obs = sat_obs[sat_idx];
+            sys_obs = p->n_obs[sys_idx];
             for (jj = 0; jj < (sys_obs + 7) >> 3; ++jj)
             {
+                tmp_sat_obs |= (uint64_t)(buffer[2+jj] & 255) << 8 * jj;
                 n_obs += __builtin_popcount(buffer[2+jj] & 255);
             }
+            sat_obs[sat_idx] = tmp_sat_obs;
             buffer += 2 + jj;
         }
 
+        tot_obs += n_obs;
         if (max_obs < n_obs)
         {
             max_obs = n_obs;
@@ -77,6 +88,17 @@ void process_file(struct rinex_parser *p, const char filename[])
         }
     }
 
-    printf("%s: %d records, max %d observations from %d satellites, %d obs/sat\n",
-        filename, count, max_obs, max_sats, p->n_obs[0]);
+    act_obs = 0;
+    for (ii = 0; ii < 100 * 32; ++ii)
+    {
+        act_obs += __builtin_popcountll(sat_obs[ii]);
+    }
+
+    printf("%s,%d,%d,%d,%d,%d,%d\n", filename,
+        count, max_obs, max_sats, p->n_obs[0], act_obs, tot_obs);
+}
+
+void start(void)
+{
+    printf("filename,epochs,maxobs,maxsats,sysobs,satobs,totobs\n");
 }

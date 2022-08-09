@@ -33,6 +33,7 @@ extern "C" {
 
 extern int verbose;
 
+void start(void);
 void process_file(struct rinex_parser *p, const char filename[]);
 void finish(void);
 

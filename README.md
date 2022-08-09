@@ -2,17 +2,48 @@
 
 ## Epoch flags
 
-Both RINEX 2.11 and 3.04 define seven epoch flags: 0, 1 and 6 use the
+RINEX 2.11, 3.05 and 4.00 define seven epoch flags: 0, 1 and 6 use the
 respective observation format; 2 through 5 use the special event format.
 
 ## Satellite names
 
-RINEX 2.11 defines four satellite system identifiers; RINEX 3.04 defines
-seven.  Each identifies up to 100 satellites, although 00 is presumably
-reserved, and the typical count is much smaller.
+RINEX 2.11 defines four satellite system identifiers; RINEX 3.05 and
+4.00 define seven.  Each identifies up to 100 satellites, although 00 is
+presumably reserved, and the typical count is much smaller.
 
 For example, SBAS PRNs range from 120 through 158 inclusive, so never
-use 00 through 19 or above 58; QZSS uses only 01 through 09.
+use 00 through 19 or above 58; QZSS uses only 01 through 10; NavIC
+(also called IRNSS) uses only 1 through 9.
+
+The SBAS satellite mask from DFMC SBAS gives a dense assignment for
+four constellations plus SBAS:
+
+| Index   | Assignment |
+| :-----: | :--------- |
+| 1-32    | GPS PRN |
+| 33-37   | GPS reserved |
+| 38-69   | GLONASS ID number plus 37 |
+| 70-74   | GLONASS reserved |
+| 75-110  | Galileo space vehicle identifier plus 74 |
+| 111     | Galileo reserved |
+| 112-119 | Spare |
+| 120-158 | SBAS PRN |
+| 159-195 | BDS ranging code number plus 158 |
+| 196-207 | Reserved |
+| 208-214 | Spare |
+
+The following additional assignments could extend it:
+
+| Index   | Assignment |
+| :-----: | :--------- |
+| 216-224 | NavIC PRN ID plus 215 |
+| 225-235 | NavIC reserved |
+| 236-245 | QZSS, as RINEX 4.00 (Table 6) signal ID plus 235 |
+| 246-255 | QZSS reserved
+
+Simplicity and expandability seems preferable, so this library keeps a
+character to identify the system and a second byte (0 to 99) to identify
+the satellite.
 
 ## Observation codes
 
@@ -22,17 +53,23 @@ using the general naming scheme.
 Defined: {C,L,D,S}{1,2,5,6,7,8} plus P1 and P2
 Pattern: {C,D,L,P,S}{1,2,3,4,5,6,7,8}
 
-RINEX 3.04 defines 258 distinct observation codes, out of about 576
-potential names (potentially 936 considering the whole alphabet).
+RINEX 3.05 defines 266 distinct observation codes, out of about 576
+potential names (potentially 936 considering the whole alphabet as
+candidates for the third character).  The number of observation codes
+defined for a given GNSS system is smaller: at most 120 (for BeiDou,
+considering the 1I/Q/X synonyms for 2I/Q/X).
 
-Defined: See the RINEX 3.xx specification.
+Defined: See the RINEX 3.0x and 4.00 specification.
 Pattern: {C,L,D,S}{1,2,3,4,5,6,7,8,9}{A,B,C,D,E,I,L,M,N,P,Q,S,W,X,Y,Z}
+
+RINEX 3.x and 4.x also allow receiver channel numbers to be recorded as
+pseudo-observables "X1 " through "X9 ", with blank attributes.
 
 ## Satellite indexing
 
 RINEX v2.11 defines four satellite system codes: G, R, S, E, and for
 GPS-only observation files, blank.
-RINEX v3.04 adds J, C, and I.
+RINEX v3.04 added J, C, and I.
 
 Letters plus space will be distinct in the five LSBs, allowing for easy
 lookup into a reasonably-sized table.
@@ -51,6 +88,11 @@ Each satellite has per-signal tables:
  - LLI (across all runs)
  - SSI (across all runs)
 
+# Test harness
+
+The test_* source files use the API exposed by [libtap](//github.com/zorgnax/libtap.git).
+This code was developed against libtap commit 56e31231e0329b202c978c676e4a897c857c7a1f.
+
 # Generating flame graphs
 
 perf record -F399 -g ...
@@ -59,12 +101,12 @@ perf script | stackcollapse-perf.pl > out.perf-folded && flamegraph.pl out.perf-
 ## Throughput benchmarks:
 
 For `./rinex_scan 2020_200/m*.20o`, with ~42091 MB of input:
- - AMD Threadripper 3960X, -O3 -mavx2:
-   `./rinex_scan 2020_200/m*.20o  14.96s user 1.37s system 99% cpu 16.334 total`
-   2814 MB/sec user, 2578 MB/sec user+system, 2577 MB/sec wall clock
- - AMD Threadripper 3960X, -O3 but no -mavx2:
-   `./rinex_scan 2020_200/m*.20o  49.35s user 1.46s system 99% cpu 50.822 total`
-   853 MB/sec user, 828 MB/sec user+system, 828 MB/sec user+system
+ - AMD Threadripper 3960X, -O3 -march=native -fprofile-use -fprofile-correction (after -fprofile-generate):
+   `./rinex_scan 2020_200/m*.20o  13.85s user 1.28s system 99% cpu 15.125 total`
+   3039 MB/sec user, 2782 MB/sec user+system, 2783 MB/sec wall clock
+ - AMD Threadripper 3960X, -O3:
+   `./rinex_scan 2020_200/m*.20o  48.45s user 0.96s system 99% cpu 49.423 total`
+   869 MB/sec user, 852 MB/sec user+system, 852 MB/sec user+system
  - Intel Core i7-6700HQ, -O3 -mavx2:
    `./rinex_scan 2020_200/m*.20o  23.49s user 8.65s system 83% cpu 38.621 total`
    1792 MB/sec user, 1310 MB/sec user+system, 1090 MB/sec wall clock

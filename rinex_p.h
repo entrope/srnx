@@ -42,32 +42,54 @@
 /** BLOCK_SIZE is how much data we normally try to read into a buffer. */
 #define BLOCK_SIZE (1024 * 1024 - RINEX_EXTRA)
 
+/** RNX_META_FLAG is used to flag special values in rinex_parser.obs[]. */
+#define RNX_META_FLAG INT64_MIN
+
 /** page_size is the value of sysconf(_SC_PAGE_SIZE). */
 extern long page_size;
 
-/** rnx_v23_parser is a RINEX v2.xx or v3.xx parser. */
-struct rnx_v23_parser
+/** rnx_v234_parser is a RINEX v2.xx, v3.xx or v4.xx parser. */
+struct rnx_v234_parser
 {
     /** base is the standard rinex_parser contents. */
     struct rinex_parser base;
 
+    /** parse_ofs is the current read offset in base.stream->buffer. */
+    uint64_t parse_ofs;
+
     /** buffer_alloc is the allocated length of #base.buffer. */
     int buffer_alloc;
+
+    /** sats_alloc is the allocated length of #base.sats. */
+    int sats_alloc;
 
     /** obs_alloc is the allocated length of #base.lli, #base.ssi and
      * #base.obs.
      */
     int obs_alloc;
-
-    /** parse_ofs is the current read offset in base.stream->buffer. */
-    uint64_t parse_ofs;
 };
 
 /** crx_v23_parser is a CRX (Hatanaka compressed) v2.xx or v3.xx parser. */
 struct crx_v23_parser
 {
     /** base describes the uncompressed RINEX content. */
-    struct rnx_v23_parser base;
+    struct rnx_v234_parser base;
+
+    /** obs_free is a pointer into the first free block in #base.base.obs.
+     *
+     * Because parsing a Compressed RINEX needs to track the delta
+     * states across reads, allocations of observation history to a
+     * satellite must be persistent.  When a satellite disappears, it
+     * leaves unused space in the observation array, and allows reuse
+     * of that space.
+     *
+     * The first observation in each free block gives the length of that
+     * block and the index of the next free block.  In particular, the
+     * observation value is #RNX_META_FLAG + \a (next << 16) + \a length.
+     * The linked list is in order of increasing \a next value, and
+     * \a base.base.obs[free_obs] is the first free observation.
+     */
+    int free_obs;
 
     /** epoch_alloc is the allocated length of #epoch_text. */
     int epoch_alloc;
@@ -177,7 +199,7 @@ int rnx_get_newlines(
  *   RINEX_SUCCESS.
  */
 int rnx_copy_text(
-    struct rnx_v23_parser *p,
+    struct rnx_v234_parser *p,
     int eol_ofs
 );
 

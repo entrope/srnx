@@ -110,6 +110,33 @@ enum rinex_error
 
 typedef enum rinex_error rinex_error_t;
 
+/** RINEX_MIN_OBS is the minimum legal value for a RINEX observation. */
+#define RINEX_MIN_OBS -999999999999ULL
+
+/** RINEX_MAX_OBS is the maximum legal value for a RINEX observation. */
+#define RINEX_MAX_OBS 9999999999999ULL
+
+/** rinex_sv_info holds information for a satellite observed during an
+ * epoch.
+ */
+struct rinex_sv_info
+{
+    /** system is the ASCII character for the RINEX satellite system.
+     * It is one of ' ' (for old, GPS-only RINEXv2 files), 'G', 'R',
+     * 'S', 'E', 'C', 'J' or 'I'.
+     */
+    char system;
+
+    /** number is the binary-coded satellite number, 01 to 99. */
+    unsigned char number;
+
+    /** base is the first observation slot assigned to this satellite.
+     * The number of observations for it are given by
+     * \a rinex_parser.n_obs[system&31].
+     */
+    unsigned short obs_0;
+};
+
 /** rinex_parser is an abstract base type for loading data from files
  * containing RINEX observation-like data.
  */
@@ -126,48 +153,50 @@ struct rinex_parser
 
     /** buffer contains text related to the current record.
      *
-     * Before #read is called, this holds the file header.  After #read
-     * is called, this holds a record type indicated by \a epoch.flag.
-     *
-     * When a special event is read, this holds the event records;
+     * Before #read is called, this holds the RINEX file header as text.
+     * 
+     * After #read is called and a special event is read (as indicated
+     * by \a epoch.flag ), this holds the event records:
      * \a epoch.n_sats+1 lines, with '\n' as the line terminator.
      * The first line holds the epoch information (in case, for example,
      * the presence or absence of a timestamp is significant).
-     *
-     * When an observation or cycle slip record is read, this holds the
-     * satellite names and signal-presence bitfields.  For each observed
-     * satellite, this contains the satellite system identifier (one
-     * character) followed by the satellite number (one byte, where 'A'
-     * corresponds to satellite 65 because 65 is the ASCII code point
-     * for 'A') followed by (N+7)/8 bytes, where N is the number of
-     * observation codes defined in the file header for the satellite
-     * system.  The first observation code is present when the LSB of
-     * the first byte is set, the second observation code is present
-     * when the next LSB of the first byte is set, and so forth.
      */
     char *buffer;
 
-    /** lli contains the loss-of-lock indicators.  lli[n] corresponds to
-     * the n'th "observation present" bit set in #buffer.
+    /** sats holds metadata about observed satellites.
+     *
+     * Specifically, \a sats[i] identifies the i'th observed satellite,
+     * along with its base index in #obs, #lli and #ssi.  The number of
+     * valid entries is given by \a epoch.n_sats.  This is only valid
+     * when \a epoch.flag is 0, 1 or 6.
      */
-    char *lli;
+    struct rinex_sv_info *sats;
 
-    /** ssi contains the signal strength indocators.  ssi[n] corresponds
-     * to the n'th "observation present" bit set in #buffer.
-     */
-    char *ssi;
-
-    /** obs contains the parsed observation values, times 1000.  obs[n]
-     * corresponds to the n'th "observation present" bit set in #buffer.
+    /** obs contains the parsed observation values, times 1000.
+     *
+     * A value less than RINEX_MIN_OBS indicates the observation was
+     * missing or blank during this epoch.  This is only valid when
+     * \a epoch.flag is 0, 1 or 6.  The indexing is determined by
+     * #sats.
      */
     int64_t *obs;
+
+    /** lli contains the loss-of-lock indicators. */
+    char *lli;
+
+    /** ssi contains the signal strength indocators. */
+    char *ssi;
 
     /** n_obs counts the possible observations per satellite system.
      *
      * For the satellite system with identifier 'A', n_obs['A' & 31]
      * indicates the number of observations possible for it.
+     *
+     * (RINEX 2.11 defines 26 observation codes, and RINEX 3.05 and 4.00
+     * define up to about 120 codes for the extant satellite systems,
+     * plus up to 9 pseudo-observables with receiver channel numbers.)
      */
-    short n_obs[32];
+    unsigned char n_obs[32];
 
     /** stream is the source of data for this file parser. */
     struct rinex_stream *stream;

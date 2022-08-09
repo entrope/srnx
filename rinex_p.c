@@ -116,7 +116,7 @@ void *memmem
 
 /* Documentation comment in rinex_p.h. */
 int rnx_copy_text(
-    struct rnx_v23_parser *p,
+    struct rnx_v234_parser *p,
     int eol_ofs
 )
 {

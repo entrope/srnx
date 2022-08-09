@@ -31,7 +31,13 @@
 int verbose;
 
 __attribute__((weak))
-void finish()
+void start(void)
+{
+    /* this function intentionally left blank */
+}
+
+__attribute__((weak))
+void finish(void)
 {
     /* this function intentionally left blank */
 }
@@ -44,6 +50,8 @@ int main(int argc, char *argv[])
     struct rinex_parser *p = NULL;
     const char *err;
     int ii, use_mmap;
+
+    start();
 
     for (ii = 1, use_mmap = 1; ii < argc; ++ii)
     {

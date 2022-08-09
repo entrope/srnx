@@ -241,7 +241,7 @@ static void rnx_movemask_neon
 
 static const char *rnx_parse_obs
 (
-    struct rnx_v23_parser *p,
+    struct rnx_v234_parser *p,
     const char *obs,
     int nn
 )
@@ -305,7 +305,7 @@ static const char blank[] = "                ";
 
 /** rnx_read_v2_observations reads observations from \a p. */
 static rinex_error_t rnx_read_v2_observations(
-    struct rnx_v23_parser *p,
+    struct rnx_v234_parser *p,
     const char *epoch,
     const char *obs
 )
@@ -466,7 +466,7 @@ eol:
     return RINEX_SUCCESS;
 }
 
-static int rnx_v2_parse_time(struct rnx_v23_parser *p, const char *line)
+static int rnx_v2_parse_time(struct rnx_v234_parser *p, const char *line)
 {
     int64_t i64;
     int yy, mm, dd, hh, min, n_sats;
@@ -497,7 +497,7 @@ static int rnx_v2_parse_time(struct rnx_v23_parser *p, const char *line)
 /** rnx_read_v2 reads an observation data record from \a p_. */
 static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
 {
-    struct rnx_v23_parser *p = (struct rnx_v23_parser *)p_;
+    struct rnx_v234_parser *p = (struct rnx_v234_parser *)p_;
     const char *line;
     rinex_error_t err;
     int res, nn, n_sats, body_ofs, line_len;
@@ -597,9 +597,9 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     return RINEX_ERR_BAD_FORMAT;
 }
 
-/** rnx_read_v3_observations reads observations from \a obs. */
-static rinex_error_t rnx_read_v3_observations(
-    struct rnx_v23_parser *p,
+/** rnx_read_v34_observations reads observations from \a obs. */
+static rinex_error_t rnx_read_v34_observations(
+    struct rnx_v234_parser *p,
     const char obs[]
 )
 {
@@ -759,10 +759,10 @@ static rinex_error_t rnx_read_v3_observations(
     return RINEX_SUCCESS;
 }
 
-/** rnx_read_v3 reads an observation data record from \a p_. */
-static rinex_error_t rnx_read_v3(struct rinex_parser *p_)
+/** rnx_read_v34 reads an observation data record from \a p_. */
+static rinex_error_t rnx_read_v34(struct rinex_parser *p_)
 {
-    struct rnx_v23_parser *p = (struct rnx_v23_parser *)p_;
+    struct rnx_v234_parser *p = (struct rnx_v234_parser *)p_;
     const char *line;
     int64_t i64;
     int res, yy, mm, dd, hh, min, n_sats, line_len;
@@ -831,7 +831,7 @@ static rinex_error_t rnx_read_v3(struct rinex_parser *p_)
     switch (p->base.epoch.flag)
     {
     case '0': case '1': case '6':
-        return rnx_read_v3_observations(p, line);
+        return rnx_read_v34_observations(p, line);
 
     case '2': case '3': case '4': case '5':
         /* We already did most of the work. */
@@ -845,10 +845,10 @@ static rinex_error_t rnx_read_v3(struct rinex_parser *p_)
     return RINEX_ERR_BAD_FORMAT;
 }
 
-/** rnx_free_v23 deallocates \a p_, which must be a rnx_v23_parser. */
+/** rnx_free_v23 deallocates \a p_, which must be a rnx_v234_parser. */
 static void rnx_free_v23(struct rinex_parser *p_)
 {
-    struct rnx_v23_parser *p = (struct rnx_v23_parser *)p_;
+    struct rnx_v234_parser *p = (struct rnx_v234_parser *)p_;
 
     free(p->base.buffer);
     free(p->base.lli);
@@ -961,7 +961,7 @@ static int crx_read_v2_sv_list(struct crx_v23_parser *crx)
 static rinex_error_t crx_read_v2(struct rinex_parser *p_)
 {
     struct crx_v23_parser *crx = (struct crx_v23_parser *)p_;
-    struct rnx_v23_parser *p = &crx->base;
+    struct rnx_v234_parser *p = &crx->base;
     const char *line;
     int res, err, line_len, ii;
 
@@ -1105,11 +1105,11 @@ crx_v2_copy_text:
     }
 }
 
-/** crx_read_v3 reads an observation data record from \a p_. */
-static rinex_error_t crx_read_v3(struct rinex_parser *p_)
+/** crx_read_v34 reads an observation data record from \a p_. */
+static rinex_error_t crx_read_v34(struct rinex_parser *p_)
 {
     struct crx_v23_parser *crx = (struct crx_v23_parser *)p_;
-    struct rnx_v23_parser *p = &crx->base;
+    struct rnx_v234_parser *p = &crx->base;
 
     (void)p;
     return RINEX_SUCCESS;
@@ -1146,7 +1146,7 @@ const char *rinex_find_header
 }
 
 /** rnx_open_v2 reads the observation codes in \a p->base.header. */
-static const char *rnx_open_v2(struct rnx_v23_parser *p)
+static const char *rnx_open_v2(struct rnx_v234_parser *p)
 {
     static const char n_obs[] = "# / TYPES OF OBSERV";
     const char *line;
@@ -1201,8 +1201,8 @@ static const char *rnx_open_v2(struct rnx_v23_parser *p)
     return NULL;
 }
 
-/** rnx_open_v3 reads the observation codes in \a p->base.header. */
-static const char *rnx_open_v3(struct rnx_v23_parser *p)
+/** rnx_open_v34 reads the observation codes in \a p->base.header. */
+static const char *rnx_open_v34(struct rnx_v234_parser *p)
 {
     static const char sys_n_obs[] = "SYS / # / OBS TYPES";
     const char *line;
@@ -1308,7 +1308,7 @@ static rinex_error_t rnx_copy_header
 
 const char *rnx_open_v23
 (
-    struct rnx_v23_parser *p,
+    struct rnx_v234_parser *p,
     struct rinex_stream *stream,
     int hdr_ofs
 )
@@ -1356,10 +1356,11 @@ const char *rnx_open_v23
         p->base.read = rnx_read_v2;
         err = rnx_open_v2(p);
     }
-    else if (!memcmp("      3.x", stream->buffer, 7))
+    else if (!memcmp("      3.", stream->buffer, 7)
+        || !memcmp("      4.", stream->buffer, 7))
     {
-        p->base.read = rnx_read_v3;
-        err = rnx_open_v3(p);
+        p->base.read = rnx_read_v34;
+        err = rnx_open_v34(p);
     }
     else
     {
@@ -1409,15 +1410,15 @@ const char *crx_open_v23
             crx->base.base.read = crx_read_v2;
         }
     }
-    else if (crx->base.base.read == rnx_read_v3)
+    else if (crx->base.base.read == rnx_read_v34)
     {
         if (memcmp("3.0 ", stream->buffer, 4))
         {
-            err = "Expected CRINEX 3.0 for RINEX v3.x";
+            err = "Expected CRINEX 3.0 for RINEX v3.x/v4.x";
         }
         else
         {
-            crx->base.base.read = crx_read_v3;
+            crx->base.base.read = crx_read_v34;
         }
     }
     else
@@ -1462,9 +1463,9 @@ const char *rinex_open
     /* Is it an uncompressed RINEX file? */
     if (!memcmp(rinex_version_type, stream->buffer + 60, 20))
     {
-        struct rnx_v23_parser *p;
+        struct rnx_v234_parser *p;
 
-        p = calloc(1, sizeof(struct rnx_v23_parser));
+        p = calloc(1, sizeof(struct rnx_v234_parser));
         if (!p)
         {
             return "Memory allocation failed";
@@ -1482,7 +1483,7 @@ const char *rinex_open
     else if (!memcmp(crx_version_type, stream->buffer + 60, 20))
     {
         struct crx_v23_parser *crx;
-        struct rnx_v23_parser *p;
+        struct rnx_v234_parser *p;
 
         crx = calloc(1, sizeof(struct crx_v23_parser));
         if (!crx)

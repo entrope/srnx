@@ -39,23 +39,28 @@ struct rinex_epoch
      * log2(10000 * 12 * 31 * 24 * 60) = 32.32 (yyyy .. mm)
      * log2(2*609999999) = 30.2 (seconds)
      * log2(1.1e14) = ~46.6 (clock offset)
-     * plus 4 bits for flag and 10 bits for n_sats
+     * plus 3 bits for flag and 9 bits for n_sats
+     * rounding up each field gives a total of 123 bits
      */
 
     /** Decimal-coded date.
      * Contains the sum year * 10000 + month * 100 + day.
+     * ceil(log2(99991231)) = 27 bits used.
      */
     int yyyy_mm_dd;
 
     /** Decimal-coded minute of day.
      * Contains the sum of hour * 100 + minute.
+     * ceil(log2(5960)) = 13 bits used.
      */
     short hh_mm;
 
     /** Epoch flag (normally '0' through '6'). */
     char flag;
 
-    /** Seconds of minute times 1e7. */
+    /** Seconds of minute times 1e7.
+     * ceil(log2(609999999)) = 30 bits used.
+     */
     int sec_e7;
 
     /** Number of satellites or special event records. */
