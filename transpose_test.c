@@ -1,3 +1,8 @@
+/** transpose_test.c - Test harness for transposing bit matrices.
+ * Copyright 2021 Michael Poole.
+ * SPDX-License-Identifier: MIT-Modern-Variant
+ */
+
 #define _POSIX_C_SOURCE 199309L
 
 #include <stdint.h>

@@ -1,25 +1,6 @@
 /** rinex.h - Reader for RINEX observation files.
  * Copyright 2020 Michael Poole.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
 #if !defined(RINEX_H_b56f2d84_3a1e_4708_b3c2_6655d0b571c5)
@@ -245,6 +226,7 @@ const char *rinex_find_header
     unsigned int sizeof_label
 );
 
+struct rinex_stream *rinex_buffer_stream(const void *buffer, int nbytes);
 struct rinex_stream *rinex_mmap_stream(const char *filename);
 struct rinex_stream *rinex_stdio_stream(const char *filename);
 struct rinex_stream *rinex_stdin_stream(void);
