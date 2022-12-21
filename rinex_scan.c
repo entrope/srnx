@@ -12,8 +12,7 @@ void process_file(struct rinex_parser *p, const char filename[])
     static uint64_t sat_obs[100 * 32];
     uint64_t tmp_sat_obs;
     int count, max_obs, tot_obs, max_sats, ii, jj, n_obs, sys_obs;
-    int sys_idx, sat_idx, act_obs;
-    const char *buffer;
+    int sys_idx, sat_idx, act_obs, sat_ofs;
 
     memset(sat_obs, 0, sizeof(sat_obs));
     for (count = max_obs = max_sats = tot_obs = 0; ; ++count)
@@ -39,20 +38,22 @@ void process_file(struct rinex_parser *p, const char filename[])
             max_sats = p->epoch.n_sats;
         }
 
-        buffer = p->buffer;
         for (ii = n_obs = 0; ii < p->epoch.n_sats; ++ii)
         {
-            sys_idx = buffer[0] & 31;
-            sat_idx = buffer[1] * 32 + sys_idx;
+            sys_idx = p->sats[ii].system & 31;
+            sat_idx = p->sats[ii].number + sys_idx;
+            sat_ofs = p->sats[ii].obs_0;
             tmp_sat_obs = sat_obs[sat_idx];
             sys_obs = p->n_obs[sys_idx];
-            for (jj = 0; jj < (sys_obs + 7) >> 3; ++jj)
+            for (jj = 0; jj < sys_obs; ++jj)
             {
-                tmp_sat_obs |= (uint64_t)(buffer[2+jj] & 255) << 8 * jj;
-                n_obs += __builtin_popcount(buffer[2+jj] & 255);
+                if (p->obs[sat_ofs + jj] != 0)
+                {
+                    tmp_sat_obs |= (uint64_t)1 << jj;
+                    n_obs += 1;
+                }
             }
             sat_obs[sat_idx] = tmp_sat_obs;
-            buffer += 2 + jj;
         }
 
         tot_obs += n_obs;

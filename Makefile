@@ -1,26 +1,53 @@
 EXE = rinex_analyze rinex_maxima rinex_scan transpose_test
+TESTS = test_rnx_v2
 all: librinex.a $(EXE)
 
+LIBTAP_HOME=../libtap
+
 # CC = aarch64-linux-gnu-gcc
-CFLAGS = -Wall -Wextra -Werror -g -flto -O3 -mavx2
+# CC = clang -finline-aggressive -finstrument-functions-after-inlining -fitodcallsbyclone -floop-splitting -flto -fnt-store=auto -funroll-loops -freroll-loops -fvectorize -fwrapv
+# CC = gcc -fprofile-generate
+# CC = gcc -fprofile-use -fprofile-correction
+CFLAGS = -Wall -Wextra -Werror -g -flto -O3 -march=native
 
-.PHONY: clean
+.PHONY: clean check
 clean:
-	rm -f librinex.a *.o *.s $(EXE)
+	rm -f librinex.a librinex_cov.a *.o *.s *.gcda *.gcno \
+	coverage.css coverage.html coverage.*.html \
+	$(EXE) $(TESTS)
 
-librinex.a: driver.o rinex_mmap.o rinex_p.o rinex_parse.o rinex_stdio.o \
-	srnx.o transpose.o
+check: $(TESTS)
+	./test_rnx_v2 | ./tapview
+
+LIBRINEX_OBJS = \
+	driver.o \
+	rinex_mmap.o \
+	rinex_p.o \
+	rinex_parse.o \
+	rinex_stdio.o \
+	rinex_buffer.o \
+	transpose.o
+# srnx.o
+
+librinex.a: $(LIBRINEX_OBJS)
 	ar crs $@ $?
 
 rinex_analyze: rinex_analyze.c librinex.a
-
 rinex_maxima: rinex_maxima.c librinex.a
-
 rinex_n_obs: rinex_n_obs.c librinex.a
-
 rinex_scan: rinex_scan.c librinex.a
-
 transpose_test: transpose_test.c librinex.a
+
+test_rnx_v2: test_rnx_v2.c librinex_cov.a
+test_rnx_v2: CFLAGS += -I$(LIBTAP_HOME)
+test_rnx_v2: LDFLAGS += -L$(LIBTAP_HOME) --coverage
+test_rnx_v2: LDLIBS += -Wl,-rpath,$(LIBTAP_HOME) -ltap
+
+librinex_cov.a: $(LIBRINEX_OBJS:.o=.cov.o)
+	ar crs $@ $?
+
+%.cov.o: %.c
+	$(CC) $(subst -O3,-O0 --coverage,$(CFLAGS)) -c -o $@ $<
 
 %.s: %.c
 	$(CC) $(CFLAGS) -S -o $@ $<

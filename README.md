@@ -100,7 +100,7 @@ perf script | stackcollapse-perf.pl > out.perf-folded && flamegraph.pl out.perf-
 
 ## Throughput benchmarks:
 
-For `./rinex_scan 2020_200/m*.20o`, with ~42091 MB of input:
+For `./rinex_scan 2020_200/m*.20o`, with 42,091,216,806 bytes of input:
  - AMD Threadripper 3960X, -O3 -march=native -fprofile-use -fprofile-correction (after -fprofile-generate):
    `./rinex_scan 2020_200/m*.20o  13.85s user 1.28s system 99% cpu 15.125 total`
    3039 MB/sec user, 2782 MB/sec user+system, 2783 MB/sec wall clock

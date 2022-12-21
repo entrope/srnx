@@ -104,10 +104,11 @@ static const char *rnx_buffer_and_parse_obs
 static void rnx_parse_final_avx2
 (
     const __m128i v_obs[8],
+    const int idx[],
+    int count,
     int64_t *base,
     char *lli,
-    char *ssi,
-    int count
+    char *ssi
 )
 {
     __m256i res_lo = rnx_parse_4(v_obs + 0);
@@ -116,39 +117,40 @@ static void rnx_parse_final_avx2
     switch (count)
     {
     case 7:
-        lli[6] = _mm_extract_epi8(v_obs[6], 14);
-        ssi[6] = _mm_extract_epi8(v_obs[6], 15);
-        base[6] = _mm256_extract_epi64(res_hi, 2);
+        lli[idx[6]] = _mm_extract_epi8(v_obs[6], 14);
+        ssi[idx[6]] = _mm_extract_epi8(v_obs[6], 15);
+        /* see the comment below about idx[5] */
+        base[idx[5]] = _mm256_extract_epi64(res_hi, 2);
         /* fall through */
     case 6:
-        lli[5] = _mm_extract_epi8(v_obs[5], 14);
-        ssi[5] = _mm_extract_epi8(v_obs[5], 15);
-        base[5] = _mm256_extract_epi64(res_hi, 1);
+        lli[idx[5]] = _mm_extract_epi8(v_obs[5], 14);
+        ssi[idx[5]] = _mm_extract_epi8(v_obs[5], 15);
+        base[idx[6]] = _mm256_extract_epi64(res_hi, 1);
         /* fall through */
     case 5:
-        lli[4] = _mm_extract_epi8(v_obs[4], 14);
-        ssi[4] = _mm_extract_epi8(v_obs[4], 15);
-        base[4] = _mm256_extract_epi64(res_hi, 0);
+        lli[idx[4]] = _mm_extract_epi8(v_obs[4], 14);
+        ssi[idx[4]] = _mm_extract_epi8(v_obs[4], 15);
+        base[idx[4]] = _mm256_extract_epi64(res_hi, 0);
         /* fall through */
     case 4:
-        lli[3] = _mm_extract_epi8(v_obs[3], 14);
-        ssi[3] = _mm_extract_epi8(v_obs[3], 15);
-        base[3] = _mm256_extract_epi64(res_lo, 3);
+        lli[idx[3]] = _mm_extract_epi8(v_obs[3], 14);
+        ssi[idx[3]] = _mm_extract_epi8(v_obs[3], 15);
+        base[idx[3]] = _mm256_extract_epi64(res_lo, 3);
         /* fall through */
     case 3:
-        lli[2] = _mm_extract_epi8(v_obs[2], 14);
-        ssi[2] = _mm_extract_epi8(v_obs[2], 15);
-        base[2] = _mm256_extract_epi64(res_lo, 2);
+        lli[idx[2]] = _mm_extract_epi8(v_obs[2], 14);
+        ssi[idx[2]] = _mm_extract_epi8(v_obs[2], 15);
+        base[idx[3]] = _mm256_extract_epi64(res_lo, 2);
         /* fall through */
     case 2:
-        lli[1] = _mm_extract_epi8(v_obs[1], 14);
-        ssi[1] = _mm_extract_epi8(v_obs[1], 15);
-        base[1] = _mm256_extract_epi64(res_lo, 1);
+        lli[idx[1]] = _mm_extract_epi8(v_obs[1], 14);
+        ssi[idx[1]] = _mm_extract_epi8(v_obs[1], 15);
+        base[idx[2]] = _mm256_extract_epi64(res_lo, 1);
         /* fall through */
     case 1:
-        lli[0] = _mm_extract_epi8(v_obs[0], 14);
-        ssi[0] = _mm_extract_epi8(v_obs[0], 15);
-        base[0] = _mm256_extract_epi64(res_lo, 0);
+        lli[idx[0]] = _mm_extract_epi8(v_obs[0], 14);
+        ssi[idx[0]] = _mm_extract_epi8(v_obs[0], 15);
+        base[idx[0]] = _mm256_extract_epi64(res_lo, 0);
     }
 }
 
@@ -157,9 +159,8 @@ static void rnx_parse_final_avx2
 static const char *rnx_parse_obs_neon
 (
     const char *obs,
-    int64_t *p_obs,
-    uint8x16_t *p_lli,
-    uint8x16_t *p_ssi
+    struct rinex_parser *p,
+    int idx
 )
 {
     const uint8x16_t v_zero = vdupq_n_u8(0);
@@ -194,12 +195,12 @@ static const char *rnx_parse_obs_neon
     uint32x4_t m_dig_u32 = vpaddq_u16(m_dig_u16);
     const uint32x4_t v_
 
-    *p_lli = vextq_u8(vdupq_n_u8(m_obs[14]), *p_lli, 1);
-    *p_ssi = vextq_u8(m_obs, *p_ssi, 1);
+    p->lli[idx] = m_obs[14];
+    p->ssi[idx] = m_obs[15];
 
     /* TODO: convert observation value to int64_t */
 
-    *p_obs = 0;
+    p->obs[idx] = 0;
     return obs + idx;
 }
 
@@ -284,6 +285,43 @@ static const char *rnx_parse_obs
 
 static const char blank[] = "                ";
 
+static rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p)
+{
+    if (p->sats_alloc < p->base.epoch.n_sats)
+    {
+        void *new_ptr;
+        size_t new_len;
+        int new_count;
+
+        /* How many slots do we want to have? */
+        new_count = p->sats_alloc ? p->sats_alloc : p->base.epoch.n_sats;
+        while (new_count < p->base.epoch.n_sats)
+        {
+            new_count *= 2;
+        }
+        if ((size_t)new_count > SIZE_MAX / sizeof(p->base.sats[0]))
+        {
+            p->base.error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+
+        /* (Re-)Allocate the array. */
+        new_len = new_count * sizeof(p->base.sats[0]);
+        new_ptr = realloc(p->base.sats, new_len);
+        if (!new_ptr)
+        {
+            p->base.error_line = __LINE__;
+            return RINEX_ERR_SYSTEM;
+        }
+
+        /* Write back the new array. */
+        p->base.sats = new_ptr;
+        p->sats_alloc = new_count;
+    }
+
+    return RINEX_SUCCESS;
+}
+
 /** rnx_read_v2_observations reads observations from \a p. */
 static rinex_error_t rnx_read_v2_observations(
     struct rnx_v234_parser *p,
@@ -293,23 +331,25 @@ static rinex_error_t rnx_read_v2_observations(
 {
 #if defined(__AVX2__)
     __m128i v_obs[8];
+    int idx[8];
+    int kk = 0;
 #elif defined(__ARM_NEON)
     uint8x16_t v_lli = vdupq_n_u8(0);
     uint8x16_t v_ssi = vdupq_n_u8(0);
 #endif
-    char *buffer;
+    /* ii: read index for satellites within the epoch.
+     * jj: read index for observations within the satellite.
+     * nn: write index for observations within p->base.{lli,ssi,obs}.
+     */
     int ii, jj, nn;
 
     /* Read observations for each satellite. */
-    p->base.buffer_len = 0;
-    buffer = p->base.buffer + p->base.buffer_len;
     for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
     {
         /* Determine the satellite identifier. */
         const char *sv_name = epoch + 32 + 3 * (ii % 12);
         int n_obs = p->base.n_obs[sv_name[0] & 31];
         char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
-        uint8_t obs_mask = 0; /* presence bitmask for observations */
 
         /* There are 12 satellite names per header line. */
         if (ii % 12 == 11)
@@ -317,40 +357,14 @@ static rinex_error_t rnx_read_v2_observations(
             epoch = strchr(epoch, '\n') + 1;
         }
 
-        /* Grow buffer if needed. */
-        if (p->buffer_alloc < p->base.buffer_len + 2 + (n_obs + 7) / 8)
-        {
-            /* n_obs <= 25, so we need to add at most 6 bytes; but
-             * buffer_alloc was already big enough for the file header.
-             */
-            p->buffer_alloc <<= 1;
-            p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
-            if (!p->base.buffer)
-            {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_SYSTEM;
-            }
-            buffer = p->base.buffer + p->base.buffer_len;
-        }
-
-        /* Save satellite identifier. */
-        *buffer++ = sv_name[0];
-        *buffer++ = svn;
+        /* Save satellite information. */
+        p->base.sats[ii].system = sv_name[0];
+        p->base.sats[ii].number = svn;
+        p->base.sats[ii].obs_0 = nn;
 
         /* Read each observation for this satellite. */
-        for (jj = 0; jj < n_obs; ++jj)
+        for (jj = 0; jj < n_obs; ++jj, ++nn)
         {
-            /* If at EOL or a blank, skip this observation. */
-            if (*obs == '\n')
-            {
-                goto eol;
-            }
-            if (!memcmp(obs, blank, 16))
-            {
-                obs += 16;
-                goto eol;
-            }
-
             /* Do we need more buffer space? */
             if (nn >= p->obs_alloc)
             {
@@ -366,10 +380,27 @@ static rinex_error_t rnx_read_v2_observations(
                 }
             }
 
+            /* If at EOL or a blank, skip this observation. */
+            if ((*obs == '\n') || !memcmp(obs, blank, 16))
+            {
+                p->base.obs[nn] = 0;
+                p->base.lli[nn] = '\0';
+                p->base.ssi[nn] = '\0';
+                /* If *obs == '\n', consume it at the last observation
+                 * for the satellite OR the line.  Otherwise, consume
+                 * the 16 blanks that we are looking at.
+                 */
+                obs += (*obs == '\n')
+                    ? (((jj + 1) == n_obs) || ((jj % 5) == 4))
+                    : 16;
+                continue;
+            }
+
             /* Copy the observation data. */
 #if defined(__AVX2__)
-            obs = rnx_buffer_and_parse_obs(obs, v_obs + (nn & 7));
-            if ((nn & 7) == 7)
+            idx[kk] = nn;
+            obs = rnx_buffer_and_parse_obs(obs, v_obs + kk);
+            if (++kk == 8)
             {
                 __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]);
                 __m128i lli_ssi_23 = _mm_unpackhi_epi8(v_obs[2], v_obs[3]);
@@ -378,21 +409,39 @@ static rinex_error_t rnx_read_v2_observations(
                 __m128i lli_ssi_03 = _mm_unpackhi_epi16(lli_ssi_01, lli_ssi_23);
                 __m128i lli_ssi_47 = _mm_unpackhi_epi16(lli_ssi_45, lli_ssi_67);
                 __m128i lli_ssi = _mm_unpackhi_epi32(lli_ssi_03, lli_ssi_47);
-                _mm_storel_epi64((__m128i *)(p->base.lli + nn - 7), lli_ssi);
-                _mm_storel_epi64((__m128i *)(p->base.ssi + nn - 7),
-                    _mm_shuffle_epi32(lli_ssi, 0xB1));
-                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 7),
-                    rnx_parse_4(v_obs));
-                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 3),
-                    rnx_parse_4(v_obs + 4));
+                __m256i obs_03 = rnx_parse_4(v_obs);
+                __m256i obs_47 = rnx_parse_4(v_obs + 4);
+                p->base.lli[idx[0]] = _mm_extract_epi8(lli_ssi, 0);
+                p->base.lli[idx[1]] = _mm_extract_epi8(lli_ssi, 1);
+                p->base.lli[idx[2]] = _mm_extract_epi8(lli_ssi, 2);
+                p->base.lli[idx[3]] = _mm_extract_epi8(lli_ssi, 3);
+                p->base.lli[idx[4]] = _mm_extract_epi8(lli_ssi, 4);
+                p->base.lli[idx[5]] = _mm_extract_epi8(lli_ssi, 5);
+                p->base.lli[idx[6]] = _mm_extract_epi8(lli_ssi, 6);
+                p->base.lli[idx[7]] = _mm_extract_epi8(lli_ssi, 7);
+                p->base.ssi[idx[0]] = _mm_extract_epi8(lli_ssi,  8);
+                p->base.ssi[idx[1]] = _mm_extract_epi8(lli_ssi,  9);
+                p->base.ssi[idx[2]] = _mm_extract_epi8(lli_ssi, 10);
+                p->base.ssi[idx[3]] = _mm_extract_epi8(lli_ssi, 11);
+                p->base.ssi[idx[4]] = _mm_extract_epi8(lli_ssi, 12);
+                p->base.ssi[idx[5]] = _mm_extract_epi8(lli_ssi, 13);
+                p->base.ssi[idx[6]] = _mm_extract_epi8(lli_ssi, 14);
+                p->base.ssi[idx[7]] = _mm_extract_epi8(lli_ssi, 15);
+                /* Because of AVX's "lane" arrangement, the indexes are
+                 * a little mixed up in the middle of each register.
+                 */
+                p->base.obs[idx[0]] = _mm256_extract_epi64(obs_03, 0);
+                p->base.obs[idx[2]] = _mm256_extract_epi64(obs_03, 1);
+                p->base.obs[idx[1]] = _mm256_extract_epi64(obs_03, 2);
+                p->base.obs[idx[3]] = _mm256_extract_epi64(obs_03, 3);
+                p->base.obs[idx[4]] = _mm256_extract_epi64(obs_47, 0);
+                p->base.obs[idx[6]] = _mm256_extract_epi64(obs_47, 1);
+                p->base.obs[idx[5]] = _mm256_extract_epi64(obs_47, 2);
+                p->base.obs[idx[7]] = _mm256_extract_epi64(obs_47, 3);
+                kk = 0;
             }
 #elif defined(__ARM_NEON)
-            obs = rnx_parse_obs_neon(obs, p->base.obs + nn, &v_lli, &v_ssi);
-            if (nn & 15 == 15)
-            {
-                vst1q_u8((uint8_t *)(p->base.lli + nn - 15), v_lli);
-                vst1q_u8((uint8_t *)(p->base.ssi + nn - 15), v_ssi);
-            }
+            obs = rnx_parse_obs_neon(obs, &p->base, nn);
 #else
             obs = rnx_parse_obs(p, obs, nn);
 #endif
@@ -402,45 +451,18 @@ static rinex_error_t rnx_read_v2_observations(
                 return RINEX_ERR_BAD_FORMAT;
             }
 
-            /* Remember that we saw this signal. */
-            obs_mask |= 1 << (jj & 7);
-            nn++;
-
-eol:
-            /* Update presence bitmasks. */
-            if (((jj + 1) == n_obs) || ((jj & 7) == 7))
+            if ((*obs == '\n') && (((jj + 1) == n_obs) || ((jj % 5) == 4)))
             {
-                *buffer++ = obs_mask;
-                obs_mask = 0;
-            }
-
-            /* There are up to five observations per line. */
-            if (((jj + 1) == n_obs) || ((jj % 5) == 4))
-            {
-                if (*obs != '\n')
-                {
-                    p->base.error_line = __LINE__;
-                    return RINEX_ERR_BAD_FORMAT;
-                }
-                obs++;
+                obs += 1;
             }
         }
-
-        /* Make sure buffer_len is updated. */
-        p->base.buffer_len = buffer - p->base.buffer;
     }
 
 #if defined(__AVX2__)
-    if (nn & 7)
+    if (kk)
     {
-        rnx_parse_final_avx2(v_obs, p->base.obs + (nn & ~7),
-            p->base.lli + (nn & ~7), p->base.ssi + (nn & ~7), nn & 7);
-    }
-#elif defined(__ARM_NEON)
-    if (nn & 15)
-    {
-        rnx_movemask_neon(p->base.lli + nn & ~15, nn & 15, v_lli);
-        rnx_movemask_neon(p->base.ssi + nn & ~15, nn & 15, v_ssi);
+        rnx_parse_final_avx2(v_obs, idx, kk,
+            p->base.obs, p->base.lli, p->base.ssi);
     }
 #endif
 
@@ -454,6 +476,7 @@ static int rnx_v2_parse_time(struct rnx_v234_parser *p, const char *line)
 
     i64 = 0;
     yy = mm = dd = hh = min = n_sats = 0;
+    p->base.epoch.flag = line[28];
     if (line[28] < '0' || line[28] > '6'
         || parse_uint(&yy, line+1, 2) || parse_uint(&mm, line+4, 2)
         || parse_uint(&dd, line+7, 2) || parse_uint(&hh, line+10, 2)
@@ -470,7 +493,6 @@ static int rnx_v2_parse_time(struct rnx_v234_parser *p, const char *line)
     p->base.epoch.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
     p->base.epoch.hh_mm = hh * 100 + min;
     p->base.epoch.sec_e7 = i64;
-    p->base.epoch.flag = line[28];
     p->base.epoch.n_sats = n_sats;
     return 0;
 }
@@ -545,6 +567,11 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
         line = p->base.stream->buffer + p->parse_ofs;
         p->parse_ofs = res;
 
+        err = rnx_ensure_sats(p);
+        if (err != RINEX_SUCCESS)
+        {
+            return err;
+        }
         return rnx_read_v2_observations(p, line,
             p->base.stream->buffer + body_ofs);
 
@@ -586,48 +613,34 @@ static rinex_error_t rnx_read_v34_observations(
 {
 #if defined(__AVX2__)
     __m128i v_obs[8];
+    int idx[8];
+    int kk = 0;
 #elif defined(__ARM_NEON)
     uint8x16_t v_lli = vdupq_n_u8(0);
     uint8x16_t v_ssi = vdupq_n_u8(0);
 #endif
-    char *buffer;
+    /* ii: read index for satellites within the epoch.
+     * jj: read index for observations within the satellite.
+     * nn: write index for observations within p->base.{lli,ssi,obs}.
+     */
     int ii, jj, nn;
 
     /* Read observations for each satellite. */
-    p->base.buffer_len = 0;
-    buffer = p->base.buffer + p->base.buffer_len;
     for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
     {
         /* Look up the satellite system's observation count. */
         const char *sv_name = obs;
         short n_obs = p->base.n_obs[sv_name[0] & 31];
         char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
-        uint8_t obs_mask = 0; /* presence bitmask for observations */
         obs += 3;
 
-        /* Grow buffer if needed. */
-        if (p->buffer_alloc < p->base.buffer_len + 2 + (n_obs + 7) / 8)
-        {
-            /* n_obs <= 999, so we need to add at most 128 bytes, and
-             * we know buffer_alloc will be at least that big to have
-             * held the file header.
-             */
-            p->buffer_alloc <<= 1;
-            p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
-            if (!p->base.buffer)
-            {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_SYSTEM;
-            }
-            buffer = p->base.buffer + p->base.buffer_len;
-        }
-
-        /* Save satellite identifier. */
-        *buffer++ = sv_name[0];
-        *buffer++ = svn;
+        /* Save satellite information. */
+        p->base.sats[ii].system = sv_name[0];
+        p->base.sats[ii].number = svn;
+        p->base.sats[ii].obs_0 = nn;
 
         /* Read each observation for this satellite. */
-        for (jj = 0; jj < n_obs; ++jj)
+        for (jj = 0; jj < n_obs; ++jj, ++nn)
         {
             /* If at EOL, we are done for this satellite. */
             if (*obs == '\n')
@@ -659,8 +672,9 @@ static rinex_error_t rnx_read_v34_observations(
 
             /* Copy the observation data. */
 #if defined(__AVX2__)
-            obs = rnx_buffer_and_parse_obs(obs, v_obs + (nn & 7));
-            if ((nn & 7) == 7)
+            idx[kk] = nn;
+            obs = rnx_buffer_and_parse_obs(obs, v_obs + kk);
+            if (++kk == 8)
             {
                 __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]);
                 __m128i lli_ssi_23 = _mm_unpackhi_epi8(v_obs[2], v_obs[3]);
@@ -669,21 +683,36 @@ static rinex_error_t rnx_read_v34_observations(
                 __m128i lli_ssi_03 = _mm_unpackhi_epi16(lli_ssi_01, lli_ssi_23);
                 __m128i lli_ssi_47 = _mm_unpackhi_epi16(lli_ssi_45, lli_ssi_67);
                 __m128i lli_ssi = _mm_unpackhi_epi32(lli_ssi_03, lli_ssi_47);
-                _mm_storel_epi64((__m128i *)(p->base.lli + nn - 7), lli_ssi);
-                _mm_storel_epi64((__m128i *)(p->base.ssi + nn - 7),
-                    _mm_shuffle_epi32(lli_ssi, 0xB1));
-                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 7),
-                    rnx_parse_4(v_obs));
-                _mm256_storeu_si256((__m256i *)(p->base.obs + nn - 3),
-                    rnx_parse_4(v_obs + 4));
+                __m256i obs_03 = rnx_parse_4(v_obs);
+                __m256i obs_47 = rnx_parse_4(v_obs + 4);
+                p->base.lli[idx[0]] = _mm_extract_epi8(lli_ssi, 0);
+                p->base.lli[idx[1]] = _mm_extract_epi8(lli_ssi, 1);
+                p->base.lli[idx[2]] = _mm_extract_epi8(lli_ssi, 2);
+                p->base.lli[idx[3]] = _mm_extract_epi8(lli_ssi, 3);
+                p->base.lli[idx[4]] = _mm_extract_epi8(lli_ssi, 4);
+                p->base.lli[idx[5]] = _mm_extract_epi8(lli_ssi, 5);
+                p->base.lli[idx[6]] = _mm_extract_epi8(lli_ssi, 6);
+                p->base.lli[idx[7]] = _mm_extract_epi8(lli_ssi, 7);
+                p->base.ssi[idx[0]] = _mm_extract_epi8(lli_ssi,  8);
+                p->base.ssi[idx[1]] = _mm_extract_epi8(lli_ssi,  9);
+                p->base.ssi[idx[2]] = _mm_extract_epi8(lli_ssi, 10);
+                p->base.ssi[idx[3]] = _mm_extract_epi8(lli_ssi, 11);
+                p->base.ssi[idx[4]] = _mm_extract_epi8(lli_ssi, 12);
+                p->base.ssi[idx[5]] = _mm_extract_epi8(lli_ssi, 13);
+                p->base.ssi[idx[6]] = _mm_extract_epi8(lli_ssi, 14);
+                p->base.ssi[idx[7]] = _mm_extract_epi8(lli_ssi, 15);
+                p->base.obs[idx[0]] = _mm256_extract_epi64(obs_03, 0);
+                p->base.obs[idx[2]] = _mm256_extract_epi64(obs_03, 1);
+                p->base.obs[idx[1]] = _mm256_extract_epi64(obs_03, 2);
+                p->base.obs[idx[3]] = _mm256_extract_epi64(obs_03, 3);
+                p->base.obs[idx[4]] = _mm256_extract_epi64(obs_47, 0);
+                p->base.obs[idx[6]] = _mm256_extract_epi64(obs_47, 1);
+                p->base.obs[idx[5]] = _mm256_extract_epi64(obs_47, 2);
+                p->base.obs[idx[7]] = _mm256_extract_epi64(obs_47, 3);
+                kk = 0;
             }
 #elif defined(__ARM_NEON)
-            obs = rnx_parse_obs_neon(obs, p->base.obs + nn, &v_lli, &v_ssi);
-            if (nn & 15 == 15)
-            {
-                vst1q_u8((uint8_t *)(p->base.lli + nn - 15), v_lli);
-                vst1q_u8((uint8_t *)(p->base.ssi + nn - 15), v_ssi);
-            }
+            obs = rnx_parse_obs_neon(obs, &p->base, nn);
 #else
             obs = rnx_parse_obs(p, obs, nn);
 #endif
@@ -692,28 +721,7 @@ static rinex_error_t rnx_read_v34_observations(
                 p->base.error_line = __LINE__;
                 return RINEX_ERR_BAD_FORMAT;
             }
-
-            /* Remember that we saw this signal. */
-            obs_mask |= 1 << (jj & 7);
-            nn++;
-
-            /* Update presence bitmasks. */
-            if (((jj & 7) == 7) || ((jj + 1) == n_obs))
-            {
-                *buffer++ = obs_mask;
-                obs_mask = 0;
-            }
         }
-
-        /* Finish writing presence bitmasks for a short line. */
-        for (; jj < n_obs; jj += 8)
-        {
-            *buffer++ = obs_mask;
-            obs_mask = 0;
-        }
-
-        /* Make sure buffer_len is updated. */
-        p->base.buffer_len = buffer - p->base.buffer;
 
         if (*obs != '\n')
         {
@@ -724,16 +732,10 @@ static rinex_error_t rnx_read_v34_observations(
     }
 
 #if defined(__AVX2__)
-    if (nn & 7)
+    if (kk)
     {
-        rnx_parse_final_avx2(v_obs, p->base.obs + (nn & ~7),
-            p->base.lli + (nn & ~7), p->base.ssi + (nn & ~7), nn & 7);
-    }
-#elif defined(__ARM_NEON)
-    if (nn & 15)
-    {
-        rnx_movemask_neon(p->base.lli + nn & ~15, nn & 15, v_lli);
-        rnx_movemask_neon(p->base.ssi + nn & ~15, nn & 15, v_ssi);
+        rnx_parse_final_avx2(v_obs, idx, kk,
+            p->base.obs, p->base.lli, p->base.ssi);
     }
 #endif
 
@@ -747,6 +749,7 @@ static rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     const char *line;
     int64_t i64;
     int res, yy, mm, dd, hh, min, n_sats, line_len;
+    rinex_error_t err;
 
     /* Make sure we have an epoch to parse. */
     res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
@@ -812,6 +815,11 @@ static rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     switch (p->base.epoch.flag)
     {
     case '0': case '1': case '6':
+        err = rnx_ensure_sats(p);
+        if (err != RINEX_SUCCESS)
+        {
+            return err;
+        }
         return rnx_read_v34_observations(p, line);
 
     case '2': case '3': case '4': case '5':

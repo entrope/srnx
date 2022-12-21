@@ -1,6 +1,8 @@
 {
     "files.exclude": {
         "*.o": true,
+        "*.gcda": true,
+        "*.gcno": true,
         "librinex.a": true,
         "perf.data": true,
         "perf.data.old": true,
@@ -8,6 +10,13 @@
         "rinex_maxima": true,
         "rinex_n_obs": true,
         "rinex_scan": true,
-        "transpose_test": true
+        "test_rnx_v2": true,
+        "transpose_test": true,
+        "gmon.out": true,
+    },
+    "files.associations": {
+        "rinex_epoch.h": "c",
+        "tap.h": "c",
+        "at012000_20o.h": "c"
     }
 }

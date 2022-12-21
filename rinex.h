@@ -162,10 +162,10 @@ struct rinex_parser
      */
     int64_t *obs;
 
-    /** lli contains the loss-of-lock indicators. */
+    /** lli contains the loss-of-lock indicators (in ASCII). */
     char *lli;
 
-    /** ssi contains the signal strength indocators. */
+    /** ssi contains the signal strength indicators (in ASCII). */
     char *ssi;
 
     /** n_obs counts the possible observations per satellite system.
