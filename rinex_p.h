@@ -8,14 +8,10 @@
 
 #include <fcntl.h>
 #include <stddef.h>
+#include <stdlib.h>
 
+#include "rinex_cfg.h"
 #include "rinex.h"
-
-#if defined(__AVX2__)
-# include <x86intrin.h>
-#elif defined(__ARM_NEON)
-# include <arm_neon.h>
-#endif
 
 /** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
 #define RINEX_EXTRA 80
@@ -229,5 +225,87 @@ int parse_uint
     const char *start,
     int width
 );
+
+/* The following macro-heavy code supports runtime selection of function
+ * variants that use platform-specific instructions such as SIMD.
+ */
+
+#define CHECK_NIL(RETTYPE, SUFFIX, PROTOTYPE)
+
+#define CHECK_std(RETTYPE, SUFFIX, PROTOTYPE) \
+    if (!rnx_##SUFFIX || (simd && !strcmp(simd, "std"))) \
+    { \
+        extern RETTYPE rnx_std_##SUFFIX PROTOTYPE; \
+        rnx_##SUFFIX = rnx_std_##SUFFIX; \
+    }
+
+#if defined(HAVE_AVX2)
+# define CHECK_avx2(RETTYPE, SUFFIX, PROTOTYPE) \
+    if (__builtin_cpu_supports("avx2") && (!simd || !strcmp(simd, "avx2"))) \
+    { \
+        extern RETTYPE rnx_avx2_##SUFFIX PROTOTYPE; \
+        rnx_##SUFFIX = rnx_avx2_##SUFFIX; \
+    }
+#else
+# define CHECK_avx2(RETTYPE, SUFFIX, PROTOTYPE) \
+    CHECK_NIL(RETTYPE, SUFFIX, PROTOTYPE)
+#endif
+
+#if defined(HAVE_NEON)
+/* NEON is mandatory for ARMv8-a and later, and not detectable from
+ * user-space. The "standard" is looking at /proc/cpuinfo (under Linux)
+ * or an equivalent declaration from the OS. Instead, we just assume
+ * the build did a reasonable thing.
+ */
+# define CHECK_neon(RETTYPE, SUFFIX, PROTOTYPE) \
+    if (!simd || !strcmp(simd, "avx2")) \
+    { \
+        extern RETTYPE rnx_avx2_##SUFFIX PROTOTYPE; \
+        rnx_##SUFFIX = rnx_avx2_##SUFFIX; \
+    }
+#else
+# define CHECK_neon(RETTYPE, SUFFIX, PROTOTYPE) \
+    CHECK_NIL(RETTYPE, SUFFIX, PROTOTYPE)
+#endif
+
+#define DO_CHECK(MACRO, RETTYPE, SUFFIX, PROTOTYPE) \
+    MACRO(RETTYPE, SUFFIX, PROTOTYPE)
+
+#define CHECK_MULTIPLE(RETTYPE, SUFFIX, PROTOTYPE, SIMD_0, SIMD_1, \
+    SIMD_2, SIMD_3, SIMD_4, SIMD_5, SIMD_6, SIMD_7, SIMD_8, SIMD_9, ...) \
+        CHECK_##SIMD_0(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_1(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_2(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_3(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_4(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_5(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_6(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_7(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_8(RETTYPE, SUFFIX, PROTOTYPE) \
+        CHECK_##SIMD_9(RETTYPE, SUFFIX, PROTOTYPE)
+
+#define RNX_RESOLVE(RETTYPE, SUFFIX, PROTOTYPE, ARGS, ...) \
+    static RETTYPE rnx_resolve_##SUFFIX PROTOTYPE; \
+    RETTYPE (*rnx_##SUFFIX) PROTOTYPE = &rnx_resolve_##SUFFIX; \
+    RETTYPE rnx_resolve_##SUFFIX PROTOTYPE \
+    { \
+        const char *simd = getenv("RINEX_SIMD"); \
+        rnx_##SUFFIX = NULL; \
+        CHECK_MULTIPLE(RETTYPE, SUFFIX, PROTOTYPE, __VA_ARGS__, \
+            std, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL) \
+        return rnx_##SUFFIX ARGS; \
+    }
+
+#define RNX_RESOLVE_VOID(SUFFIX, PROTOTYPE, ARGS, ...) \
+    static void rnx_resolve_##SUFFIX PROTOTYPE; \
+    void (*rnx_##SUFFIX) PROTOTYPE = &rnx_resolve_##SUFFIX; \
+    void rnx_resolve_##SUFFIX PROTOTYPE \
+    { \
+        const char *simd = getenv("RINEX_SIMD"); \
+        rnx_##SUFFIX = NULL; \
+        CHECK_MULTIPLE(void, SUFFIX, PROTOTYPE, __VA_ARGS__, \
+            std, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL) \
+        rnx_##SUFFIX ARGS; \
+    }
 
 #endif /* !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4) */

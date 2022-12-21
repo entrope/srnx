@@ -77,15 +77,12 @@ static void test_transpose(void)
     }
 }
 
-static void benchmark_transpose(const char *version)
+static void benchmark_transpose(void)
 {
     struct timespec t[33];
     unsigned long long nsec;
     const int n_reps = 1000000;
     int ii, bits, count;
-
-    transpose_select(version);
-    if (!version) version = "default";
 
     /* Warm up the cache and hint that we are CPU-intensive. */
     transpose(out, input_8, 32, 32);
@@ -94,7 +91,7 @@ static void benchmark_transpose(const char *version)
 
     for (count = 8; count <= 32; count <<= 1)
     {
-        printf("\n%s n-by-%d", version, count);
+        printf("\nn-by-%d", count);
         clock_gettime(CLOCK_MONOTONIC, &t[0]);
         for (bits = 1; bits < 33; ++bits)
         {
@@ -154,13 +151,12 @@ int main(int argc, char *argv[])
 
         if (!strcmp(argv[jj], "-bench"))
         {
-            printf("\nimplementation");
+            printf("\nsize");
             for (ii = 1; ii < 33; ++ii)
             {
                 printf(",%d", ii);
             }
-            benchmark_transpose("generic");
-            benchmark_transpose(NULL);
+            benchmark_transpose();
             printf("\n");
         }
 

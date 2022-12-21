@@ -1,0 +1,222 @@
+#include <string.h>
+
+/* Stupid C preprocessor tricks! */
+
+#define CONCAT_4(A, B, C, D) A ## B ## C ## D
+#define CONCAT_4_B(A, B, C, D) CONCAT_4(A, B, C, D)
+#define SIMD_FN(RETTYPE, SUFFIX) RETTYPE CONCAT_4_B(rnx_, SIMD_TYPE, _, SUFFIX)
+
+/* RINEX observation parsing functions:
+ * - rnx_read_v2_observations()
+ * - rnx_read_v34_observations()
+ */
+
+#if defined(SIMD_PARSE_OBS)
+
+static const char blank[] = "                ";
+
+#if !defined(SIMD_PARSE_INTRO)
+# define SIMD_PARSE_INTRO
+#endif
+
+#if !defined(SIMD_PARSE_OUTRO)
+# define SIMD_PARSE_OUTRO
+#endif
+
+SIMD_FN(rinex_error_t, read_v2_observations)(
+    struct rnx_v234_parser *p,
+    const char *epoch,
+    const char *obs
+)
+{
+    SIMD_PARSE_INTRO
+    /* ii: read index for satellites within the epoch.
+     * jj: read index for observations within the satellite.
+     * nn: write index for observations within p->base.{lli,ssi,obs}.
+     */
+    int ii, jj, nn;
+
+    /* Read observations for each satellite. */
+    for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
+    {
+        /* Determine the satellite identifier. */
+        const char *sv_name = epoch + 32 + 3 * (ii % 12);
+        int n_obs = p->base.n_obs[sv_name[0] & 31];
+        char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
+
+        /* There are 12 satellite names per header line. */
+        if (ii % 12 == 11)
+        {
+            epoch = strchr(epoch, '\n') + 1;
+        }
+
+        /* Save satellite information. */
+        p->base.sats[ii].system = sv_name[0];
+        p->base.sats[ii].number = svn;
+        p->base.sats[ii].obs_0 = nn;
+
+        /* Read each observation for this satellite. */
+        for (jj = 0; jj < n_obs; ++jj, ++nn)
+        {
+            /* Do we need more buffer space? */
+            if (nn >= p->obs_alloc)
+            {
+                p->obs_alloc *= 2;
+                p->base.lli = realloc(p->base.lli, p->obs_alloc);
+                p->base.ssi = realloc(p->base.ssi, p->obs_alloc);
+                p->base.obs = realloc(p->base.obs,
+                    p->obs_alloc * sizeof p->base.obs[0]);
+                if (!p->base.lli || !p->base.ssi || !p->base.obs)
+                {
+                    p->base.error_line = __LINE__;
+                    return RINEX_ERR_SYSTEM;
+                }
+            }
+
+            /* If at EOL or a blank, skip this observation. */
+            if ((*obs == '\n') || !memcmp(obs, blank, 16))
+            {
+                p->base.obs[nn] = 0;
+                p->base.lli[nn] = '\0';
+                p->base.ssi[nn] = '\0';
+                /* If *obs == '\n', consume it at the last observation
+                 * for the satellite OR the line.  Otherwise, consume
+                 * the 16 blanks that we are looking at.
+                 */
+                obs += (*obs == '\n')
+                    ? (((jj + 1) == n_obs) || ((jj % 5) == 4))
+                    : 16;
+                continue;
+            }
+
+            SIMD_PARSE_OBS;
+            if (!obs)
+            {
+                p->base.error_line = __LINE__;
+                return RINEX_ERR_BAD_FORMAT;
+            }
+
+            if ((*obs == '\n') && (((jj + 1) == n_obs) || ((jj % 5) == 4)))
+            {
+                obs += 1;
+            }
+        }
+    }
+
+    SIMD_PARSE_OUTRO
+
+    return RINEX_SUCCESS;
+}
+
+SIMD_FN(rinex_error_t, read_v34_observations)(
+    struct rnx_v234_parser *p,
+    const char obs[]
+)
+{
+    SIMD_PARSE_INTRO
+    /* ii: read index for satellites within the epoch.
+     * jj: read index for observations within the satellite.
+     * nn: write index for observations within p->base.{lli,ssi,obs}.
+     */
+    int ii, jj, nn;
+
+    /* Read observations for each satellite. */
+    for (ii = nn = 0; ii < p->base.epoch.n_sats; ++ii)
+    {
+        /* Look up the satellite system's observation count. */
+        const char *sv_name = obs;
+        short n_obs = p->base.n_obs[sv_name[0] & 31];
+        char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
+        obs += 3;
+
+        /* Save satellite information. */
+        p->base.sats[ii].system = sv_name[0];
+        p->base.sats[ii].number = svn;
+        p->base.sats[ii].obs_0 = nn;
+
+        /* Read each observation for this satellite. */
+        for (jj = 0; jj < n_obs; ++jj, ++nn)
+        {
+            /* If at EOL, we are done for this satellite. */
+            if (*obs == '\n')
+            {
+                break;
+            }
+
+            /* If at a blank, skip this observation. */
+            if (!memcmp(obs, blank, 16))
+            {
+                obs += 16;
+                continue;
+            }
+
+            /* Do we need more buffer space? */
+            if (nn >= p->obs_alloc)
+            {
+                p->obs_alloc *= 2;
+                p->base.lli = realloc(p->base.lli, p->obs_alloc);
+                p->base.ssi = realloc(p->base.ssi, p->obs_alloc);
+                p->base.obs = realloc(p->base.obs,
+                    p->obs_alloc * sizeof p->base.obs[0]);
+                if (!p->base.lli || !p->base.ssi || !p->base.obs)
+                {
+                    p->base.error_line = __LINE__;
+                    return RINEX_ERR_SYSTEM;
+                }
+            }
+
+            SIMD_PARSE_OBS;
+
+            if (!obs)
+            {
+                p->base.error_line = __LINE__;
+                return RINEX_ERR_BAD_FORMAT;
+            }
+        }
+
+        if (*obs != '\n')
+        {
+            p->base.error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        obs++;
+    }
+
+    SIMD_PARSE_OUTRO
+
+    return RINEX_SUCCESS;
+}
+
+#endif /* defined(SIMD_PARSE_OBS) */
+
+/* rnx_get_n_newlines() */
+
+#if defined(SIMD_GET_N_NEWLINES)
+
+SIMD_FN(int, get_n_newlines)(
+    struct rinex_parser *p,
+    uint64_t whence,
+    int n_lines
+)
+{
+    int found = 0;
+    const char * restrict buffer = p->stream->buffer;
+
+    SIMD_GET_N_NEWLINES;
+
+    for (; whence < p->stream->size; ++whence)
+    {
+        /* Was it a newline? */
+        if (buffer[whence] == '\n')
+        {
+            if (++found == n_lines)
+            {
+                return whence + 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+#endif /* defined(SIMD_GET_N_NEWLINES)*/

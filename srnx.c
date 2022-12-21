@@ -250,7 +250,7 @@ void srnx_convert_s64_to_double(
     double *out = s64;
     double d_scale = scale / 1000.0;
 
-#if defined(__AVX2__)
+#if HAVE_AVX2
     const __m256d v_scale = _mm256_set1_pd(d_scale);
     const __m256d hh = _mm256_set1_pd(0x0018000000000000);
     for (; count >= 4; in += 4, out += 4, count -= 4)

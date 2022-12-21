@@ -88,10 +88,23 @@ Each satellite has per-signal tables:
  - LLI (across all runs)
  - SSI (across all runs)
 
-# Test harness
+# Build system
 
-The test_* source files use the API exposed by [libtap](//github.com/zorgnax/libtap.git).
-This code was developed against libtap commit 56e31231e0329b202c978c676e4a897c857c7a1f.
+This uses [Meson](https://mesonbuild.com/) to build.  Typical usage:
+```
+$ meson setup --buildtype debug -D b_coverage=true +build
+$ meson test -C +build
+$ meson test -C +build --benchmark
+$ ninja -C +build coverage-html
+$ sensible-browser +build/meson-logs/coveragereport/index.html
+```
+
+For an optimized build, use something like:
+```
+$ meson setup +release
+$ meson compile -C +release
+$ meson test -C +release --benchmark
+```
 
 # Generating flame graphs
 

@@ -5,6 +5,8 @@
 
 #include "driver.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 int s_count[128];
 int hist[129];
