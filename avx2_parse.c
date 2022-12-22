@@ -595,141 +595,176 @@ static __m256i rnx_parse_4(
     return t9;
 }
 
+static inline int rnx_avx2_parse_obs
+(
+    struct rinex_parser *p,
+    const char *obs,
+    __m128i v_obs[],
+    const int idx[],
+    int kk
+)
+{
+    const __m128i v_nl = _mm_set1_epi8('\n');
+    const __m128i v_sp = _mm_set1_epi8(' ');
+    __m128i v_obs_2 = _mm_loadu_si128((const __m128i *)obs);
+    __m128i m_nl = _mm_cmpeq_epi8(v_obs_2, v_nl);
+    const int mask = _mm_movemask_epi8(m_nl);
+    const int cnt = __builtin_ctz(mask | 0x10000);
+    __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
+    __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
+    __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
+    __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
+    v_obs[kk] = _mm_blendv_epi8(v_obs_2, v_sp, m_sp);
+    if (kk == 7)
+    {
+        __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]);
+        __m128i lli_ssi_23 = _mm_unpackhi_epi8(v_obs[2], v_obs[3]);
+        __m128i lli_ssi_45 = _mm_unpackhi_epi8(v_obs[4], v_obs[5]);
+        __m128i lli_ssi_67 = _mm_unpackhi_epi8(v_obs[6], v_obs[7]);
+        __m128i lli_ssi_03 = _mm_unpackhi_epi16(lli_ssi_01, lli_ssi_23);
+        __m128i lli_ssi_47 = _mm_unpackhi_epi16(lli_ssi_45, lli_ssi_67);
+        __m128i lli_ssi = _mm_unpackhi_epi32(lli_ssi_03, lli_ssi_47);
+        __m256i obs_03 = rnx_parse_4(v_obs);
+        __m256i obs_47 = rnx_parse_4(v_obs + 4);
+        p->lli[idx[0]] = _mm_extract_epi8(lli_ssi, 0);
+        p->lli[idx[1]] = _mm_extract_epi8(lli_ssi, 1);
+        p->lli[idx[2]] = _mm_extract_epi8(lli_ssi, 2);
+        p->lli[idx[3]] = _mm_extract_epi8(lli_ssi, 3);
+        p->lli[idx[4]] = _mm_extract_epi8(lli_ssi, 4);
+        p->lli[idx[5]] = _mm_extract_epi8(lli_ssi, 5);
+        p->lli[idx[6]] = _mm_extract_epi8(lli_ssi, 6);
+        p->lli[idx[7]] = _mm_extract_epi8(lli_ssi, 7);
+        p->ssi[idx[0]] = _mm_extract_epi8(lli_ssi,  8);
+        p->ssi[idx[1]] = _mm_extract_epi8(lli_ssi,  9);
+        p->ssi[idx[2]] = _mm_extract_epi8(lli_ssi, 10);
+        p->ssi[idx[3]] = _mm_extract_epi8(lli_ssi, 11);
+        p->ssi[idx[4]] = _mm_extract_epi8(lli_ssi, 12);
+        p->ssi[idx[5]] = _mm_extract_epi8(lli_ssi, 13);
+        p->ssi[idx[6]] = _mm_extract_epi8(lli_ssi, 14);
+        p->ssi[idx[7]] = _mm_extract_epi8(lli_ssi, 15);
+        /* Because of AVX's "lane" arrangement, the indexes are
+         * a little mixed up in the middle of each register.
+         */
+        p->obs[idx[0]] = _mm256_extract_epi64(obs_03, 0);
+        p->obs[idx[2]] = _mm256_extract_epi64(obs_03, 1);
+        p->obs[idx[1]] = _mm256_extract_epi64(obs_03, 2);
+        p->obs[idx[3]] = _mm256_extract_epi64(obs_03, 3);
+        p->obs[idx[4]] = _mm256_extract_epi64(obs_47, 0);
+        p->obs[idx[6]] = _mm256_extract_epi64(obs_47, 1);
+        p->obs[idx[5]] = _mm256_extract_epi64(obs_47, 2);
+        p->obs[idx[7]] = _mm256_extract_epi64(obs_47, 3);
+    }
+    return cnt;
+}
+
+static inline void rnx_avx2_parse_outro(
+    struct rinex_parser *p,
+    __m128i v_obs[],
+    const int idx[],
+    int kk
+)
+{
+    __m256i res_lo = rnx_parse_4(v_obs + 0);
+    __m256i res_hi = rnx_parse_4(v_obs + 4);
+
+    switch (kk)
+    {
+    case 7:
+        /* Indexing is wonky because of AVX's "lane" arrangement. */
+        p->lli[idx[6]] = _mm_extract_epi8(v_obs[6], 14);
+        p->ssi[idx[6]] = _mm_extract_epi8(v_obs[6], 15);
+        p->obs[idx[5]] = _mm256_extract_epi64(res_hi, 2);
+        /* fall through */
+    case 6:
+        p->lli[idx[5]] = _mm_extract_epi8(v_obs[5], 14);
+        p->ssi[idx[5]] = _mm_extract_epi8(v_obs[5], 15);
+        p->obs[idx[6]] = _mm256_extract_epi64(res_hi, 1);
+        /* fall through */
+    case 5:
+        p->lli[idx[4]] = _mm_extract_epi8(v_obs[4], 14);
+        p->ssi[idx[4]] = _mm_extract_epi8(v_obs[4], 15);
+        p->obs[idx[4]] = _mm256_extract_epi64(res_hi, 0);
+        /* fall through */
+    case 4:
+        p->lli[idx[3]] = _mm_extract_epi8(v_obs[3], 14);
+        p->ssi[idx[3]] = _mm_extract_epi8(v_obs[3], 15);
+        p->obs[idx[3]] = _mm256_extract_epi64(res_lo, 3);
+        /* fall through */
+    case 3:
+        p->lli[idx[2]] = _mm_extract_epi8(v_obs[2], 14);
+        p->ssi[idx[2]] = _mm_extract_epi8(v_obs[2], 15);
+        p->obs[idx[1]] = _mm256_extract_epi64(res_lo, 2);
+        /* fall through */
+    case 2:
+        p->lli[idx[1]] = _mm_extract_epi8(v_obs[1], 14);
+        p->ssi[idx[1]] = _mm_extract_epi8(v_obs[1], 15);
+        p->obs[idx[2]] = _mm256_extract_epi64(res_lo, 1);
+        /* fall through */
+    case 1:
+        p->lli[idx[0]] = _mm_extract_epi8(v_obs[0], 14);
+        p->ssi[idx[0]] = _mm_extract_epi8(v_obs[0], 15);
+        p->obs[idx[0]] = _mm256_extract_epi64(res_lo, 0);
+    }
+}
+
 #define SIMD_PARSE_INTRO \
     __m128i v_obs[8]; \
-    const __m128i v_nl = _mm_set1_epi8('\n'); \
-    const __m128i v_sp = _mm_set1_epi8(' '); \
     int idx[8]; \
     int kk = 0;
 
 #define SIMD_PARSE_OBS \
     idx[kk] = nn; \
-    __m128i v_obs_2 = _mm_loadu_si128((const __m128i *)obs); \
-    __m128i m_nl = _mm_cmpeq_epi8(v_obs_2, v_nl); \
-    const int mask = _mm_movemask_epi8(m_nl); \
-    const int cnt = __builtin_ctz(mask | 0x10000); \
-    __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1)); \
-    __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2)); \
-    __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4)); \
-    __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8)); \
-    v_obs[kk] = _mm_blendv_epi8(v_obs_2, v_sp, m_sp); \
-    obs += cnt; \
-    if (++kk == 8) \
-    { \
-        __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]); \
-        __m128i lli_ssi_23 = _mm_unpackhi_epi8(v_obs[2], v_obs[3]); \
-        __m128i lli_ssi_45 = _mm_unpackhi_epi8(v_obs[4], v_obs[5]); \
-        __m128i lli_ssi_67 = _mm_unpackhi_epi8(v_obs[6], v_obs[7]); \
-        __m128i lli_ssi_03 = _mm_unpackhi_epi16(lli_ssi_01, lli_ssi_23); \
-        __m128i lli_ssi_47 = _mm_unpackhi_epi16(lli_ssi_45, lli_ssi_67); \
-        __m128i lli_ssi = _mm_unpackhi_epi32(lli_ssi_03, lli_ssi_47); \
-        __m256i obs_03 = rnx_parse_4(v_obs); \
-        __m256i obs_47 = rnx_parse_4(v_obs + 4); \
-        p->base.lli[idx[0]] = _mm_extract_epi8(lli_ssi, 0); \
-        p->base.lli[idx[1]] = _mm_extract_epi8(lli_ssi, 1); \
-        p->base.lli[idx[2]] = _mm_extract_epi8(lli_ssi, 2); \
-        p->base.lli[idx[3]] = _mm_extract_epi8(lli_ssi, 3); \
-        p->base.lli[idx[4]] = _mm_extract_epi8(lli_ssi, 4); \
-        p->base.lli[idx[5]] = _mm_extract_epi8(lli_ssi, 5); \
-        p->base.lli[idx[6]] = _mm_extract_epi8(lli_ssi, 6); \
-        p->base.lli[idx[7]] = _mm_extract_epi8(lli_ssi, 7); \
-        p->base.ssi[idx[0]] = _mm_extract_epi8(lli_ssi,  8); \
-        p->base.ssi[idx[1]] = _mm_extract_epi8(lli_ssi,  9); \
-        p->base.ssi[idx[2]] = _mm_extract_epi8(lli_ssi, 10); \
-        p->base.ssi[idx[3]] = _mm_extract_epi8(lli_ssi, 11); \
-        p->base.ssi[idx[4]] = _mm_extract_epi8(lli_ssi, 12); \
-        p->base.ssi[idx[5]] = _mm_extract_epi8(lli_ssi, 13); \
-        p->base.ssi[idx[6]] = _mm_extract_epi8(lli_ssi, 14); \
-        p->base.ssi[idx[7]] = _mm_extract_epi8(lli_ssi, 15); \
-        /* Because of AVX's "lane" arrangement, the indexes are \
-         * a little mixed up in the middle of each register. \
-         */ \
-        p->base.obs[idx[0]] = _mm256_extract_epi64(obs_03, 0); \
-        p->base.obs[idx[2]] = _mm256_extract_epi64(obs_03, 1); \
-        p->base.obs[idx[1]] = _mm256_extract_epi64(obs_03, 2); \
-        p->base.obs[idx[3]] = _mm256_extract_epi64(obs_03, 3); \
-        p->base.obs[idx[4]] = _mm256_extract_epi64(obs_47, 0); \
-        p->base.obs[idx[6]] = _mm256_extract_epi64(obs_47, 1); \
-        p->base.obs[idx[5]] = _mm256_extract_epi64(obs_47, 2); \
-        p->base.obs[idx[7]] = _mm256_extract_epi64(obs_47, 3); \
-        kk = 0; \
-    }
+    obs += rnx_avx2_parse_obs(&p->base, obs, v_obs, idx, kk); \
+    kk = (kk + 1) & 7
 
 #define SIMD_PARSE_OUTRO \
-    if (kk) \
-    { \
-        __m256i res_lo = rnx_parse_4(v_obs + 0); \
-        __m256i res_hi = rnx_parse_4(v_obs + 4); \
- \
-        switch (kk) \
-        { \
-        case 7: \
-            /* Indexing is wonky because of AVX's "lane" arrangement. */ \
-            p->base.lli[idx[6]] = _mm_extract_epi8(v_obs[6], 14); \
-            p->base.ssi[idx[6]] = _mm_extract_epi8(v_obs[6], 15); \
-            p->base.obs[idx[5]] = _mm256_extract_epi64(res_hi, 2); \
-            /* fall through */ \
-        case 6: \
-            p->base.lli[idx[5]] = _mm_extract_epi8(v_obs[5], 14); \
-            p->base.ssi[idx[5]] = _mm_extract_epi8(v_obs[5], 15); \
-            p->base.obs[idx[6]] = _mm256_extract_epi64(res_hi, 1); \
-            /* fall through */ \
-        case 5: \
-            p->base.lli[idx[4]] = _mm_extract_epi8(v_obs[4], 14); \
-            p->base.ssi[idx[4]] = _mm_extract_epi8(v_obs[4], 15); \
-            p->base.obs[idx[4]] = _mm256_extract_epi64(res_hi, 0); \
-            /* fall through */ \
-        case 4: \
-            p->base.lli[idx[3]] = _mm_extract_epi8(v_obs[3], 14); \
-            p->base.ssi[idx[3]] = _mm_extract_epi8(v_obs[3], 15); \
-            p->base.obs[idx[3]] = _mm256_extract_epi64(res_lo, 3); \
-            /* fall through */ \
-        case 3: \
-            p->base.lli[idx[2]] = _mm_extract_epi8(v_obs[2], 14); \
-            p->base.ssi[idx[2]] = _mm_extract_epi8(v_obs[2], 15); \
-            p->base.obs[idx[1]] = _mm256_extract_epi64(res_lo, 2); \
-            /* fall through */ \
-        case 2: \
-            p->base.lli[idx[1]] = _mm_extract_epi8(v_obs[1], 14); \
-            p->base.ssi[idx[1]] = _mm_extract_epi8(v_obs[1], 15); \
-            p->base.obs[idx[2]] = _mm256_extract_epi64(res_lo, 1); \
-            /* fall through */ \
-        case 1: \
-            p->base.lli[idx[0]] = _mm_extract_epi8(v_obs[0], 14); \
-            p->base.ssi[idx[0]] = _mm_extract_epi8(v_obs[0], 15); \
-            p->base.obs[idx[0]] = _mm256_extract_epi64(res_lo, 0); \
-        } \
+    if (kk) rnx_avx2_parse_outro(&p->base, v_obs, idx, kk);
+
+static int rnx_avx2_get_n_newlines_inner(
+    const struct rinex_parser *p,
+    uint64_t *p_whence,
+    int n_lines,
+    int *found
+)
+{
+    const __m256i v_nl = _mm256_broadcastb_epi8(_mm_set1_epi8('\n'));
+    const char * restrict buffer = p->stream->buffer;
+    uint64_t whence = *p_whence;
+
+    for (; whence + 64 < p->stream->size; whence += 64)
+    {
+        const __m256i v_p_2 = _mm256_loadu_si256((__m256i const *)(buffer + whence + 32));
+        const __m256i m_nl_2 = _mm256_cmpeq_epi8(v_nl, v_p_2);
+        const __m256i v_p = _mm256_loadu_si256((__m256i const *)(buffer + whence));
+        const __m256i m_nl = _mm256_cmpeq_epi8(v_nl, v_p);
+        uint64_t kk = ((uint64_t)_mm256_movemask_epi8(m_nl_2) << 32)
+            | (uint32_t)_mm256_movemask_epi8(m_nl);
+
+        const int nn = __builtin_popcountll(kk);
+        if (*found + nn < n_lines)
+        {
+            *found += nn;
+            continue;
+        }
+
+        while (1)
+        {
+            int r = __builtin_ctzll(kk);
+            kk &= (kk - 1);
+            if (++*found == n_lines)
+            {
+                *p_whence = whence + r + 1;
+                return 1;
+            }
+        }
     }
 
+    *p_whence = whence;
+    return 0;
+}
+
 #define SIMD_GET_N_NEWLINES \
-    const __m256i v_nl = _mm256_broadcastb_epi8(_mm_set1_epi8('\n')); \
- \
-    for (; whence + 64 < p->stream->size; whence += 64) \
-    { \
-        const __m256i v_p_2 = _mm256_loadu_si256((__m256i const *)(buffer + whence + 32)); \
-        const __m256i m_nl_2 = _mm256_cmpeq_epi8(v_nl, v_p_2); \
-        const __m256i v_p = _mm256_loadu_si256((__m256i const *)(buffer + whence)); \
-        const __m256i m_nl = _mm256_cmpeq_epi8(v_nl, v_p); \
-        uint64_t kk = ((uint64_t)_mm256_movemask_epi8(m_nl_2) << 32) \
-            | (uint32_t)_mm256_movemask_epi8(m_nl); \
- \
-        const int nn = __builtin_popcountll(kk); \
-        if (found + nn < n_lines) \
-        { \
-            found += nn; \
-            continue; \
-        } \
- \
-        while (1) \
-        { \
-            int r = __builtin_ctzll(kk); \
-            kk &= (kk - 1); \
-            if (++found == n_lines) \
-            { \
-                return whence + r + 1; \
-            } \
-        } \
-    }
+    if (rnx_avx2_get_n_newlines_inner(p, &whence, n_lines, &found)) return whence
 
 #define SIMD_TYPE avx2
 #include "simd_parse.ii"
