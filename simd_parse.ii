@@ -137,19 +137,6 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
         /* Read each observation for this satellite. */
         for (jj = 0; jj < n_obs; ++jj, ++nn)
         {
-            /* If at EOL, we are done for this satellite. */
-            if (*obs == '\n')
-            {
-                break;
-            }
-
-            /* If at a blank, skip this observation. */
-            if (!memcmp(obs, blank, 16))
-            {
-                obs += 16;
-                continue;
-            }
-
             /* Do we need more buffer space? */
             if (nn >= p->obs_alloc)
             {
@@ -163,6 +150,19 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
                     p->base.error_line = __LINE__;
                     return RINEX_ERR_SYSTEM;
                 }
+            }
+
+            /* If at EOL or a blank, zero-fill this observation. */
+            if ((*obs == '\n') || !memcmp(obs, blank, 16))
+            {
+                if (*obs != '\n')
+                {
+                    obs += 16;
+                }
+                p->base.obs[nn] = 0;
+                p->base.lli[nn] = '\0';
+                p->base.ssi[nn] = '\0';
+                continue;
             }
 
             SIMD_PARSE_OBS;

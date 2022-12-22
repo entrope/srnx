@@ -797,8 +797,8 @@ const char *rnx_open_v23
         p->base.read = rnx_read_v2;
         err = rnx_open_v2(p);
     }
-    else if (!memcmp("      3.", stream->buffer, 7)
-        || !memcmp("      4.", stream->buffer, 7))
+    else if (!memcmp("     3.", stream->buffer, 7)
+        || !memcmp("     4.", stream->buffer, 7))
     {
         p->base.read = rnx_read_v34;
         err = rnx_open_v34(p);

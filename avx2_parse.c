@@ -575,107 +575,45 @@ static __m256i rnx_parse_4(
     int neg_0 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v_minus, p_0));
     if (neg_0 >> 16)
     {
-        mask = _mm256_blend_epi32(mask, v_ones, 0x03);
+        mask = _mm256_blend_epi32(mask, v_ones, 0x30);
     }
     if (neg_0 & 65535)
     {
-        mask = _mm256_blend_epi32(mask, v_ones, 0x0c);
+        mask = _mm256_blend_epi32(mask, v_ones, 0x03);
     }
     int neg_1 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v_minus, p_1));
     if (neg_1 >> 16)
     {
-        mask = _mm256_blend_epi32(mask, v_ones, 0x30);
+        mask = _mm256_blend_epi32(mask, v_ones, 0xc0);
     }
     if (neg_1 & 65535)
     {
-        mask = _mm256_blend_epi32(mask, v_ones, 0xc0);
+        mask = _mm256_blend_epi32(mask, v_ones, 0x0c);
     }
     const __m256i t8 = _mm256_sub_epi64(v_zero, t7);
-    return _mm256_blendv_epi8(t7, t8, mask);
-}
-
-static const char *rnx_buffer_and_parse_obs
-(
-    const char *obs,
-    __m128i *p_out
-)
-{
-    const __m128i v_nl = _mm_set1_epi8('\n');
-    const __m128i v_sp = _mm_set1_epi8(' ');
-
-    __m128i v_obs = _mm_loadu_si128((const __m128i *)obs);
-    __m128i m_nl = _mm_cmpeq_epi8(v_obs, v_nl);
-    const int mask = _mm_movemask_epi8(m_nl);
-    const int idx = __builtin_ctz(mask | 0x10000);
-    __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1));
-    __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2));
-    __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
-    __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
-    *p_out = _mm_blendv_epi8(v_obs, v_sp, m_sp);
-    return obs + idx;
-}
-
-static void rnx_avx2_parse_final
-(
-    const __m128i v_obs[8],
-    const int idx[],
-    int count,
-    int64_t *base,
-    char *lli,
-    char *ssi
-)
-{
-    __m256i res_lo = rnx_parse_4(v_obs + 0);
-    __m256i res_hi = rnx_parse_4(v_obs + 4);
-
-    switch (count)
-    {
-    case 7:
-        lli[idx[6]] = _mm_extract_epi8(v_obs[6], 14);
-        ssi[idx[6]] = _mm_extract_epi8(v_obs[6], 15);
-        /* see the comment below about idx[5] */
-        base[idx[5]] = _mm256_extract_epi64(res_hi, 2);
-        /* fall through */
-    case 6:
-        lli[idx[5]] = _mm_extract_epi8(v_obs[5], 14);
-        ssi[idx[5]] = _mm_extract_epi8(v_obs[5], 15);
-        base[idx[6]] = _mm256_extract_epi64(res_hi, 1);
-        /* fall through */
-    case 5:
-        lli[idx[4]] = _mm_extract_epi8(v_obs[4], 14);
-        ssi[idx[4]] = _mm_extract_epi8(v_obs[4], 15);
-        base[idx[4]] = _mm256_extract_epi64(res_hi, 0);
-        /* fall through */
-    case 4:
-        lli[idx[3]] = _mm_extract_epi8(v_obs[3], 14);
-        ssi[idx[3]] = _mm_extract_epi8(v_obs[3], 15);
-        base[idx[3]] = _mm256_extract_epi64(res_lo, 3);
-        /* fall through */
-    case 3:
-        lli[idx[2]] = _mm_extract_epi8(v_obs[2], 14);
-        ssi[idx[2]] = _mm_extract_epi8(v_obs[2], 15);
-        base[idx[3]] = _mm256_extract_epi64(res_lo, 2);
-        /* fall through */
-    case 2:
-        lli[idx[1]] = _mm_extract_epi8(v_obs[1], 14);
-        ssi[idx[1]] = _mm_extract_epi8(v_obs[1], 15);
-        base[idx[2]] = _mm256_extract_epi64(res_lo, 1);
-        /* fall through */
-    case 1:
-        lli[idx[0]] = _mm_extract_epi8(v_obs[0], 14);
-        ssi[idx[0]] = _mm_extract_epi8(v_obs[0], 15);
-        base[idx[0]] = _mm256_extract_epi64(res_lo, 0);
-    }
+    const __m256i t9 = _mm256_blendv_epi8(t7, t8, mask);
+    return t9;
 }
 
 #define SIMD_PARSE_INTRO \
     __m128i v_obs[8]; \
+    const __m128i v_nl = _mm_set1_epi8('\n'); \
+    const __m128i v_sp = _mm_set1_epi8(' '); \
     int idx[8]; \
     int kk = 0;
 
 #define SIMD_PARSE_OBS \
     idx[kk] = nn; \
-    obs = rnx_buffer_and_parse_obs(obs, v_obs + kk); \
+    __m128i v_obs_2 = _mm_loadu_si128((const __m128i *)obs); \
+    __m128i m_nl = _mm_cmpeq_epi8(v_obs_2, v_nl); \
+    const int mask = _mm_movemask_epi8(m_nl); \
+    const int cnt = __builtin_ctz(mask | 0x10000); \
+    __m128i m_nl_1 = _mm_or_si128(m_nl,   _mm_bslli_si128(m_nl, 1)); \
+    __m128i m_nl_2 = _mm_or_si128(m_nl_1, _mm_bslli_si128(m_nl_1, 2)); \
+    __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4)); \
+    __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8)); \
+    v_obs[kk] = _mm_blendv_epi8(v_obs_2, v_sp, m_sp); \
+    obs += cnt; \
     if (++kk == 8) \
     { \
         __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]); \
@@ -720,8 +658,47 @@ static void rnx_avx2_parse_final
 #define SIMD_PARSE_OUTRO \
     if (kk) \
     { \
-        rnx_avx2_parse_final(v_obs, idx, kk, \
-            p->base.obs, p->base.lli, p->base.ssi); \
+        __m256i res_lo = rnx_parse_4(v_obs + 0); \
+        __m256i res_hi = rnx_parse_4(v_obs + 4); \
+ \
+        switch (kk) \
+        { \
+        case 7: \
+            /* Indexing is wonky because of AVX's "lane" arrangement. */ \
+            p->base.lli[idx[6]] = _mm_extract_epi8(v_obs[6], 14); \
+            p->base.ssi[idx[6]] = _mm_extract_epi8(v_obs[6], 15); \
+            p->base.obs[idx[5]] = _mm256_extract_epi64(res_hi, 2); \
+            /* fall through */ \
+        case 6: \
+            p->base.lli[idx[5]] = _mm_extract_epi8(v_obs[5], 14); \
+            p->base.ssi[idx[5]] = _mm_extract_epi8(v_obs[5], 15); \
+            p->base.obs[idx[6]] = _mm256_extract_epi64(res_hi, 1); \
+            /* fall through */ \
+        case 5: \
+            p->base.lli[idx[4]] = _mm_extract_epi8(v_obs[4], 14); \
+            p->base.ssi[idx[4]] = _mm_extract_epi8(v_obs[4], 15); \
+            p->base.obs[idx[4]] = _mm256_extract_epi64(res_hi, 0); \
+            /* fall through */ \
+        case 4: \
+            p->base.lli[idx[3]] = _mm_extract_epi8(v_obs[3], 14); \
+            p->base.ssi[idx[3]] = _mm_extract_epi8(v_obs[3], 15); \
+            p->base.obs[idx[3]] = _mm256_extract_epi64(res_lo, 3); \
+            /* fall through */ \
+        case 3: \
+            p->base.lli[idx[2]] = _mm_extract_epi8(v_obs[2], 14); \
+            p->base.ssi[idx[2]] = _mm_extract_epi8(v_obs[2], 15); \
+            p->base.obs[idx[1]] = _mm256_extract_epi64(res_lo, 2); \
+            /* fall through */ \
+        case 2: \
+            p->base.lli[idx[1]] = _mm_extract_epi8(v_obs[1], 14); \
+            p->base.ssi[idx[1]] = _mm_extract_epi8(v_obs[1], 15); \
+            p->base.obs[idx[2]] = _mm256_extract_epi64(res_lo, 1); \
+            /* fall through */ \
+        case 1: \
+            p->base.lli[idx[0]] = _mm_extract_epi8(v_obs[0], 14); \
+            p->base.ssi[idx[0]] = _mm_extract_epi8(v_obs[0], 15); \
+            p->base.obs[idx[0]] = _mm256_extract_epi64(res_lo, 0); \
+        } \
     }
 
 #define SIMD_GET_N_NEWLINES \

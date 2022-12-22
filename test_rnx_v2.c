@@ -24,6 +24,7 @@ void test_at012000_20o(void)
     v2 = rinex_buffer_stream(at012000_20o, at012000_20o_len);
     msg = rinex_open(&p, v2);
     ok(msg == NULL, "rinex_open() succeeded");
+    if (!p) BAIL_OUT();
 
     /* 11 tests */
     err = p->read(p);

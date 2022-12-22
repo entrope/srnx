@@ -565,8 +565,10 @@ static const char *rnx_parse_obs
     int nn
 )
 {
-    char buf[16];
+    int64_t value;
+    int neg;
     int kk;
+    char buf[16];
 
     /* The first 11 characters must be present: space, minus, digit or dot. */
     for (kk = 0; kk < 10; ++kk)
@@ -574,9 +576,12 @@ static const char *rnx_parse_obs
         if (*obs != ' ') break;
         buf[kk] = *obs++;
     }
+    neg = 0;
     if (kk < 10 && *obs == '-')
     {
-        buf[kk++] = *obs++;
+        neg = 1;
+        buf[kk++] = ' ';
+        obs++;
     }
     for (; kk < 10; ++kk)
     {
@@ -599,7 +604,7 @@ static const char *rnx_parse_obs
 
     /* Parse the observation value. */
 #define DVAL(X) ((X == ' ') ? 0 : (X - '0'))
-    p->obs[nn] = DVAL(buf[13])
+    value = DVAL(buf[13])
         + 10 * DVAL(buf[12])
         + 100 * DVAL(buf[11])
         /* buf[10] == '.', at least in theory */
@@ -613,6 +618,11 @@ static const char *rnx_parse_obs
         + INT64_C(10000000000) * DVAL(buf[2])
         + INT64_C(100000000000) * DVAL(buf[1])
         + INT64_C(1000000000000) * DVAL(buf[0]);
+    if (neg)
+    {
+        value = -value;
+    }
+    p->obs[nn] = value;
 #undef DVAL
 
     return obs;
