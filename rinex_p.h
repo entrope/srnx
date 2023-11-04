@@ -22,8 +22,8 @@
 /** RNX_META_FLAG is used to flag special values in rinex_parser.obs[]. */
 #define RNX_META_FLAG INT64_MIN
 
-/** page_size is the value of sysconf(_SC_PAGE_SIZE). */
-extern long page_size;
+/** rnx_page_size is the value of sysconf(_SC_PAGE_SIZE). */
+extern long rnx_page_size;
 
 /** rnx_v234_parser is a RINEX v2.xx, v3.xx or v4.xx parser. */
 struct rnx_v234_parser
@@ -96,7 +96,7 @@ struct crx_v23_parser
     int *diff;
 };
 
-/** Initializes #page_size and other internal mmap state.
+/** Initializes #rnx_page_size and other internal mmap state.
  *
  * \returns Zero on success, non-zero (setting errno) on failure.
  */
@@ -104,7 +104,7 @@ int rnx_mmap_init(void);
 
 /** Memory-maps a zero-padded block from \a fd for reading.
  *
- * \warning \a offset and \a tot_len must be aligned to multiples of #page_size.
+ * \warning \a offset and \a tot_len must be aligned to multiples of #rnx_page_size.
  * \param[in] fd File descriptor to map from.
  * \param[in] offset Byte offset within file to map at.
  * \param[in] len Length of file region to map.
@@ -123,7 +123,7 @@ void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len);
  * \returns A pointer to the first instance of \a needle within
  *   \a haystack, or NULL if \a haystack does not contain \a needle.
  */
-void *memmem
+void *rnx_memmem
 (
     const char *haystack, size_t h_size,
     const char *needle, size_t n_size
@@ -258,10 +258,10 @@ int parse_uint
  * the build did a reasonable thing.
  */
 # define CHECK_neon(RETTYPE, SUFFIX, PROTOTYPE) \
-    if (!simd || !strcmp(simd, "avx2")) \
+    if (!simd || !strcmp(simd, "neon")) \
     { \
-        extern RETTYPE rnx_avx2_##SUFFIX PROTOTYPE; \
-        rnx_##SUFFIX = rnx_avx2_##SUFFIX; \
+        extern RETTYPE rnx_neon_##SUFFIX PROTOTYPE; \
+        rnx_##SUFFIX = rnx_neon_##SUFFIX; \
     }
 #else
 # define CHECK_neon(RETTYPE, SUFFIX, PROTOTYPE) \
@@ -292,7 +292,7 @@ int parse_uint
         const char *simd = getenv("RINEX_SIMD"); \
         rnx_##SUFFIX = NULL; \
         CHECK_MULTIPLE(RETTYPE, SUFFIX, PROTOTYPE, __VA_ARGS__, \
-            std, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL) \
+            std, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL ) \
         return rnx_##SUFFIX ARGS; \
     }
 
@@ -304,7 +304,7 @@ int parse_uint
         const char *simd = getenv("RINEX_SIMD"); \
         rnx_##SUFFIX = NULL; \
         CHECK_MULTIPLE(void, SUFFIX, PROTOTYPE, __VA_ARGS__, \
-            std, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL) \
+            std, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL) \
         rnx_##SUFFIX ARGS; \
     }
 

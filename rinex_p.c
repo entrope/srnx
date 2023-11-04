@@ -12,59 +12,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-long page_size;
-
-/** dev_zero is a file descriptor for /dev/zero, used to mmap empty
- * pages past the end of real data (when needed).
- */
-static int dev_zero;
-
 /* Documentation comment in rinex_p.h. */
-int rnx_mmap_init(void)
-{
-    if (!page_size)
-    {
-        page_size = sysconf(_SC_PAGE_SIZE);
-        if (page_size <= 0)
-        {
-            return 1;
-        }
-
-        dev_zero = open("/dev/zero", O_RDONLY);
-        if (dev_zero < 0)
-        {
-            return 2;
-        }
-    }
-
-    return 0;
-}
-
-/* Documentation comment in rinex_p.h. */
-void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
-{
-    void *addr;
-
-    if (!page_size && rnx_mmap_init())
-    {
-        return MAP_FAILED;
-    }
-
-    addr = mmap(NULL, tot_len, PROT_READ, MAP_SHARED, dev_zero, 0);
-    if (addr != MAP_FAILED)
-    {
-        if (MAP_FAILED == mmap(addr, f_len, PROT_READ, MAP_SHARED | MAP_FIXED, fd, offset))
-        {
-            munmap(addr, tot_len);
-            return MAP_FAILED;
-        }
-    }
-
-    return addr;
-}
-
-/* Documentation comment in rinex_p.h. */
-void *memmem
+void *rnx_memmem
 (
     const char *haystack, size_t h_size,
     const char *needle, size_t n_size
@@ -132,7 +81,7 @@ int rnx_find_header
 
     while (1)
     {
-        pos = memmem(in + ofs, in_size, header, sizeof_header - 1);
+        pos = rnx_memmem(in + ofs, in_size, header, sizeof_header - 1);
         if (!pos)
         {
             return RINEX_ERR_BAD_FORMAT;

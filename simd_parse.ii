@@ -1,6 +1,8 @@
 #include <string.h>
 
-/* Stupid C preprocessor tricks! */
+/* Stupid C preprocessor tricks! We need an extra layer of macro expansion
+ * to expand the SIMD_TYPE macro that is provided by the translation unit.
+ */
 
 #define CONCAT_4(A, B, C, D) A ## B ## C ## D
 #define CONCAT_4_B(A, B, C, D) CONCAT_4(A, B, C, D)

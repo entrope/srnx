@@ -33,6 +33,58 @@ struct rinex_stream_mmap
     int fd;
 };
 
+/* Documentation comment in rinex_p.h. */
+long rnx_page_size;
+
+/** dev_zero is a file descriptor for /dev/zero, used to mmap empty
+ * pages past the end of real data (when needed).
+ */
+static int dev_zero;
+
+/* Documentation comment in rinex_p.h. */
+int rnx_mmap_init(void)
+{
+    if (!rnx_page_size)
+    {
+        rnx_page_size = sysconf(_SC_PAGE_SIZE);
+        if (rnx_page_size <= 0)
+        {
+            return 1;
+        }
+
+        dev_zero = open("/dev/zero", O_RDONLY);
+        if (dev_zero < 0)
+        {
+            return 2;
+        }
+    }
+
+    return 0;
+}
+
+/* Documentation comment in rinex_p.h. */
+void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
+{
+    void *addr;
+
+    if (!rnx_page_size && rnx_mmap_init())
+    {
+        return MAP_FAILED;
+    }
+
+    addr = mmap(NULL, tot_len, PROT_READ, MAP_SHARED, dev_zero, 0);
+    if (addr != MAP_FAILED)
+    {
+        if (MAP_FAILED == mmap(addr, f_len, PROT_READ, MAP_SHARED | MAP_FIXED, fd, offset))
+        {
+            munmap(addr, tot_len);
+            return MAP_FAILED;
+        }
+    }
+
+    return addr;
+}
+
 static int rinex_mmap_advance(
     struct rinex_stream *stream_base,
     unsigned int req_size,
@@ -95,9 +147,9 @@ static int rinex_mmap_advance(
      * file is at least RINEX_EXTRA bytes before the end of a page, we
      * can just map the target range directly.
      */
-    eff_len = (stream->file_size + page_size - 1) & -page_size;
-    base_offset = new_offset & -page_size;
-    stream->total = (new_offset - base_offset + req_size + RINEX_EXTRA + page_size - 1) & -page_size;
+    eff_len = (stream->file_size + rnx_page_size - 1) & -rnx_page_size;
+    base_offset = new_offset & -rnx_page_size;
+    stream->total = (new_offset - base_offset + req_size + RINEX_EXTRA + rnx_page_size - 1) & -rnx_page_size;
     if (base_offset + stream->total <= (size_t)eff_len)
     {
         /* We can do a simple mmap. */
@@ -153,7 +205,7 @@ struct rinex_stream *rinex_mmap_stream(const char *filename)
         return NULL;
     }
 
-    if (!page_size && rnx_mmap_init())
+    if (!rnx_page_size && rnx_mmap_init())
     {
         free(str);
         return NULL;

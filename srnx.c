@@ -4,7 +4,7 @@
  */
 
 #include "srnx.h"
-#include "rinex_p.h" /* page_size, rnx_find_header(), etc. */
+#include "rinex_p.h" /* rnx_page_size, rnx_find_header(), etc. */
 #include "transpose.h"
 
 #include <errno.h>
@@ -537,12 +537,12 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[])
     file_size = sbuf.st_size;
 
     /* Memory-map the file. */
-    if (!page_size && rnx_mmap_init())
+    if (!rnx_page_size && rnx_mmap_init())
     {
         (*p_srnx)->error_line = __LINE__;
         return errno;
     }
-    tot_len = (file_size + RINEX_EXTRA + page_size - 1) & -page_size;
+    tot_len = (file_size + RINEX_EXTRA + rnx_page_size - 1) & -rnx_page_size;
     addr = rnx_mmap_padded(fd, 0, file_size, tot_len);
     if (addr == MAP_FAILED)
     {
