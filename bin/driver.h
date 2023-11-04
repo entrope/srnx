@@ -7,6 +7,9 @@
 #define DRIVER_H_aef69988_07fd_42c5_ba09_ae093fd43849
 
 #include "rinex.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #if defined(__cplusplus)
 extern "C" {

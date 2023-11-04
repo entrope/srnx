@@ -1,4 +1,4 @@
-#include "rinex_p.h"
+#include "lib/rinex_p.h"
 
 #define TRANSPOSE_U64(X) do { \
         X = (X & 0xAA55AA55AA55AA55) \
@@ -633,4 +633,4 @@ static const char *rnx_parse_obs
 #define SIMD_GET_N_NEWLINES
 
 #define SIMD_TYPE std
-#include "simd_parse.ii"
+#include "lib/parse_simd.ii"

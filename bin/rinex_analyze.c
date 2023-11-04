@@ -3,10 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "driver.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "bin/driver.h"
 
 #ifdef __x86_64__
 # include <x86intrin.h>

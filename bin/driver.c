@@ -3,11 +3,8 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "driver.h"
+#include "bin/driver.h"
 #include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <wordexp.h>
 
 int verbose;

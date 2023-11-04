@@ -1,4 +1,4 @@
-#include "rinex_p.h"
+#include "lib/rinex_p.h"
 #include <arm_neon.h>
 
 static const char *rnx_neon_parse_obs
@@ -168,4 +168,4 @@ static int rnx_neon_get_n_newlines_inner(
     if (rnx_neon_get_n_newlines_inner(p, &whence, n_lines, &found)) return whence
 
 #define SIMD_TYPE neon
-#include "simd_parse.ii"
+#include "lib/parse_simd.ii"

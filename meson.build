@@ -1,17 +1,17 @@
 project('rinex', 'c',
     version: '0.1',
-    default_options : ['warning_level=3', 'werror=true', 'buildtype=release'])
+    default_options : ['warning_level=3', 'werror=true', 'buildtype=release', 'debug=true'])
 
 simd = import('unstable-simd')
 simd_parse = simd.check('parse',
-    avx2 : 'avx2_parse.c',
-    neon : 'neon_parse.c',
+    avx2 : 'lib/parse_avx2.c',
+    neon : 'lib/parse_neon.c',
     compiler : meson.get_compiler('c'))
 configure_file(configuration : simd_parse[1],
     output : 'rinex_cfg.h')
 librinex = library('rinex',
-    'rinex_mmap.c', 'rinex_p.c', 'rinex_parse.c', 'rinex_stdio.c',
-    'rinex_buffer.c', 'std_parse.c', 'transpose.c', # 'srnx.o'
+    'lib/rinex_mmap.c', 'lib/rinex_p.c', 'lib/rinex_parse.c', 'lib/rinex_stdio.c',
+    'lib/rinex_buffer.c', 'lib/parse_std.c', 'lib/transpose.c', # 'lib/srnx.c'
     link_with : simd_parse[0]
     )
 libtap = declare_dependency(
@@ -19,42 +19,42 @@ libtap = declare_dependency(
     sources : 'libtap/tap.c')
 
 rinex_analyze = executable('rinex_analyze',
-    'rinex_analyze.c', 'driver.c',
+    'bin/rinex_analyze.c', 'bin/driver.c',
     install : false,
     link_args : '-flto',
     link_with : [librinex])
 
 rinex_maxima = executable('rinex_maxima',
-    'rinex_maxima.c', 'driver.c',
+    'bin/rinex_maxima.c', 'bin/driver.c',
     install : false,
     link_with : [librinex])
 
 rinex_n_obs = executable('rinex_n_obs',
-    'rinex_n_obs.c', 'driver.c',
+    'bin/rinex_n_obs.c', 'bin/driver.c',
     install : false,
     link_with : [librinex])
 
 rinex_scan = executable('rinex_scan',
-    'rinex_scan.c', 'driver.c',
+    'bin/rinex_scan.c', 'bin/driver.c',
     install : false,
     link_with : [librinex])
 
 test_rnx_v2 = executable('test_rnx_v2',
-    'test_rnx_v2.c',
+    'bin/test_rnx_v2.c',
     build_by_default : false,
     dependencies : [libtap],
     install : false,
     link_with : [librinex])
 
 test_rnx_v3 = executable('test_rnx_v3',
-    'test_rnx_v3.c',
+    'bin/test_rnx_v3.c',
     build_by_default : false,
     dependencies : [libtap],
     install : false,
     link_with : [librinex])
 
-test_transpose = executable('transpose_test',
-    'transpose_test.c',
+test_transpose = executable('test_transpose',
+    'bin/test_transpose.c',
     build_by_default : false,
     install : false,
     link_with : [librinex])

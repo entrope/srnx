@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "rinex_p.h"
+#include "lib/rinex_p.h"
 
 static int rinex_buffer_advance(
     struct rinex_stream *stream_base,

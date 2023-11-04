@@ -4,7 +4,7 @@
  */
 
 #include "srnx.h"
-#include "rinex_p.h" /* rnx_page_size, rnx_find_header(), etc. */
+#include "lib/rinex_p.h" /* rnx_page_size, rnx_find_header(), etc. */
 #include "transpose.h"
 
 #include <errno.h>

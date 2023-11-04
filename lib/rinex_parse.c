@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "rinex_p.h"
+#include "lib/rinex_p.h"
 
 #include <assert.h>
 #include <ctype.h>

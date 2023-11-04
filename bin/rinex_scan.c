@@ -3,9 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "driver.h"
-#include <stdio.h>
-#include <string.h>
+#include "bin/driver.h"
 
 void process_file(struct rinex_parser *p, const char filename[])
 {
