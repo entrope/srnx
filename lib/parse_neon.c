@@ -1,4 +1,4 @@
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 #include <arm_neon.h>
 
 static const char *rnx_neon_parse_obs
@@ -15,8 +15,9 @@ static const char *rnx_neon_parse_obs
     const int16x8_t v_1_100 = {0, 1, 100, 1, 100, 1, 100, 1};
     const int32x4_t v_1_10000 = {10000, 1, 1000, 1};
 
-    /* This has two paths: First, if there is a newline, replace it and
-     * everything after it with spaces (for LLI and SSI); then convert
+    /* This has three paths: First, if there is a newline, replace it
+     * and everything after it with spaces (for LLI and SSI); then check
+     * that the modified text all has valid characters; then convert
      * digits in the observation part to their values.
      *
      * The observation part can normally contain digits or any of
@@ -38,6 +39,22 @@ static const char *rnx_neon_parse_obs
     p->lli[idx] = vgetq_lane_s8(m_obs, 14);
     p->ssi[idx] = vgetq_lane_s8(m_obs, 15);
 
+    /* Use the technique from https://arxiv.org/pdf/1902.08318.pdf
+     * section 3.1.2 (Vectorized classification) to check whether
+     * all the bytes of m_obs are in the set " -.0123456789".
+     * " -." are 0x20, 0x2D, 0x2E respectively.
+     * 0-9 are 0x30 through 0x39 respectively.
+     */
+    const uint8x16_t hi_tbl = {0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8x16_t lo_tbl = {3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 1, 1, 0};
+    const uint8x16_t shift = {-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0};
+    const uint8x16_t t_hi = vqtbl1q_u8(hi_tbl, vshrq_n_u8(m_obs, 4));
+    const uint8x16_t t_lo = vqtbl1q_u8(lo_tbl, vandq_u8(m_obs, vdupq_n_u8(0xf)));
+    const uint8x16_t t_ok = vandq_u8(vtstq_u8(t_hi, t_lo), vdupq_n_u8(0x80));
+    const uint8x16_t t_msk = vshlq_u8(t_ok, shift);
+    uint32_t msk = vaddv_u8(vget_low_u8(t_msk));
+    msk += vaddv_u8(vget_high_u8(t_msk)) << 8;
+
     /* Check whether the input contains a '-'.  "-.1  " is allowed. */
     const int8_t is_neg = vminvq_s8(vceqq_s8(v_minus, m_obs));
     /* Realign the digits and translate them to byte-wide values. */
@@ -55,7 +72,7 @@ static const char *rnx_neon_parse_obs
     p->obs[idx] = obs_s64;
 
     const int8_t done = 16 + vaddvq_s8(m_mask);
-    return obs + done; /* how far did we skip? */
+    return (msk == 65535) ? (obs + done) : NULL; /* how far did we skip? */
 }
 
 #if 0

@@ -1,10 +1,10 @@
-/* rinex_p.h - Private definitions for RINEX observation parsing.
+/* rnx_priv.h - Private definitions for RINEX observation parsing.
  * Copyright 2020 Michael Poole.
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#if !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4)
-#define RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4
+#if !defined(RNX_PRIV_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4)
+#define RNX_PRIV_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4
 
 #include <fcntl.h>
 #include <stddef.h>
@@ -308,4 +308,4 @@ int parse_uint
         rnx_##SUFFIX ARGS; \
     }
 
-#endif /* !defined(RINEX_P_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4) */
+#endif /* !defined(RNX_PRIV_H_a03d7227_442c_4822_a2d2_04bd8c5ff3e4) */

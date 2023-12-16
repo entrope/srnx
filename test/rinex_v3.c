@@ -1,4 +1,4 @@
-/** test_rnx_v3 - TAP harness for RINEX v3 parsing in librinex.
+/** test/rinex_v3 - TAP harness for RINEX v3 parsing in librinex.
  * Copyright 2022 Michael Poole.
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
@@ -12,7 +12,7 @@
  */
 #include "bin/abmf00glp_rnx.h"
 
-/* N tests, based on three epochs from ABMF00GLP_R_20201890000_01D_30S_MO.rnx.*/
+/* 59 tests, based on three epochs from ABMF00GLP_R_20201890000_01D_30S_MO.rnx. */
 void test_abmf00glp_rnx(void)
 {
     struct rinex_stream *v3;

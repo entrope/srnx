@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 
 static int rinex_buffer_advance(
     struct rinex_stream *stream_base,
@@ -11,7 +11,13 @@ static int rinex_buffer_advance(
     unsigned int step
 )
 {
-    (void)stream_base; (void)req_size; (void)step;
+    if (step > stream_base->size)
+    {
+        step = stream_base->size;
+    }
+    stream_base->buffer += step;
+    stream_base->size -= step;
+    (void)req_size;
     return 0;
 }
 

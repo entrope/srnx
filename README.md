@@ -93,17 +93,18 @@ Each satellite has per-signal tables:
 
 ## Build system
 
-This uses [Meson](https://mesonbuild.com/) to build.  Typical usage:
+This uses [Meson](https://mesonbuild.com/) to build.  Typical usage,
+captured in bin/coverage.sh:
 
 ```bash
 meson setup --buildtype debug -D b_coverage=true +build
 meson test -C +build
 meson test -C +build --benchmark
-ninja -C +build coverage-html
-sensible-browser +build/meson-logs/coveragereport/index.html
+ninja -C +build coverage
+open +build/meson-logs/coveragereport/index.html
 ```
 
-For an optimized build, use something like:
+For an optimized build, use somecd thing like:
 
 ```bash
 meson setup +release
@@ -134,8 +135,8 @@ For `./rinex_scan 2020_200/m*.20o`, with 42,091,216,806 bytes of input:
    `./rinex_scan 2020_200/m*.20o  13.85s user 1.28s system 99% cpu 15.125 total`
    3039 MB/sec user, 2782 MB/sec user+system, 2783 MB/sec wall clock
 - Apple M2 Max, -O3 with NEON:
-   `./+release/rinex_scan 2020_200/m*.20o  29.48s user 1.94s system 97% cpu 32.291 total`
-   1428 MB/sec user, 1340 MB/sec user+system, 1303 MB/sec wall clock
+   `./+release/rinex_scan 2020_200/m*.20o  29.39s user 15.88s system 84% cpu 53.489 total`
+   1432 MB/sec user, 930 MB/sec user+system, 787 MB/sec wall clock
 - AMD Threadripper 3960X, -O3:
    `./rinex_scan 2020_200/m*.20o  48.45s user 0.96s system 99% cpu 49.423 total`
    869 MB/sec user, 852 MB/sec user+system, 852 MB/sec user+system

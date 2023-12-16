@@ -1,9 +1,9 @@
-/** rinex_p.c - Private utility functions for RINEX parsing.
+/** rnx_priv.c - Private utility functions for RINEX parsing.
  * Copyright 2020 Michael Poole.
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -12,7 +12,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 void *rnx_memmem
 (
     const char *haystack, size_t h_size,
@@ -44,7 +44,7 @@ void *rnx_memmem
     return NULL;
 }
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 int rnx_copy_text(
     struct rnx_v234_parser *p,
     int eol_ofs
@@ -67,7 +67,7 @@ int rnx_copy_text(
     return RINEX_SUCCESS;
 }
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 int rnx_find_header
 (
     const char in[],
@@ -114,7 +114,7 @@ RNX_RESOLVE(int, get_n_newlines,
     (p, whence, n_lines),
     avx2, neon)
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 int rnx_get_newlines(
     struct rinex_parser *p,
     uint64_t *p_whence,
@@ -168,7 +168,7 @@ int rnx_get_newlines(
     return rnx_get_newlines(p, p_whence, p_body_ofs, n_header, n_body);
 }
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 int parse_fixed
 (
     int64_t *p_out,
@@ -240,7 +240,7 @@ int parse_fixed
     return 0;
 }
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 int parse_uint
 (
     int *p_out,

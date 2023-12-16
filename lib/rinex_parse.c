@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/** rnx_ensure_sats ensures that \a p has enough capacity to hold
+ * \a p->base.epoch.n_sats satellites of data.
+ */
 static rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p)
 {
     if (p->sats_alloc < p->base.epoch.n_sats)
@@ -95,8 +98,9 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     {
         return res;
     }
-    if (res < 33)
+    if ((uint64_t)res < p->parse_ofs + 33)
     {
+        p->parse_ofs = res;
         p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
@@ -107,6 +111,7 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     res = rnx_v2_parse_time(p, line);
     if (res < 0)
     {
+        p->parse_ofs += line_len + 1;
         return res;
     }
 
@@ -115,16 +120,18 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     {
         p->base.epoch.clock_offset = 0;
     }
-    else if (line_len == 80)
+    else if (line_len > 70)
     {
-        if (parse_fixed(&p->base.epoch.clock_offset, line+68, 12, 9))
+        if (parse_fixed(&p->base.epoch.clock_offset, line+68, line_len-68, line_len-71))
         {
+            p->parse_ofs += line_len + 1;
             p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
     }
     else
     {
+        p->parse_ofs += line_len + 1;
         p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
@@ -143,7 +150,12 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
         {
             if (res == RINEX_EOF)
             {
+                p->parse_ofs = p->base.stream->size;
                 res = RINEX_ERR_BAD_FORMAT;
+            }
+            else
+            {
+                p->parse_ofs += line_len + 1;
             }
             p_->error_line = __LINE__;
             return res;
@@ -168,16 +180,14 @@ static rinex_error_t rnx_read_v2(struct rinex_parser *p_)
             {
                 res = RINEX_ERR_BAD_FORMAT;
             }
+            p->parse_ofs += line_len + 1;
             p_->error_line = __LINE__;
             err = res;
         }
         else
         {
+            p->parse_ofs = res;
             err = rnx_copy_text(p, res);
-            if (err == RINEX_SUCCESS)
-            {
-                p->parse_ofs = res;
-            }
         }
 
         /* and we are done */
@@ -209,12 +219,13 @@ static rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     {
         return res;
     }
-    if (res < 35)
+    if ((uint64_t)res < p->parse_ofs + 35)
     {
+        p->parse_ofs = res;
         p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
-    line_len = res - p->parse_ofs;
+    line_len = res - 1 - p->parse_ofs;
     line = p->base.stream->buffer + p->parse_ofs;
     p->parse_ofs = res;
 
@@ -898,7 +909,7 @@ const char *rinex_open
     res = stream->advance(stream, BLOCK_SIZE, 0);
     if (res || stream->size < 80)
     {
-        return strerror(errno);
+        return strerror(res);
     }
 
     /* Is it an uncompressed RINEX file? */

@@ -1,4 +1,4 @@
-/** test_rnx_v2.c - TAP harness for RINEX v2 parsing in librinex.
+/** test/rinex_v2 - TAP harness for RINEX v2 parsing in librinex.
  * Copyright 2022 Michael Poole.
  * SPDX-License-Identifier: MIT-Modern-Variant
  */

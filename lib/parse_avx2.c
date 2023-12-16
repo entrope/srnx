@@ -1,4 +1,4 @@
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 #include <x86intrin.h>
 
 static const char shuffle_8[31] __attribute__((aligned(16))) = {

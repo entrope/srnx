@@ -72,14 +72,15 @@ int main(int argc, char *argv[])
             : rinex_stdio_stream(filename);
         if (!s)
         {
-            printf("Unable to mmap %s: %s\n", filename, strerror(errno));
+            printf("Unable to open %s: %s\n", filename, strerror(errno));
             continue;
         }
 
         err = rinex_open(&p, s);
         if (err)
         {
-            printf("Unable to open %s: %s\n", filename, err);
+            printf("Unable to rinex_open %s: %s\n", filename, err);
+            s->destroy(s);
             continue;
         }
 

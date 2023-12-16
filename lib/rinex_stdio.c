@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 
 #include <errno.h>
 #include <limits.h>

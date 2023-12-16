@@ -1,4 +1,4 @@
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 
 #define TRANSPOSE_U64(X) do { \
         X = (X & 0xAA55AA55AA55AA55) \

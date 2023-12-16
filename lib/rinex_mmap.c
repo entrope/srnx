@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "lib/rinex_p.h"
+#include "lib/rnx_priv.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -33,15 +33,10 @@ struct rinex_stream_mmap
     int fd;
 };
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 long rnx_page_size;
 
-/** dev_zero is a file descriptor for /dev/zero, used to mmap empty
- * pages past the end of real data (when needed).
- */
-static int dev_zero;
-
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 int rnx_mmap_init(void)
 {
     if (!rnx_page_size)
@@ -51,18 +46,12 @@ int rnx_mmap_init(void)
         {
             return 1;
         }
-
-        dev_zero = open("/dev/zero", O_RDONLY);
-        if (dev_zero < 0)
-        {
-            return 2;
-        }
     }
 
     return 0;
 }
 
-/* Documentation comment in rinex_p.h. */
+/* Documentation comment in rnx_priv.h. */
 void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
 {
     void *addr;
@@ -72,10 +61,11 @@ void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
         return MAP_FAILED;
     }
 
-    addr = mmap(NULL, tot_len, PROT_READ, MAP_SHARED, dev_zero, 0);
+    addr = mmap(NULL, tot_len, PROT_READ, MAP_PRIVATE | MAP_ANON, 0, 0);
     if (addr != MAP_FAILED)
     {
-        if (MAP_FAILED == mmap(addr, f_len, PROT_READ, MAP_SHARED | MAP_FIXED, fd, offset))
+        if ((MAP_FAILED == mmap(addr, f_len, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, offset))
+            && (f_len != 0))
         {
             munmap(addr, tot_len);
             return MAP_FAILED;
@@ -153,7 +143,7 @@ static int rinex_mmap_advance(
     if (base_offset + stream->total <= (size_t)eff_len)
     {
         /* We can do a simple mmap. */
-        stream->map = mmap(NULL, stream->total, PROT_READ, MAP_SHARED,
+        stream->map = mmap(NULL, stream->total, PROT_READ, MAP_PRIVATE,
             stream->fd, base_offset);
         if (stream->map == MAP_FAILED)
         {
