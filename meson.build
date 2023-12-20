@@ -12,8 +12,9 @@ simd_parse = simd.check('parse',
 configure_file(configuration : simd_parse[1],
     output : 'rinex_cfg.h')
 librinex = library('rinex',
-    'lib/rinex_mmap.c', 'lib/rnx_priv.c', 'lib/rinex_parse.c', 'lib/rinex_stdio.c',
-    'lib/rinex_buffer.c', 'lib/parse_std.c', 'lib/transpose.c', # 'lib/srnx.c'
+    'lib/crx_parse.c', 'lib/rnx_parse.c',
+    'lib/rinex_mmap.c', 'lib/rnx_priv.c', 'lib/rinex_stdio.c', 'lib/rinex_buffer.c',
+    'lib/parse_std.c', 'lib/transpose.c', # 'lib/srnx.c',
     link_with : simd_parse[0]
     )
 libtap = declare_dependency(

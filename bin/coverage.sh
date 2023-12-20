@@ -1,5 +1,10 @@
 #! /usr/bin -e
 
+if test -f +build ; then
+    rm -r +build/meson-logs/coveragereport || true
+else
+    meson setup --buildtype debug -D b_coverage=true +build
+fi
 ninja -C +build -t clean
 # rm +build/*/*.gcno +build/*/*.gcda
 meson test -C +build

@@ -11,7 +11,7 @@
 
 /* Based on the first epoch from at012000.20o. */
 const unsigned char parse_errors_v2[] =
-    "     2.11           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE\n"
+    "     2.11           OBSERVATION DATA                        RINEX VERSION / TYPE\n"
     "teqc  2019Feb25     NOAA/NOS/NGS/CORS   20200720 01:36:16UTCPGM / RUN BY / DATE\n"
     "     1     1                                                WAVELENGTH FACT L1/2\n"
     "    20    L1    L2    C1    P2    P1    S1    S2    C2    L5# / TYPES OF OBSERV\n"
@@ -69,6 +69,7 @@ const unsigned char parse_errors_v3[] =
     "C   12 C2I L2I D2I S2I C7I L7I D7I S7I C6I L6I D6I S6I      SYS / # / OBS TYPES\n"
     "J   12 C1C L1C D1C S1C C2L L2L D2L S2L C5Q L5Q D5Q S5Q      SYS / # / OBS TYPES\n"
     "I    4 C5A L5A D5A S5A                                      SYS / # / OBS TYPES\n"
+    "     0                                                      RCV CLOCK OFFS APPL\n"
     "                                                            END OF HEADER\n"
     "> 2020 07 07 00 00  1.0000000  0 \n"   /* header line is truncated */
     "> 2020 07 07 00 00  2.0000000  0  1\n" /* valid line */
@@ -82,8 +83,13 @@ const unsigned char parse_errors_v3[] =
     "  21517820.883 6 114944376.29006       720.886 6        41.654  "
     "  21517823.338 6  89401209.10306       560.568 6        41.833  "
     "excess junk at end of line\n"
-    "> 2020 07 07 00 00  4.0000000  0  1\n" /* valid line*/
-    "I01  28541439.844 5 149986288.81705      1175.101 5        35.700    28541441.120 6\n"
+    "> 2020 07 07 00 00  4.0000000  0  1\n" /* valid line */
+    "I01  28541439.844 5 149986288.81705      1175.101 5        35.700\n"
+    "Line is long enough but not valid RINEX v3\n"
+    "> 2020 07 07 00 00  6.0000000  0  1      -1.012345678901\n" /* valid line with clock offset */
+    "I01  28541439.844 5 149986288.81705      1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  7.0000000  2  1\n"
+    "Event flag 2 indicates the antenna started moving           COMMENT\n"
     NUL_PAD;
 
 void
@@ -150,7 +156,7 @@ void test_parse_errors_v3(void)
     if (msg || !p)
         BAIL_OUT();
 
-    /* 5 tests */
+    /* 8 tests */
     err = p->read(p);
     cmp_ok(err, "==", RINEX_ERR_BAD_FORMAT, "rinex v3 read() #1 failed");
     err = p->read(p);
@@ -160,12 +166,20 @@ void test_parse_errors_v3(void)
     err = p->read(p);
     ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == 40000000, "rinex v3 read() #4 succeeded");
     err = p->read(p);
+    cmp_ok(err, "==", RINEX_ERR_BAD_FORMAT, "rinex v3 read() #5 failed");
+    err = p->read(p);
+    ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == 60000000 && p->epoch.clock_offset == -1012345678901,
+        "rinex v3 read() #6 succeeded");
+    err = p->read(p);
+    ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == 70000000 && p->epoch.flag == '2',
+        "rinex v3 read() #7 succeeded");
+    err = p->read(p);
     cmp_ok(err, "==", RINEX_EOF, "rinex v3 read() after EOF is stable");
 }
 
 int main(int argc, char *argv[])
 {
-    plan(8+1+5);
+    plan(8+1+8);
 
     test_parse_errors_v2();
     test_parse_errors_v2_b();

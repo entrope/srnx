@@ -445,11 +445,10 @@ static int srnx_parse_rhdr(
     uint64_t rhdr_len
 )
 {
-    static const char rinex_version_type[] = "RINEX VERSION / TYPE";
     int ii;
 
     /* "RINEX VERSION / TYPE" line has RINEX version as F9.2 at 0. */
-    if (memcmp(rhdr + 60, rinex_version_type, sizeof(rinex_version_type) - 1))
+    if (memcmp(rhdr + 60, rnx_version_type, 20))
     {
         srnx->error_line = __LINE__;
         return SRNX_CORRUPT;

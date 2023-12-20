@@ -25,6 +25,11 @@
 /** rnx_page_size is the value of sysconf(_SC_PAGE_SIZE). */
 extern long rnx_page_size;
 
+/** rnx_version_type is the header text "RINEX VERSION / TYPE".
+ * It should be treated as having length 20.
+ */
+extern const char rnx_version_type[];
+
 /** rnx_v234_parser is a RINEX v2.xx, v3.xx or v4.xx parser. */
 struct rnx_v234_parser
 {
@@ -180,6 +185,39 @@ int rnx_copy_text(
     int eol_ofs
 );
 
+/** Parses a RINEX v2-style header line from \a line into \a p.
+ *
+ * \param[out] p Receives parsed header information.
+ * \param[in] line Header line.
+ */
+int rnx_v2_parse_time(
+    struct rnx_v234_parser *p,
+    const char *line
+);
+
+/** rnx_read_v2 reads an observation data record from \a p_. */
+rinex_error_t rnx_read_v2(struct rinex_parser *p_);
+
+/** rnx_read_v34 reads an observation data record from \a p_. */
+rinex_error_t rnx_read_v34(struct rinex_parser *p_);
+
+/** rnx_free_v23 deallocates \a p_, which must be a rnx_v234_parser. */
+void rnx_free_v23(struct rinex_parser *p_);
+
+/** crx_free_v23 deallocates \a p_, which must be a crx_v23_parser. */
+void crx_free_v23(struct rinex_parser *p_);
+
+const char *rnx_open_v23(
+    struct rnx_v234_parser *p,
+    struct rinex_stream *stream,
+    int hdr_ofs
+);
+
+const char *crx_open_v23(
+    struct crx_v23_parser *crx,
+    struct rinex_stream *stream
+);
+
 /** Parses a fixed-point decimal field.
  *
  * A valid field consists of \a width - \a frac - 1 characters as a
@@ -200,13 +238,11 @@ int rnx_copy_text(
  * \param[in] frac Width of the fractional part in characters.
  * \returns Zero on success, else EINVAL if the field was invalid.
  */
-int parse_fixed
-(
+int parse_fixed(
     int64_t *p_out,
     const char *start,
     int width,
-    int frac
-);
+    int frac);
 
 /** Parses an unsigned integer field of \a width bytes starting at
  * \a start.
