@@ -1,4 +1,4 @@
-#include "lib/rnx_priv.h"
+#include "rinex/rnx_priv.h"
 
 #define TRANSPOSE_U64(X) do { \
         X = (X & 0xAA55AA55AA55AA55) \
@@ -603,27 +603,20 @@ static const char *rnx_parse_obs
     p->ssi[nn] = buf[15];
 
     /* Parse the observation value. */
-#define DVAL(X) ((X == ' ') ? 0 : (X - '0'))
+#define DVAL(A) ((A == ' ') ? 0 : (A - '0'))
+#define FOUR(W, X, Y, Z) (DVAL(W) + 10 * DVAL(X) + 100 * DVAL(Y) + 1000 * DVAL(Z))
     value = DVAL(buf[13])
-        + 10 * DVAL(buf[12])
-        + 100 * DVAL(buf[11])
         /* buf[10] == '.', at least in theory */
-        + 1000 * DVAL(buf[9])
-        + 10000 * DVAL(buf[8])
-        + 100000 * DVAL(buf[7])
-        + 1000000 * DVAL(buf[6])
-        + 10000000 * DVAL(buf[5])
-        + 100000000 * DVAL(buf[4])
-        + INT64_C(1000000000) * DVAL(buf[3])
-        + INT64_C(10000000000) * DVAL(buf[2])
-        + INT64_C(100000000000) * DVAL(buf[1])
-        + INT64_C(1000000000000) * DVAL(buf[0]);
+        + 10 * FOUR(buf[12], buf[11], buf[9], buf[8])
+        + 100000 * FOUR(buf[7], buf[6], buf[5], buf[4])
+        + INT64_C(1000000000) * FOUR(buf[3], buf[2], buf[1], buf[0]);
+#undef FOUR
+#undef DVAL
     if (neg)
     {
         value = -value;
     }
     p->obs[nn] = value;
-#undef DVAL
 
     return obs;
 }
@@ -633,4 +626,4 @@ static const char *rnx_parse_obs
 #define SIMD_GET_N_NEWLINES
 
 #define SIMD_TYPE std
-#include "lib/parse_simd.ii"
+#include "rinex/parse_simd.ii"

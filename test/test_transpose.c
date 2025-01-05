@@ -11,7 +11,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "transpose.h"
+#include "rinex/transpose.h"
 
 int64_t out[32];
 char input_8[32];

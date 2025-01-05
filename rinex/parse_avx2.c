@@ -1,4 +1,4 @@
-#include "lib/rnx_priv.h"
+#include "rinex/rnx_priv.h"
 #include <x86intrin.h>
 
 static const char shuffle_8[31] __attribute__((aligned(16))) = {
@@ -767,4 +767,4 @@ static int rnx_avx2_get_n_newlines_inner(
     if (rnx_avx2_get_n_newlines_inner(p, &whence, n_lines, &found)) return whence
 
 #define SIMD_TYPE avx2
-#include "lib/parse_simd.ii"
+#include "rinex/parse_simd.ii"

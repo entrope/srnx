@@ -8,11 +8,13 @@
 void process_file(struct rinex_parser *p, const char filename[])
 {
     static uint64_t sat_obs[100 * 32];
+    static int sat_epochs[100 * 32];
     uint64_t tmp_sat_obs;
     int count, max_obs, tot_obs, max_sats, ii, jj, n_obs, sys_obs;
-    int sys_idx, sat_idx, act_obs, sat_ofs;
+    int sys_idx, sat_idx, act_obs, sat_ofs, max_sat_epochs;
 
     memset(sat_obs, 0, sizeof(sat_obs));
+    memset(sat_epochs, 0, sizeof(sat_epochs));
     for (count = max_obs = max_sats = tot_obs = 0; ; ++count)
     {
         int res = p->read(p);
@@ -39,7 +41,7 @@ void process_file(struct rinex_parser *p, const char filename[])
         for (ii = n_obs = 0; ii < p->epoch.n_sats; ++ii)
         {
             sys_idx = p->sats[ii].system & 31;
-            sat_idx = p->sats[ii].number + sys_idx;
+            sat_idx = p->sats[ii].number + 100 * sys_idx;
             sat_ofs = p->sats[ii].obs_0;
             tmp_sat_obs = sat_obs[sat_idx];
             sys_obs = p->n_obs[sys_idx];
@@ -50,6 +52,7 @@ void process_file(struct rinex_parser *p, const char filename[])
                 n_obs += non_zero;
             }
             sat_obs[sat_idx] = tmp_sat_obs;
+            ++sat_epochs[sat_idx];
         }
 
         tot_obs += n_obs;
@@ -66,17 +69,22 @@ void process_file(struct rinex_parser *p, const char filename[])
         }
     }
 
+    max_sat_epochs = 0;
     act_obs = 0;
     for (ii = 0; ii < 100 * 32; ++ii)
     {
+        if (max_sat_epochs < sat_epochs[ii])
+        {
+            max_sat_epochs = sat_epochs[ii];
+        }
         act_obs += __builtin_popcountll(sat_obs[ii]);
     }
 
-    printf("%s,%d,%d,%d,%d,%d,%d\n", filename,
-        count, max_obs, max_sats, p->n_obs[0], act_obs, tot_obs);
+    printf("%s,%d,%d,%d,%d,%d,%d,%d\n", filename,
+        count, max_obs, max_sats, p->n_obs[0], act_obs, tot_obs, max_sat_epochs);
 }
 
 void start(void)
 {
-    printf("filename,epochs,maxobs,maxsats,sysobs,satobs,totobs\n");
+    printf("filename,epochs,maxobs,maxsats,sysobs,satobs,totobs,maxepochs\n");
 }

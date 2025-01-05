@@ -6,7 +6,7 @@
 #if !defined(RINEX_H_b56f2d84_3a1e_4708_b3c2_6655d0b571c5)
 #define RINEX_H_b56f2d84_3a1e_4708_b3c2_6655d0b571c5
 
-#include "rinex_epoch.h"
+#include "rinex/rinex_epoch.h"
 
 /* The design for this API is to provide a simple "pull"-based API for
  * reading data from a RINEX-like file, one epoch or event at a time,
@@ -200,6 +200,9 @@ struct rinex_parser
 
 /** rinex_open creates a parser that reads data from \a stream.
  *
+ * Upon success, `(*p_parser)->buffer` contains the RINEX file header,
+ * with `'\n'` line delimiters (with a length stored in `buffer_len`).
+ *
  * \param[in,out] p_parser Receives a pointer to the created parser.  If
  *   this is not null, rinex_open() first calls rinex_parser.destroy()
  *   on the old parser.
@@ -216,7 +219,7 @@ const char *rinex_open(struct rinex_parser **p_parser, struct rinex_stream *stre
  * \param[in] p RINEX parser with header in \a p->buffer.
  * \param[in] label Header label to search for.
  * \param[in] sizeof_label Size of \a label, including nul terminator.
- * \returns A pointer into \a rnx->header such that \a !strcmp(ptr+60,label),
+ * \returns A pointer into \a p->buffer such that \a !strcmp(ptr+60,label),
  *   or NULL if there is no header with the requested label.
  */
 const char *rinex_find_header

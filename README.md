@@ -41,7 +41,7 @@ The following additional assignments could extend it:
 | 216-224 | NavIC PRN ID plus 215 |
 | 225-235 | NavIC reserved |
 | 236-245 | QZSS, as RINEX 4.00 (Table 6) signal ID plus 235 |
-| 246-255 | QZSS reserved
+| 246-255 | QZSS reserved |
 
 Simplicity and expandability seems preferable, so this library keeps a
 character to identify the system and a second byte (0 to 99) to identify
@@ -57,9 +57,10 @@ Pattern: {C,D,L,P,S}{1,2,3,4,5,6,7,8}
 
 RINEX 3.05 defines 266 distinct observation codes, out of about 576
 potential names (potentially 936 considering the whole alphabet as
-candidates for the third character).  The number of observation codes
-defined for a given GNSS system is smaller: at most 120 (for BeiDou,
-considering the 1I/Q/X synonyms for 2I/Q/X).
+candidates for the third character).
+The number of observation codes defined for a given GNSS system is
+smaller: at most 120 (for BeiDou, considering the 1I/Q/X synonyms for
+2I/Q/X).
 
 Defined: See the RINEX 3.0x and 4.00 specification.
 Pattern: {C,L,D,S}{1,2,3,4,5,6,7,8,9}{A,B,C,D,E,I,L,M,N,P,Q,S,W,X,Y,Z}
@@ -67,13 +68,48 @@ Pattern: {C,L,D,S}{1,2,3,4,5,6,7,8,9}{A,B,C,D,E,I,L,M,N,P,Q,S,W,X,Y,Z}
 RINEX 3.x and 4.x also allow receiver channel numbers to be recorded as
 pseudo-observables "X1 " through "X9 ", with blank attributes.
 
+### Indexing
+
+A RINEX file is fundamentally a three-dimensional array of (value, loss
+of lock indicator (LLI), signal strength indicator (SSI)) tuples,
+indexed by epoch (time), satellite number and observable
+code.
+The sparsity of this array varies by dimension: a given satellite
+typically has the same set of observables for almost all epochs where
+it is observed, with variation only as the satellite rises and sets.
+Those epochs each satellilte is visibile are normally contiguous within
+a pass, where passes are separated by long intervals (on the order of
+hours) where the satellite is not observed.
+Some constellations have the same set of observables across all satellites,
+and others have generations of satellites that feature new or changed
+signals, such as GPS L5 and L2C.
+
+The "observable code" arguably has further cardinality: beyond the SSI
+and LLI indicators that go with every observable, there are typically
+groups of four observables that go together for a single signal:
+code-based pseudorange,
+carrier-phase (or accumulated Doppler) range,
+instantaneous Doppler shift,
+and carrier-to-noise ratio.
+Signals using (semi-)codeless processing, such as GPS P(Y), add more
+complexity to this dimension.
+
+Different analyses use different orders of these indices: For example,
+most PNT solutions want to index by time and then satellite, whereas
+time-series analyses index by satellite and then time.
+Both of these work on a chosen subset of observable codes.
+Similarly, the range of many observables can be compressed by storing
+their differences relative to a reference observable for the same
+satellite; for the case of carrier-phase vs pseudorange observations,
+this may involve scaling before taking the differences.
+
 ### Satellite indexing
 
 RINEX v2.11 defines four satellite system codes: G, R, S, E, and for
 GPS-only observation files, blank.
 RINEX v3.04 added J, C, and I.
 
-Letters plus space will be distinct in the five LSBs, allowing for easy
+Letters plus space are be distinct in the five LSBs, allowing for easy
 lookup into a reasonably-sized table.
 
 ## In-memory storage
@@ -81,7 +117,7 @@ lookup into a reasonably-sized table.
 Rather than hashing sv+obs, it is better to use a lookup tree: Index by
 system identifier & 31 to get an offset into a table of all satellites.
 
-Each satellite has per-signal tables:
+Each satellite could have per-signal tables:
 
 - Number of observations used & allocated
 - Number of runs
@@ -93,23 +129,19 @@ Each satellite has per-signal tables:
 
 ## Build system
 
-This uses [Meson](https://mesonbuild.com/) to build.  Typical usage,
-captured in bin/coverage.sh:
+This uses [CMake](https://cmake.org/) to build.  Typical usage, captured
+in bin/coverage.sh:
 
 ```bash
-meson setup --buildtype debug -D b_coverage=true +build
-meson test -C +build
-meson test -C +build --benchmark
-ninja -C +build coverage
-open +build/meson-logs/coveragereport/index.html
+cmake -G Ninja -B +debug -Wdev -DCMAKE_BUILD_TYPE=Debug
+ninja -C +debug test
 ```
 
-For an optimized build, use somecd thing like:
+For an optimized build, use something like:
 
 ```bash
-meson setup +release
-meson compile -C +release
-meson test -C +release --benchmark
+cmake -G Ninja -B +release -DCMAKE_BUILD_TYPE=RelWithDebInfo
+ninja -C +release
 ```
 
 ## Generating flame graphs
@@ -119,13 +151,14 @@ perf record -F399 -g ...
 perf script | stackcollapse-perf.pl > out.perf-folded && flamegraph.pl out.perf-folded > perf-scan.svg
 ```
 
-```bash
-# This doesn't require sudo, but it is not clear how to extract the traces.
-# xctrace record --template 'Time Profiler' --launch -- ...
+## Profiling via Instruments
 
-sudo dtrace -x ustackframes=100 -n 'profile-997 /execname == "rinex_scan" && arg1/ {  @[ustack()] = count(); } tick-60s { exit(0); }' -o scan.dtr
-stackcollapse.pl scan.dtr | flamegraph.pl > flames-scan.svg
+```bash
+xctrace record --template 'CPU Profiler' --launch ./+release/rinex_scan
 ```
+
+Open the resulting *.trace folder in Instruments.app, via Finder or via
+`open Launch_rinex_scan_*.trace`.
 
 ### Throughput benchmarks
 
@@ -164,5 +197,6 @@ For `./rinex_scan 2020_200/m*.20o`, with 42,091,216,806 bytes of input:
 
 Note the apparent disk bottlenecks for the laptop AVX2 version.
 The workstation had 64 GiB RAM, allowing these files to be processed
-from RAM.  The ARM platforms ran from a USB3-attached SSD, with more
-read throughput than the parser could support.
+from RAM.
+The Jetson and Raspberry Pi platforms ran from a USB3-attached SSD, with
+more read throughput than the parser could support.

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "rinex.h"
+#include "rinex/rinex.h"
 #include <stdlib.h>
 #include <tap.h>
 

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
-#include "rinex.h"
-#include "srnx.h"
+#include "rinex/rinex.h"
+#include "rinex/srnx.h"
 
 #include <ctype.h>
 #include <stdio.h>

@@ -1,0 +1,7 @@
+/+build/
+/+coverage/
+/+debug/
+/+release/
+/CMakeFiles/
+/CMakeCache.txt
+/DartConfiguartion.tcl

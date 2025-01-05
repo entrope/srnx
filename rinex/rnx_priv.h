@@ -10,8 +10,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#include "rinex_cfg.h"
-#include "rinex.h"
+#include "rinex/rinex.h"
 
 /** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
 #define RINEX_EXTRA 80

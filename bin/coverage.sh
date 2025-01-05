@@ -1,13 +1,12 @@
 #! /usr/bin -e
 
-if test -f +build ; then
-    rm -r +build/meson-logs/coveragereport || true
+if test -f +coverage ; then
+    rm -r +coverage/coverage || true
 else
-    meson setup --buildtype debug -D b_coverage=true +build
+    cmake -B +coverage -DCMAKE_BUILD_TYPE:STRING=Coverage -G Ninja -Wdev
 fi
-ninja -C +build -t clean
-# rm +build/*/*.gcno +build/*/*.gcda
-meson test -C +build
-meson test -C +build --benchmark
-ninja -C +build coverage
-open +build/meson-logs/coveragereport/index.html
+ninja -C +coverage -t clean
+ninja -C +coverage
+ninja -C +coverage test
+ninja -C +coverage coverage
+open +coverage/coverage/index.html

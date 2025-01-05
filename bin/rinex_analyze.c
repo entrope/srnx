@@ -367,13 +367,17 @@ static void record(struct signal_obs *s_obs, int sv_obs, int64_t obs, char lli, 
             s_obs->lli = malloc(s_obs->alloc);
             s_obs->ssi = malloc(s_obs->alloc);
         }
-        while (sv_obs >= s_obs->alloc)
+        else
         {
-            s_obs->alloc <<= 1;
+            while (sv_obs >= s_obs->alloc)
+            {
+                s_obs->alloc <<= 1;
+            }
             s_obs->obs = realloc(s_obs->obs, s_obs->alloc * sizeof(s_obs->obs[0]));
             s_obs->lli = realloc(s_obs->lli, s_obs->alloc);
             s_obs->ssi = realloc(s_obs->ssi, s_obs->alloc);
         }
+
         if (!s_obs->obs || !s_obs->lli || !s_obs->ssi)
         {
             fprintf(stderr, "Unable to grow observation data\n");
@@ -500,6 +504,10 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
                 sv->run[0].count = 1;
                 sv->n_run = 1;
             }
+            else if (idx < sv->run[sv->n_run-1].start + sv->run[sv->n_run-1].count)
+            {
+                /* This epoch was already recorded. */
+            }
             else if (idx == sv->run[sv->n_run-1].start + sv->run[sv->n_run-1].count)
             {
                 ++sv->run[sv->n_run-1].count;
@@ -562,7 +570,7 @@ static void analyze_compression(const char filename[], int64_t grand_total)
         {
             sv_total += l_ubase128(sv->run[jj].start - prev_epoch)
                 + l_ubase128(sv->run[jj].count - 1);
-            prev_epoch = sv->run[jj].start + sv->run[jj].count + 1;
+            prev_epoch = sv->run[jj].start + sv->run[jj].count;
             sv_obs += sv->run[jj].count;
         }
 
@@ -577,7 +585,7 @@ static void analyze_compression(const char filename[], int64_t grand_total)
             {
                 continue;
             }
-            if (verbose && (s_obs->used != sv_obs) && 0)
+            if (verbose && (s_obs->used != sv_obs))
             {
                 printf("WARNING: SV %d obs %d had %d observations, %d expected\n",
                     ii, jj, s_obs->used, sv_obs);
