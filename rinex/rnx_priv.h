@@ -97,7 +97,13 @@ struct crx_v23_parser
      * That is, \a diff[obs+n*base.obs_alloc] is the \a n'th-order
      * history for observation \a obs.  Unused space is zero-filled.
      */
-    int *diff;
+    int64_t *diff;
+
+    /** sat_flags holds the per-satellite flag state (LLI+SSI) for
+     * differential flag encoding across epochs.  The allocated length
+     * is #base.obs_alloc * 2 (2 flag chars per observation slot).
+     */
+    char *sat_flags;
 };
 
 /** Initializes #rnx_page_size and other internal mmap state.
@@ -149,6 +155,11 @@ int rnx_find_header
     const char header[],
     size_t sizeof_header
 );
+
+/** rnx_ensure_sats ensures that \a p has enough capacity to hold
+ * \a p->base.epoch.n_sats satellites of data.
+ */
+rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p);
 
 /** rnx_get_newlines tries to ensure multiple lines are in \a p->stream.
  *

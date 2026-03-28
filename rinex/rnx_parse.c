@@ -14,7 +14,7 @@
 /** rnx_ensure_sats ensures that \a p has enough capacity to hold
  * \a p->base.epoch.n_sats satellites of data.
  */
-static rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p)
+rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p)
 {
     if (p->sats_alloc < p->base.epoch.n_sats)
     {
@@ -539,13 +539,13 @@ const char *rnx_open_v23
     {
         err = "Invalid header line detected";
     }
-    else if (!memcmp("     2.", stream->buffer, 7))
+    else if (!memcmp("     2.", stream->buffer + hdr_ofs, 7))
     {
         p->base.read = rnx_read_v2;
         err = rnx_open_v2(p);
     }
-    else if (!memcmp("     3.", stream->buffer, 7)
-        || !memcmp("     4.", stream->buffer, 7))
+    else if (!memcmp("     3.", stream->buffer + hdr_ofs, 7)
+        || !memcmp("     4.", stream->buffer + hdr_ofs, 7))
     {
         p->base.read = rnx_read_v34;
         err = rnx_open_v34(p);
@@ -621,6 +621,7 @@ const char *rinex_open
         crx->epoch_text = NULL;
         crx->order = NULL;
         crx->diff = NULL;
+        crx->sat_flags = NULL;
         p->base.destroy = crx_free_v23;
 
         *p_parser = &p->base;

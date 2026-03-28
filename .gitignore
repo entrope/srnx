@@ -2,6 +2,8 @@
 /+coverage/
 /+debug/
 /+release/
+/RNXCMP/
 /CMakeFiles/
 /CMakeCache.txt
+/CLAUDE.md
 /DartConfiguartion.tcl
