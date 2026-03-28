@@ -263,87 +263,199 @@ static int crx_line_space(struct crx_v23_parser *crx, int line_len)
     return 0;
 }
 
-/** crx_read_v2_move_sv moves a satellite. */
-static int crx_read_v2_move_sv(
+/** crx_v2_build_sattbl builds a satellite reorder table.
+ *
+ * Compares the new satellite list (in epoch_text at offset 32) with the
+ * previous one (in prev_svs), and fills sattbl[i] with the index of the
+ * i-th new satellite in the old list, or -1 if it is new.
+ *
+ * \param[in,out] crx CRX parser.
+ * \param[in] prev_svs Previous satellite list (2 bytes each: sys + PRN).
+ * \param[in] n_prev Number of satellites in the previous epoch.
+ * \param[out] sattbl Receives the reorder table, length n_new.
+ * \param[in] n_new Number of satellites in the new epoch.
+ */
+static void crx_v2_build_sattbl(
     struct crx_v23_parser *crx,
-    int idx,
-    int n_obs,
-    const char sv[2])
+    const char *prev_svs,
+    int n_prev,
+    int *sattbl,
+    int n_new)
 {
-    int jj, kk;
+    const char *pos = crx->epoch_text + 32;
+    int ii, jj;
+    char sys, svn;
 
-    /* We found a change.  If the satelite already has history, it will
-     * be later in the array, so we swap the two.
-     */
-    for (jj = idx + 1; jj < crx->base.base.epoch.n_sats; ++jj)
+    for (ii = 0; ii < n_new; ++ii, pos += 3)
     {
-        if (crx->base.base.buffer[2 * jj + 0] == sv[0] && crx->base.base.buffer[2 * jj + 1] == sv[1])
+        sys = pos[0];
+        svn = (pos[1] - '0') * 10 + (pos[2] - '0');
+        sattbl[ii] = -1;
+        for (jj = 0; jj < n_prev; ++jj)
         {
-            break;
+            if (prev_svs[2 * jj + 0] == sys && prev_svs[2 * jj + 1] == svn)
+            {
+                sattbl[ii] = jj;
+                break;
+            }
         }
     }
-
-    /* Is the satellite new? */
-    if (jj == crx->base.base.epoch.n_sats)
-    {
-        /* TODO: May need to increase buffer sizes. */
-    }
-    else /* "Swap" satellites idx and jj. */
-    {
-        /* In practice, we have to shift the observations from idx+1
-         * through jj (inclusive) down to idx.
-         */
-        for (kk = 0; kk < n_obs; ++kk)
-            ;
-        /* crx->base.base.lli[...] */
-    }
-
-    /* cf. mty22000.20d line 1774 vs mty22000.20o line 8080,
-     * then .20d line 1818 vs .20o line 8284,
-     * or .20d line 10499 vs .20o line 48673
-     */
-
-    return 0;
 }
 
-/** crx_read_v2_sv_list checks an updated CRX satellite list. */
-static int crx_read_v2_sv_list(struct crx_v23_parser *crx)
+/** crx_v2_read_obs reads and decompresses observations for a v2 CRX epoch.
+ *
+ * Reads the clock offset line plus n_sats observation lines from the
+ * stream, handles satellite reordering via sattbl, and calls
+ * crx_decompress_obs for each satellite.
+ *
+ * \param crx CRX parser.
+ * \param is_init True for initialization epochs.
+ * \param sattbl Satellite reorder table (or NULL for init epochs).
+ * \returns rinex_error_t status code.
+ */
+static rinex_error_t crx_v2_read_obs(
+    struct crx_v23_parser *crx,
+    int is_init,
+    const int *sattbl)
 {
-    char *old, *pos;
-    int n_sat, n_obs, ii;
-    char sv[2];
+    struct rnx_v234_parser *p = &crx->base;
+    struct rinex_parser *p_ = &p->base;
+    const char *obs, *pos;
+    int res, ii, nn, n_sats, n_obs;
+    rinex_error_t err;
 
-    /* How many satellites are listed now? */
-    if (parse_uint(&n_sat, crx->epoch_text + 30, 2))
+    n_sats = p_->epoch.n_sats;
+    n_obs = p_->n_obs[' ' & 31]; /* v2: uniform observation count */
+
+    /* Read n_sats observation lines (clock offset was already consumed
+     * as part of the 2-line epoch header read in crx_read_v2).
+     */
+    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
+    if (res <= RINEX_EOF)
     {
-        crx->base.base.error_line = __LINE__;
+        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
+    obs = p_->stream->buffer + p->parse_ofs;
 
-    /* Check for changes in the SV list. */
-    old = crx->base.base.buffer;
-    pos = crx->epoch_text + 32;
-    n_obs = crx->base.base.n_obs[old[0] & 31]; /* constant for RINEX v2 */
-    for (ii = 0; ii < n_sat; ++ii)
+    /* Ensure sats array capacity. */
+    err = rnx_ensure_sats(p);
+    if (err != RINEX_SUCCESS)
     {
-        sv[0] = pos[0];
-        sv[1] = (pos[1] - '0') * 10 + (pos[2] - '0');
-        if (sv[0] != old[0] || sv[1] != old[1])
+        p->parse_ofs = res;
+        return err;
+    }
+
+    /* Ensure obs/diff arrays capacity. */
+    nn = n_sats * n_obs;
+    err = crx_ensure_obs(crx, nn);
+    if (err != RINEX_SUCCESS)
+    {
+        p->parse_ofs = res;
+        return err;
+    }
+
+    /* Build satellite info and decompress each satellite's line.
+     * For delta epochs with satellite reordering, we need to copy
+     * diff state from old positions to new positions.
+     */
+    if (!is_init && sattbl)
+    {
+        /* Shuffle diff state according to sattbl.
+         * sattbl[i] = old index for satellite i, or -1 for new.
+         * We need a temp copy since indices may overlap.
+         */
+        int obs_alloc = p->obs_alloc;
+        int old_nn = crx->base.base.epoch.n_sats * n_obs;
+        unsigned char *new_order = calloc(obs_alloc, 2);
+        int64_t *new_diff = calloc(obs_alloc, 10 * sizeof(int64_t));
+        char *new_flags = calloc(obs_alloc, 2);
+        if (!new_order || !new_diff || !new_flags)
         {
-            crx_read_v2_move_sv(crx, ii, n_obs, sv);
+            free(new_order);
+            free(new_diff);
+            free(new_flags);
+            p_->error_line = __LINE__;
+            p->parse_ofs = res;
+            return RINEX_ERR_SYSTEM;
         }
 
-        old += 2 + (n_obs + 7) / 8;
-        pos += 3;
-    }
+        for (ii = 0; ii < n_sats; ++ii)
+        {
+            int new_base = ii * n_obs;
+            if (sattbl[ii] >= 0)
+            {
+                int old_base = sattbl[ii] * n_obs;
+                int kk;
+                memcpy(new_order + new_base * 2, crx->order + old_base * 2, n_obs * 2);
+                memcpy(new_flags + new_base * 2, crx->sat_flags + old_base * 2, n_obs * 2);
+                for (kk = 0; kk < 10; ++kk)
+                    memcpy(new_diff + new_base + kk * obs_alloc,
+                           crx->diff + old_base + kk * obs_alloc,
+                           n_obs * sizeof(int64_t));
+            }
+            /* else: new satellite — new_order/new_diff already zeroed */
+        }
 
-    /* Did the number of satellites go down? */
-    if (n_sat < crx->base.base.epoch.n_sats)
+        memcpy(crx->order, new_order, obs_alloc * 2);
+        memcpy(crx->sat_flags, new_flags, obs_alloc * 2);
+        memcpy(crx->diff, new_diff, obs_alloc * 10 * sizeof(int64_t));
+        free(new_order);
+        free(new_diff);
+        free(new_flags);
+    }
+    else if (is_init)
     {
-        crx->base.base.epoch.n_sats = n_sat;
+        /* Reset all diff state. */
+        memset(crx->order, 0, p->obs_alloc * 2);
+        memset(crx->sat_flags, 0, p->obs_alloc * 2);
     }
 
-    return 0;
+    /* Parse the satellite list from epoch_text and decompress. */
+    pos = crx->epoch_text + 32;
+    nn = 0;
+    for (ii = 0; ii < n_sats; ++ii)
+    {
+        /* V2 epoch header has 12 SVs per line; continuation lines
+         * start at position 32 after the epoch header line.
+         * In the epoch_text, the full SV list is contiguous at pos 32+.
+         */
+        p_->sats[ii].system = pos[0];
+        p_->sats[ii].number = (pos[1] - '0') * 10 + (pos[2] - '0');
+        p_->sats[ii].obs_0 = nn;
+        pos += 3;
+
+        obs = crx_decompress_obs(crx, obs, nn, n_obs, is_init);
+        if (!obs)
+        {
+            p_->error_line = __LINE__;
+            p->parse_ofs = res;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        nn += n_obs;
+    }
+
+    /* Save the current satellite list for the next epoch's reordering.
+     * Store in p->base.buffer as packed 2-byte entries (sys + binary PRN).
+     */
+    while (p->buffer_alloc < n_sats * 2)
+        p->buffer_alloc <<= 1;
+    p_->buffer = realloc(p_->buffer, p->buffer_alloc);
+    if (!p_->buffer)
+    {
+        p_->error_line = __LINE__;
+        p->parse_ofs = res;
+        return RINEX_ERR_SYSTEM;
+    }
+    for (ii = 0; ii < n_sats; ++ii)
+    {
+        p_->buffer[2 * ii + 0] = p_->sats[ii].system;
+        p_->buffer[2 * ii + 1] = p_->sats[ii].number;
+    }
+    p_->buffer_len = n_sats * 2;
+
+    p->parse_ofs = res;
+    return RINEX_SUCCESS;
 }
 
 /** crx_read_v2 reads an observation data record from \a p_. */
@@ -353,6 +465,7 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     struct rnx_v234_parser *p = &crx->base;
     const char *line;
     int res, err, line_len, ii;
+    int sattbl[100]; /* MAXSAT */
 
     /* CRXv2 epoch headers have date+time & SV list, then clock offset. */
     res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 2);
@@ -398,20 +511,15 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     line = p_->stream->buffer + p->parse_ofs;
     line_len = strchr(line, '\n') - line;
 
-    /* A valid event header has at least event type and line count. */
-    if (line_len < 32)
-    {
-        p_->error_line = __LINE__;
-        return RINEX_ERR_BAD_FORMAT;
-    }
-
     /* What is the line format? */
     if (line[0] == ' ') /* delta header line */
     {
-        crx_line_space(crx, res);
+        int old_n_sats = p_->epoch.n_sats;
+
+        crx_line_space(crx, line_len);
 
         /* Apply the update(s) to the header line. */
-        for (ii = 1; ii < res; ++ii)
+        for (ii = 1; ii < line_len; ++ii)
         {
             if (line[ii] == ' ')
             {
@@ -428,27 +536,29 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         }
 
         /* Discard any residual trailing spaces. */
-        while (crx->epoch_text[ii - 1] == ' ')
+        ii = strlen(crx->epoch_text);
+        while (ii > 0 && crx->epoch_text[ii - 1] == ' ')
             ii--;
         crx->epoch_text[ii] = '\0';
 
         /* Parse the timestamp, epoch flag, etc. */
         err = rnx_v2_parse_time(p, crx->epoch_text);
-        if (err == 0 && ii > 33)
-        {
-            err = crx_read_v2_sv_list(crx);
-        }
         if (err < 0)
         {
             return err;
         }
 
-        /* TODO: Handle the compressed data record.  The first line is
-         * mandatorily blank.
-         */
-        return RINEX_SUCCESS;
+        /* Build satellite reorder table for delta epochs. */
+        crx_v2_build_sattbl(crx, p_->buffer, old_n_sats,
+            sattbl, p_->epoch.n_sats);
+
+        /* Advance past the two lines already read (epoch header + next). */
+        p->parse_ofs = res;
+
+        /* Read and decompress the observations. */
+        return crx_v2_read_obs(crx, 0, sattbl);
     }
-    else if (line[0] != '&') /* otherwise should be a full initialization header line */
+    else if (line[0] != '&' || line_len < 32) /* must be a full init header */
     {
         p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
@@ -469,10 +579,11 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
             return err;
         }
 
-        /* TODO: Fully initialize decompression state.
-         * The next line is mandatorily blank.
-         */
-        return RINEX_SUCCESS;
+        /* Advance past the two lines already read (epoch + clock). */
+        p->parse_ofs = res;
+
+        /* Read and decompress observations (full initialization). */
+        return crx_v2_read_obs(crx, 1, NULL);
     }
     else /* epoch flag > 1, a special event record */
     {

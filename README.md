@@ -47,7 +47,22 @@ Simplicity and expandability seems preferable, so this library keeps a
 character to identify the system and a second byte (0 to 99) to identify
 the satellite.
 
-### Observation codes
+The seven satellite systems and their initial letter are:
+
+G (ASCII 0b01000111) - GPS
+R (ASCII 0b01010010) - GLONASS
+S (ASCII 0b01010011) - SBAS payload
+E (ASCII 0b01000101) - Galileo
+C (ASCII 0b01000011) - BeiDou
+J (ASCII 0b01001010) - QZSS
+I (ASCII 0b01001001) - NavIC
+
+Five LSBs are required to avoid conflicts.
+However, we can multiply the system ID by 3. shift by 3, and mask by 7
+to make them unique: E, G, J, R, S, I, C then map to 0..6.
+This allows using a small(ish) table of satellites:
+
+### Observation code
 
 RINEX 2.11 defines 26 observation codes, out of about 40 potential names
 using the general naming scheme.

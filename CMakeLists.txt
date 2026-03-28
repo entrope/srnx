@@ -79,6 +79,11 @@ target_link_libraries(test_rnx_v3 rinex tap)
 add_test(NAME rnx_v3 COMMAND test_rnx_v3)
 set_property(TEST rnx_v3 PROPERTY LABELS function)
 
+add_executable(test_crx_v2 test/crx_v2.c)
+target_link_libraries(test_crx_v2 rinex tap)
+add_test(NAME crx_v2 COMMAND test_crx_v2)
+set_property(TEST crx_v2 PROPERTY LABELS function)
+
 add_executable(test_crx_v3 test/crx_v3.c)
 target_link_libraries(test_crx_v3 rinex tap)
 add_test(NAME crx_v3 COMMAND test_crx_v3)
