@@ -50,60 +50,39 @@ struct rnx_v234_parser
     int obs_alloc;
 };
 
+/** obs_state holds the differential state and flags for a single observation. */
+struct obs_state
+{
+    /** lli is the last LLI value for the observation. */
+    char lli;
+    /** ssi is the last SSI value for the observation. */
+    char ssi;
+    /** order is the nominal (final) order of differences for the observation. */
+    unsigned char order;
+    /** used is how many elements of #diff are currently used. */
+    unsigned char used;
+    /** diff holds the differential state of the observation. */
+    int64_t diff[10];
+};
+
 /** crx_v23_parser is a CRX (Hatanaka compressed) v2.xx or v3.xx parser. */
 struct crx_v23_parser
 {
     /** base describes the uncompressed RINEX content. */
     struct rnx_v234_parser base;
 
-    /** obs_free is a pointer into the first free block in #base.base.obs.
-     *
-     * Because parsing a Compressed RINEX needs to track the delta
-     * states across reads, allocations of observation history to a
-     * satellite must be persistent.  When a satellite disappears, it
-     * leaves unused space in the observation array, and allows reuse
-     * of that space.
-     *
-     * The first observation in each free block gives the length of that
-     * block and the index of the next free block.  In particular, the
-     * observation value is #RNX_META_FLAG + \a (next << 16) + \a length.
-     * The linked list is in order of increasing \a next value, and
-     * \a base.base.obs[free_obs] is the first free observation.
-     */
-    int free_obs;
-
     /** epoch_alloc is the allocated length of #epoch_text. */
     int epoch_alloc;
-
-    /** max_order is the maximum differential order for any (active)
-     * observation.
-     */
-    int max_order;
 
     /** epoch_text is the current uncompressed epoch header line, ending
      * with a line feed ('\n') character.
      */
     char *epoch_text;
 
-    /** order is a pair of entries for each observation. \a order[2*n+0]
-     * is the differential order of each observation, up to 9.
-     * \a order[2*n+1] is how much of #diff is valid for the observation.
-     * The allocated length of `order` is 2*#base.obs_alloc.
+    /** state holds the differential state and flags for each observation.
+     * The allocated length is #base.obs_alloc.
      */
-    unsigned char *order;
-
-    /** diff holds the differential state for each observation.  The
-     * allocated length is #base.obs_alloc * 10, in order-major layout.
-     * That is, \a diff[obs+n*base.obs_alloc] is the \a n'th-order
-     * history for observation \a obs.  Unused space is zero-filled.
-     */
-    int64_t *diff;
-
-    /** sat_flags holds the per-satellite flag state (LLI+SSI) for
-     * differential flag encoding across epochs.  The allocated length
-     * is #base.obs_alloc * 2 (2 flag chars per observation slot).
-     */
-    char *sat_flags;
+    struct obs_state *state;
 };
 
 /** Initializes #rnx_page_size and other internal mmap state.

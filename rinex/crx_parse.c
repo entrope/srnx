@@ -38,8 +38,7 @@ static const char *crx_parse_int64(int64_t *p_out, const char *s)
 static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
 {
     struct rnx_v234_parser *p = &crx->base;
-    int64_t *new_diff;
-    int old_alloc, new_alloc, kk;
+    int old_alloc, new_alloc;
 
     if (n <= p->obs_alloc)
         return RINEX_SUCCESS;
@@ -52,36 +51,17 @@ static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
     p->base.lli = realloc(p->base.lli, new_alloc);
     p->base.ssi = realloc(p->base.ssi, new_alloc);
     p->base.obs = realloc(p->base.obs, new_alloc * sizeof(int64_t));
-    crx->order = realloc(crx->order, new_alloc * 2);
-    crx->sat_flags = realloc(crx->sat_flags, new_alloc * 2);
+    crx->state = realloc(crx->state, new_alloc * sizeof(struct obs_state));
     if (!p->base.lli || !p->base.ssi || !p->base.obs
-        || !crx->order || !crx->sat_flags)
+        || !crx->state)
     {
         p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
     p->obs_alloc = new_alloc;
 
-    /* Reallocate diff in order-major layout: must move existing data. */
-    new_diff = calloc(new_alloc, 10 * sizeof(int64_t));
-    if (!new_diff)
-    {
-        p->base.error_line = __LINE__;
-        return RINEX_ERR_SYSTEM;
-    }
-    if (crx->diff)
-    {
-        for (kk = 0; kk < 10; ++kk)
-            memcpy(new_diff + kk * new_alloc,
-                    crx->diff + kk * old_alloc,
-                    old_alloc * sizeof(int64_t));
-        free(crx->diff);
-    }
-    crx->diff = new_diff;
-
-    /* Zero-fill new slots in order and sat_flags. */
-    memset(crx->order + old_alloc * 2, 0, (new_alloc - old_alloc) * 2);
-    memset(crx->sat_flags + old_alloc * 2, 0, (new_alloc - old_alloc) * 2);
+    /* Zero-fill new slots. */
+    memset(crx->state + old_alloc, 0, (new_alloc - old_alloc) * sizeof(struct obs_state));
 
     return RINEX_SUCCESS;
 }
@@ -139,7 +119,7 @@ static const char *crx_decompress_obs(
         if (field_start == s)
         {
             /* Empty field: observation is missing/blank. */
-            crx->order[2 * d + 1] = 0;
+            crx->state[d].used = 0;
             p->obs[d] = 0;
         }
         else if (field_start[0] >= '0' && field_start[0] <= '9'
@@ -150,11 +130,11 @@ static const char *crx_decompress_obs(
             if (!crx_parse_int64(&val, field_start + 2))
                 return NULL;
 
-            crx->order[2 * d + 0] = arc_order;
-            crx->order[2 * d + 1] = 1;
-            crx->diff[d + 0 * obs_alloc] = val;
+            crx->state[d].order = arc_order;
+            crx->state[d].used = 1;
+            crx->state[d].diff[0] = val;
             for (k = 1; k <= arc_order; ++k)
-                crx->diff[d + k * obs_alloc] = 0;
+                crx->state[d].diff[k] = 0;
 
             p->obs[d] = val;
         }
@@ -164,22 +144,22 @@ static const char *crx_decompress_obs(
             if (!crx_parse_int64(&val, field_start))
                 return NULL;
 
-            cur_order = crx->order[2 * d + 1] - 1;
-            arc_order = crx->order[2 * d + 0];
+            cur_order = crx->state[d].used - 1;
+            arc_order = crx->state[d].order;
 
             if (cur_order < arc_order)
             {
-                crx->diff[d + (cur_order + 1) * obs_alloc] = val;
-                crx->order[2 * d + 1] = cur_order + 2;
+                crx->state[d].diff[cur_order + 1] = val;
+                crx->state[d].used = cur_order + 2;
             }
             else
             {
-                crx->diff[d + arc_order * obs_alloc] += val;
+                crx->state[d].diff[arc_order] += val;
             }
 
-            for (k = crx->order[2 * d + 1] - 1; k > 0; --k)
-                crx->diff[d + (k - 1) * obs_alloc] += crx->diff[d + k * obs_alloc];
-            p->obs[d] = crx->diff[d + 0 * obs_alloc];
+            for (k = crx->state[d].used - 1; k > 0; --k)
+                crx->state[d].diff[k - 1] += crx->state[d].diff[k];
+            p->obs[d] = crx->state[d].diff[0];
         }
         else
         {
@@ -204,42 +184,42 @@ static const char *crx_decompress_obs(
             /* No more flag data. */
             if (is_init)
             {
-                crx->sat_flags[2 * d + 0] = ' ';
-                crx->sat_flags[2 * d + 1] = ' ';
+                crx->state[d].lli = ' ';
+                crx->state[d].ssi = ' ';
             }
         }
         else if (is_init)
         {
-            crx->sat_flags[2 * d + 0] = (*s == '&') ? ' ' : *s;
+            crx->state[d].lli = (*s == '&') ? ' ' : *s;
             s++;
             if (s < next_line)
             {
-                crx->sat_flags[2 * d + 1] = (*s == '&') ? ' ' : *s;
+                crx->state[d].ssi = (*s == '&') ? ' ' : *s;
                 s++;
             }
             else
             {
-                crx->sat_flags[2 * d + 1] = ' ';
+                crx->state[d].ssi = ' ';
             }
         }
         else
         {
             if (*s == '&')
-                crx->sat_flags[2 * d + 0] = ' ';
+                crx->state[d].lli = ' ';
             else if (*s != ' ')
-                crx->sat_flags[2 * d + 0] = *s;
+                crx->state[d].lli = *s;
             s++;
             if (s < next_line)
             {
                 if (*s == '&')
-                    crx->sat_flags[2 * d + 1] = ' ';
+                    crx->state[d].ssi = ' ';
                 else if (*s != ' ')
-                    crx->sat_flags[2 * d + 1] = *s;
+                    crx->state[d].ssi = *s;
                 s++;
             }
         }
-        p->lli[d] = crx->sat_flags[2 * d + 0];
-        p->ssi[d] = crx->sat_flags[2 * d + 1];
+        p->lli[d] = crx->state[d].lli;
+        p->ssi[d] = crx->state[d].ssi;
     }
 
     if (*next_line == '\n')
@@ -366,15 +346,9 @@ static rinex_error_t crx_v2_read_obs(
          * We need a temp copy since indices may overlap.
          */
         int obs_alloc = p->obs_alloc;
-        int old_nn = crx->base.base.epoch.n_sats * n_obs;
-        unsigned char *new_order = calloc(obs_alloc, 2);
-        int64_t *new_diff = calloc(obs_alloc, 10 * sizeof(int64_t));
-        char *new_flags = calloc(obs_alloc, 2);
-        if (!new_order || !new_diff || !new_flags)
+        struct obs_state *new_state = calloc(obs_alloc, sizeof(struct obs_state));
+        if (!new_state)
         {
-            free(new_order);
-            free(new_diff);
-            free(new_flags);
             p_->error_line = __LINE__;
             p->parse_ofs = res;
             return RINEX_ERR_SYSTEM;
@@ -386,29 +360,18 @@ static rinex_error_t crx_v2_read_obs(
             if (sattbl[ii] >= 0)
             {
                 int old_base = sattbl[ii] * n_obs;
-                int kk;
-                memcpy(new_order + new_base * 2, crx->order + old_base * 2, n_obs * 2);
-                memcpy(new_flags + new_base * 2, crx->sat_flags + old_base * 2, n_obs * 2);
-                for (kk = 0; kk < 10; ++kk)
-                    memcpy(new_diff + new_base + kk * obs_alloc,
-                           crx->diff + old_base + kk * obs_alloc,
-                           n_obs * sizeof(int64_t));
+                memcpy(new_state + new_base, crx->state + old_base, n_obs * sizeof(struct obs_state));
             }
-            /* else: new satellite — new_order/new_diff already zeroed */
+            /* else: new satellite — new_state already zeroed */
         }
 
-        memcpy(crx->order, new_order, obs_alloc * 2);
-        memcpy(crx->sat_flags, new_flags, obs_alloc * 2);
-        memcpy(crx->diff, new_diff, obs_alloc * 10 * sizeof(int64_t));
-        free(new_order);
-        free(new_diff);
-        free(new_flags);
+        memcpy(crx->state, new_state, obs_alloc * sizeof(struct obs_state));
+        free(new_state);
     }
     else if (is_init)
     {
         /* Reset all diff state. */
-        memset(crx->order, 0, p->obs_alloc * 2);
-        memset(crx->sat_flags, 0, p->obs_alloc * 2);
+        memset(crx->state, 0, p->obs_alloc * sizeof(struct obs_state));
     }
 
     /* Parse the satellite list from epoch_text and decompress. */
@@ -777,8 +740,7 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     /* On init epochs, reset diff state for all slots. */
     if (is_init)
     {
-        memset(crx->order, 0, p->obs_alloc * 2);
-        memset(crx->sat_flags, 0, p->obs_alloc * 2);
+        memset(crx->state, 0, p->obs_alloc * sizeof(struct obs_state));
     }
 
     /* Decompress each satellite's observation line. */
@@ -813,9 +775,7 @@ void crx_free_v23(struct rinex_parser *p_)
 {
     struct crx_v23_parser *p = (struct crx_v23_parser *)p_;
 
-    free(p->sat_flags);
-    free(p->diff);
-    free(p->order);
+    free(p->state);
     free(p->epoch_text);
     rnx_free_v23(p_);
 }
@@ -877,10 +837,8 @@ const char *crx_open_v23(
     {
         crx->epoch_alloc = 200;
         crx->epoch_text = calloc(crx->epoch_alloc, 1);
-        crx->order = calloc(crx->base.obs_alloc, 2);
-        crx->diff = calloc(crx->base.obs_alloc, 10 * sizeof(int64_t));
-        crx->sat_flags = calloc(crx->base.obs_alloc, 2);
-        if (!crx->epoch_text || !crx->order || !crx->diff || !crx->sat_flags)
+        crx->state = calloc(crx->base.obs_alloc, sizeof(struct obs_state));
+        if (!crx->epoch_text || !crx->state)
         {
             err = "Memory allocation failed";
         }

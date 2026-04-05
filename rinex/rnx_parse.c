@@ -619,9 +619,7 @@ const char *rinex_open
         p->base.ssi = NULL;
         p->base.obs = NULL;
         crx->epoch_text = NULL;
-        crx->order = NULL;
-        crx->diff = NULL;
-        crx->sat_flags = NULL;
+        crx->state = NULL;
         p->base.destroy = crx_free_v23;
 
         *p_parser = &p->base;
