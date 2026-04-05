@@ -48,7 +48,7 @@ int main(int argc, char *argv[])
         argc = we.we_wordc + 1;
     }
 
-    for (ii = 1, use_mmap = 1; ii < argc; ++ii)
+    for (ii = 1, use_mmap = 0; ii < argc; ++ii)
     {
         if (!strcmp(argv[ii], "--mmap"))
         {

@@ -61,8 +61,10 @@ struct obs_state
     unsigned char order;
     /** used is how many elements of #diff are currently used. */
     unsigned char used;
-    /** diff holds the differential state of the observation. */
-    int64_t diff[10];
+    /** diff holds the higher-order differences (old diff[1..5]). */
+    int64_t diff[5];
+    /** value is the current observation value (old diff[0]). */
+    int64_t value;
 };
 
 /** crx_v23_parser is a CRX (Hatanaka compressed) v2.xx or v3.xx parser. */
@@ -83,6 +85,26 @@ struct crx_v23_parser
      * The allocated length is #base.obs_alloc.
      */
     struct obs_state *state;
+
+    /** prev_state is the second buffer for double-buffered satellite
+     * reordering.  On delta epochs, state and prev_state are swapped,
+     * so the old state can be read from prev_state while writing into
+     * state without any per-epoch allocation.
+     * The allocated length is #base.obs_alloc.
+     */
+    struct obs_state *prev_state;
+
+    /** clk_state holds the differential state for the receiver clock offset. */
+    struct obs_state clk_state;
+
+    /** sattab is a reusable satellite reorder table for v2 delta epochs.
+     * sattab[i] is the index of the i-th new satellite in the old list,
+     * or -1 if it is new.
+     */
+    int *sattab;
+
+    /** sattab_alloc is the allocated length of #sattab. */
+    int sattab_alloc;
 };
 
 /** Initializes #rnx_page_size and other internal mmap state.

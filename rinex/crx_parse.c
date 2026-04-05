@@ -38,7 +38,7 @@ static const char *crx_parse_int64(int64_t *p_out, const char *s)
 static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
 {
     struct rnx_v234_parser *p = &crx->base;
-    int old_alloc, new_alloc;
+    int old_alloc, new_alloc, ii;
 
     if (n <= p->obs_alloc)
         return RINEX_SUCCESS;
@@ -52,8 +52,9 @@ static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
     p->base.ssi = realloc(p->base.ssi, new_alloc);
     p->base.obs = realloc(p->base.obs, new_alloc * sizeof(int64_t));
     crx->state = realloc(crx->state, new_alloc * sizeof(struct obs_state));
+    crx->prev_state = realloc(crx->prev_state, new_alloc * sizeof(struct obs_state));
     if (!p->base.lli || !p->base.ssi || !p->base.obs
-        || !crx->state)
+        || !crx->state || !crx->prev_state)
     {
         p->base.error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
@@ -88,15 +89,9 @@ static const char *crx_decompress_obs(
     int is_init)
 {
     struct rinex_parser *p = &crx->base.base;
-    int obs_alloc = crx->base.obs_alloc;
-    int ii, k, arc_order, cur_order;
+    int ii, d, arc_order, cur_order;
     int64_t val;
-    const char *s, *next_line, *field_start;
-
-    /* Find end of line. */
-    next_line = line;
-    while (*next_line != '\n' && *next_line != '\0')
-        next_line++;
+    const char *s = line;
 
     /* Split the line into n_obs fields using the reference convention:
      * walk character by character; each space or end-of-line terminates
@@ -105,43 +100,36 @@ static const char *crx_decompress_obs(
      *
      * This matches crx2rnx.c getdiff() behavior exactly.
      */
-    s = line;
-    for (ii = 0; ii < n_obs; ++ii)
+    for (ii = 0, d = base; ii < n_obs; ++ii, ++d)
     {
-        int d = base + ii;
-
-        /* Find the start and end of this field. */
-        field_start = s;
-        while (s < next_line && *s != ' ')
-            s++;
-        /* s now points to a space or next_line. */
-
-        if (field_start == s)
+        if (*s == ' ' || *s == '\n' || *s == '\0')
         {
             /* Empty field: observation is missing/blank. */
             crx->state[d].used = 0;
             p->obs[d] = 0;
         }
-        else if (field_start[0] >= '0' && field_start[0] <= '9'
-                 && (field_start + 1) < s && field_start[1] == '&')
+        else if (s[1] == '&')
         {
             /* Arc initialization: N&value */
-            arc_order = field_start[0] - '0';
-            if (!crx_parse_int64(&val, field_start + 2))
+            arc_order = s[0] - '0';
+            s = crx_parse_int64(&val, s + 2);
+            if (!s || (arc_order > 5))
                 return NULL;
 
+            if (crx->state[d].used == 0)
+            {
+                crx->state[d].lli = ' ';
+                crx->state[d].ssi = ' ';
+            }
             crx->state[d].order = arc_order;
             crx->state[d].used = 1;
-            crx->state[d].diff[0] = val;
-            for (k = 1; k <= arc_order; ++k)
-                crx->state[d].diff[k] = 0;
-
+            crx->state[d].value = val;
             p->obs[d] = val;
         }
-        else if (*field_start == '-' || (*field_start >= '0' && *field_start <= '9'))
+        else /* Continuation: delta value. */
         {
-            /* Continuation: delta value. */
-            if (!crx_parse_int64(&val, field_start))
+            s = crx_parse_int64(&val, s);
+            if (!s)
                 return NULL;
 
             cur_order = crx->state[d].used - 1;
@@ -149,82 +137,70 @@ static const char *crx_decompress_obs(
 
             if (cur_order < arc_order)
             {
-                crx->state[d].diff[cur_order + 1] = val;
+                crx->state[d].diff[cur_order] = val;
                 crx->state[d].used = cur_order + 2;
             }
             else
             {
-                crx->state[d].diff[arc_order] += val;
+                crx->state[d].diff[arc_order - 1] = val;
             }
 
-            for (k = crx->state[d].used - 1; k > 0; --k)
-                crx->state[d].diff[k - 1] += crx->state[d].diff[k];
-            p->obs[d] = crx->state[d].diff[0];
-        }
-        else
-        {
-            /* Unrecognized field content. */
-            return NULL;
+            switch (crx->state[d].used)
+            {
+            case 6: crx->state[d].diff[3] += crx->state[d].diff[4]; /* fall through */
+            case 5: crx->state[d].diff[2] += crx->state[d].diff[3]; /* fall through */
+            case 4: crx->state[d].diff[1] += crx->state[d].diff[2]; /* fall through */
+            case 3: crx->state[d].diff[0] += crx->state[d].diff[1]; /* fall through */
+            case 2: crx->state[d].value += crx->state[d].diff[0]; /* fall through */
+            case 1: p->obs[d] = crx->state[d].value;
+            }
         }
 
         /* Advance past the field separator (space). */
-        if (s < next_line)
+        if (*s == ' ')
             s++;
     }
 
-    /* Everything from s to next_line is the flag string.
-     * For init: '&' means space, other chars are literal.
-     * For delta: repair semantics (space=keep, &=space, else=replace).
-     */
-    for (ii = 0; ii < n_obs; ++ii)
+    /* Everything from s to next_line is the flag string, LLIs and SSIs. */
+    for (ii = 0, d = base; ii < n_obs; ++ii, ++d)
     {
-        int d = base + ii;
-        if (s >= next_line)
+        if (*s == '\n' || *s == '\0')
         {
-            /* No more flag data. */
             if (is_init)
-            {
                 crx->state[d].lli = ' ';
-                crx->state[d].ssi = ' ';
-            }
-        }
-        else if (is_init)
-        {
-            crx->state[d].lli = (*s == '&') ? ' ' : *s;
-            s++;
-            if (s < next_line)
-            {
-                crx->state[d].ssi = (*s == '&') ? ' ' : *s;
-                s++;
-            }
-            else
-            {
-                crx->state[d].ssi = ' ';
-            }
         }
         else
         {
             if (*s == '&')
                 crx->state[d].lli = ' ';
-            else if (*s != ' ')
+            else if (is_init || *s != ' ')
                 crx->state[d].lli = *s;
             s++;
-            if (s < next_line)
-            {
-                if (*s == '&')
-                    crx->state[d].ssi = ' ';
-                else if (*s != ' ')
-                    crx->state[d].ssi = *s;
-                s++;
-            }
         }
-        p->lli[d] = crx->state[d].lli;
-        p->ssi[d] = crx->state[d].ssi;
+
+        if (*s == '\n' || *s == '\0')
+        {
+            if (is_init)
+                crx->state[d].ssi = ' ';
+        }
+        else
+        {
+            if (*s == '&')
+                crx->state[d].ssi = ' ';
+            else if (is_init || *s != ' ')
+                crx->state[d].ssi = *s;
+            s++;
+        }
+
+        p->lli[d] = (crx->state[d].used == 0) ? ' ' : crx->state[d].lli;
+        p->ssi[d] = (crx->state[d].used == 0) ? ' ' : crx->state[d].ssi;
     }
 
-    if (*next_line == '\n')
-        next_line++;
-    return next_line;
+    while (*s != '\n' && *s != '\0')
+        s++;
+    if (*s == '\n')
+        s++;
+    return s;
 }
 
 /** crx_line_space ensures \a crx->epoch_text >= \a line_len. */
@@ -313,8 +289,9 @@ static rinex_error_t crx_v2_read_obs(
     res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
     if (res <= RINEX_EOF)
     {
-        p_->error_line = __LINE__;
-        return RINEX_ERR_BAD_FORMAT;
+        if (res < RINEX_EOF)
+            p_->error_line = __LINE__;
+        return res;
     }
     obs = p_->stream->buffer + p->parse_ofs;
 
@@ -341,18 +318,12 @@ static rinex_error_t crx_v2_read_obs(
      */
     if (!is_init && sattbl)
     {
-        /* Shuffle diff state according to sattbl.
-         * sattbl[i] = old index for satellite i, or -1 for new.
-         * We need a temp copy since indices may overlap.
+        /* Swap state and prev_state so we can read old data from
+         * prev_state while writing the shuffled result into state.
          */
-        int obs_alloc = p->obs_alloc;
-        struct obs_state *new_state = calloc(obs_alloc, sizeof(struct obs_state));
-        if (!new_state)
-        {
-            p_->error_line = __LINE__;
-            p->parse_ofs = res;
-            return RINEX_ERR_SYSTEM;
-        }
+        struct obs_state *tmp = crx->prev_state;
+        crx->prev_state = crx->state;
+        crx->state = tmp;
 
         for (ii = 0; ii < n_sats; ++ii)
         {
@@ -360,13 +331,13 @@ static rinex_error_t crx_v2_read_obs(
             if (sattbl[ii] >= 0)
             {
                 int old_base = sattbl[ii] * n_obs;
-                memcpy(new_state + new_base, crx->state + old_base, n_obs * sizeof(struct obs_state));
+                memcpy(crx->state + new_base, crx->prev_state + old_base, n_obs * sizeof(struct obs_state));
             }
-            /* else: new satellite — new_state already zeroed */
+            else
+            {
+                memset(crx->state + new_base, 0, n_obs * sizeof(struct obs_state));
+            }
         }
-
-        memcpy(crx->state, new_state, obs_alloc * sizeof(struct obs_state));
-        free(new_state);
     }
     else if (is_init)
     {
@@ -428,49 +399,14 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     struct rnx_v234_parser *p = &crx->base;
     const char *line;
     int res, err, line_len, ii;
-    int sattbl[100]; /* MAXSAT */
 
-    /* CRXv2 epoch headers have date+time & SV list, then clock offset. */
-    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 2);
-    if (res < 21)
-    {
-        if (res <= RINEX_EOF)
-        {
-            return res;
-        }
-
-        /* At EOF, try getting a single line instead. */
-        if ((res > RINEX_EOF) || ((res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1)) < 20))
-        {
-            /* error_line already set by rnx_get_newlines() */
-        }
-        /* Getting here should mean a single-line special event at EOF.
-         * These are represented as full initialization lines, but
-         * with an epoch flag of 2 through 5 inclusive.
-         */
-        else
-        {
-            line = p_->stream->buffer + p->parse_ofs;
-            if (line[0] == '&' && line[28] >= '2' && line[28] <= '5')
-            {
-            crx_v2_copy_text:
-                res = rnx_copy_text(p, res);
-                if (res == RINEX_SUCCESS)
-                {
-                    /* Replace leading '&' with a space to be RINEX. */
-                    p->base.buffer[0] = ' ';
-                    p->parse_ofs = res;
-                }
-                return res;
-            }
-            else /* The file looks corrupt or truncated. */
-            {
-                p_->error_line = __LINE__;
-            }
-        }
-
-        return RINEX_ERR_BAD_FORMAT;
-    }
+    /* CRXv2 epoch headers have the full satellite list on a single line
+     * (no 12-per-line continuation lines), followed by one clock line.
+     * Read the first line; the clock is consumed separately below.
+     */
+    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
+    if (res <= RINEX_EOF)
+        return res;
     line = p_->stream->buffer + p->parse_ofs;
     line_len = strchr(line, '\n') - line;
 
@@ -481,7 +417,7 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
 
         crx_line_space(crx, line_len);
 
-        /* Apply the update(s) to the header line. */
+        /* Apply the update(s) to the epoch header in epoch_text. */
         for (ii = 1; ii < line_len; ++ii)
         {
             if (line[ii] == ' ')
@@ -511,29 +447,51 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
             return err;
         }
 
+        /* Ensure sattab is large enough. */
+        if (crx->sattab_alloc < p_->epoch.n_sats)
+        {
+            int new_alloc = crx->sattab_alloc ? crx->sattab_alloc : 64;
+            while (new_alloc < p_->epoch.n_sats)
+                new_alloc *= 2;
+            crx->sattab = realloc(crx->sattab, new_alloc * sizeof(int));
+            if (!crx->sattab)
+            {
+                p_->error_line = __LINE__;
+                return RINEX_ERR_SYSTEM;
+            }
+            crx->sattab_alloc = new_alloc;
+        }
+
         /* Build satellite reorder table for delta epochs. */
         crx_v2_build_sattbl(crx, p_->buffer, old_n_sats,
-            sattbl, p_->epoch.n_sats);
+            crx->sattab, p_->epoch.n_sats);
 
-        /* Advance past the two lines already read (epoch header + next). */
+        /* Advance past the epoch header line, parse the clock line. */
+        p->parse_ofs = res;
+        res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
+        if (res <= RINEX_EOF)
+        {
+            p_->error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        crx_v2_parse_clock(crx, p_->stream->buffer + p->parse_ofs);
         p->parse_ofs = res;
 
         /* Read and decompress the observations. */
-        return crx_v2_read_obs(crx, 0, sattbl);
+        return crx_v2_read_obs(crx, 0, crx->sattab);
     }
     else if (line[0] != '&' || line_len < 32) /* must be a full init header */
     {
         p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
-    else if (line[28] == '0' || line[28] == '1') /* epoch flag 0 or 1 */
+    else if (line[28] == '0' || line[28] == '1' || line[28] == '6')
     {
-        crx_line_space(crx, res);
-
-        /* Copy the initialization header line. */
-        memcpy(crx->epoch_text + 1, line + 1, res - 1);
+        /* Observation epoch: copy the header line to epoch_text. */
+        crx_line_space(crx, line_len + 1);
         crx->epoch_text[0] = ' ';
-        crx->epoch_text[res] = '\0';
+        memcpy(crx->epoch_text + 1, line + 1, line_len - 1);
+        crx->epoch_text[line_len] = '\0';
 
         /* Parse the timestamp, epoch flag, etc. */
         err = rnx_v2_parse_time(p, crx->epoch_text);
@@ -542,15 +500,24 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
             return err;
         }
 
-        /* Advance past the two lines already read (epoch + clock). */
+        /* Advance past the epoch header line, parse the clock line. */
+        p->parse_ofs = res;
+        res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
+        if (res <= RINEX_EOF)
+        {
+            p_->error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        crx_v2_parse_clock(crx, p_->stream->buffer + p->parse_ofs);
         p->parse_ofs = res;
 
         /* Read and decompress observations (full initialization). */
         return crx_v2_read_obs(crx, 1, NULL);
     }
-    else /* epoch flag > 1, a special event record */
+    else /* epoch flag 2-5: special event record */
     {
-        int n_lines;
+        int n_lines, eol;
+        char flag = line[28];
 
         /* How many lines in this special event record? */
         if (parse_uint(&n_lines, line + 29, 3))
@@ -558,12 +525,21 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
             p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
-        res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_lines);
-        if (res <= RINEX_EOF)
+        /* Skip the marker line + n_lines following header records. */
+        eol = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_lines + 1);
+        if (eol <= RINEX_EOF)
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        goto crx_v2_copy_text;
+        err = rnx_copy_text(p, eol);
+        if (err == RINEX_SUCCESS)
+        {
+            /* Replace leading '&' with a space to be RINEX. */
+            p->base.buffer[0] = ' ';
+            p->parse_ofs = eol;
+            p_->epoch.flag = flag;
+        }
+        return err;
     }
 }
 
@@ -626,7 +602,7 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     struct crx_v23_parser *crx = (struct crx_v23_parser *)p_;
     struct rnx_v234_parser *p = &crx->base;
     const char *line, *obs;
-    int res, line_len, ii, nn, n_sats, n_obs_sys, is_init;
+    int res, line_len, ii, nn, n_sats, n_obs_sys, is_init, old_n_sats;
     rinex_error_t err;
 
     /* Get the epoch header line. */
@@ -644,6 +620,7 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     }
 
     is_init = (line[0] == '>');
+    old_n_sats = p_->epoch.n_sats;
 
     if (is_init)
     {
@@ -737,10 +714,56 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
         return err;
     }
 
-    /* On init epochs, reset diff state for all slots. */
+    /* On init epochs, reset diff state for all slots.
+     * On delta epochs, shuffle diff state to match the new satellite
+     * order.  p_->sats[] still holds the previous epoch's satellites.
+     */
     if (is_init)
     {
         memset(crx->state, 0, p->obs_alloc * sizeof(struct obs_state));
+    }
+    else
+    {
+        int new_nn, jj, old_nn, old_n_obs;
+        struct obs_state *tmp;
+
+        /* Swap state and prev_state so we can read old data from
+         * prev_state while writing the shuffled result into state.
+         */
+        tmp = crx->prev_state;
+        crx->prev_state = crx->state;
+        crx->state = tmp;
+
+        new_nn = 0;
+        for (ii = 0; ii < n_sats; ++ii)
+        {
+            char sys = crx->epoch_text[41 + 3 * ii];
+            int svn = (crx->epoch_text[42 + 3 * ii] - '0') * 10
+                    + (crx->epoch_text[43 + 3 * ii] - '0');
+            n_obs_sys = p_->n_obs[sys & 31];
+
+            /* Find this satellite in the old list. */
+            old_nn = 0;
+            for (jj = 0; jj < old_n_sats; ++jj)
+            {
+                old_n_obs = p_->n_obs[p_->sats[jj].system & 31];
+                if (p_->sats[jj].system == sys
+                    && p_->sats[jj].number == svn)
+                {
+                    memcpy(crx->state + new_nn,
+                           crx->prev_state + old_nn,
+                           n_obs_sys * sizeof(struct obs_state));
+                    break;
+                }
+                old_nn += old_n_obs;
+            }
+            if (jj == old_n_sats)
+            {
+                memset(crx->state + new_nn, 0,
+                       n_obs_sys * sizeof(struct obs_state));
+            }
+            new_nn += n_obs_sys;
+        }
     }
 
     /* Decompress each satellite's observation line. */
@@ -775,6 +798,8 @@ void crx_free_v23(struct rinex_parser *p_)
 {
     struct crx_v23_parser *p = (struct crx_v23_parser *)p_;
 
+    free(p->sattab);
+    free(p->prev_state);
     free(p->state);
     free(p->epoch_text);
     rnx_free_v23(p_);
@@ -838,7 +863,8 @@ const char *crx_open_v23(
         crx->epoch_alloc = 200;
         crx->epoch_text = calloc(crx->epoch_alloc, 1);
         crx->state = calloc(crx->base.obs_alloc, sizeof(struct obs_state));
-        if (!crx->epoch_text || !crx->state)
+        crx->prev_state = calloc(crx->base.obs_alloc, sizeof(struct obs_state));
+        if (!crx->epoch_text || !crx->state || !crx->prev_state)
         {
             err = "Memory allocation failed";
         }
