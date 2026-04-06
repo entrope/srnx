@@ -55,6 +55,9 @@ target_link_libraries(rinex_n_obs rinex)
 add_executable(rinex_scan bin/rinex_scan.c bin/driver.c)
 target_link_libraries(rinex_scan rinex)
 
+add_executable(rnxcmp bin/rnxcmp.c bin/driver.c)
+target_link_libraries(rnxcmp rinex)
+
 include(InstallRequiredSystemLibraries)
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/COPYING")
 set(CPACK_PACKAGE_VERSION_MAJOR "${rinex_VERSION_MAJOR}")

@@ -10,9 +10,10 @@
 int verbose;
 
 __attribute__((weak))
-void start(void)
+void start(int *argc, char *argv[])
 {
-    /* this function intentionally left blank */
+    (void)argc;
+    (void)argv;
 }
 
 __attribute__((weak))
@@ -32,7 +33,7 @@ int main(int argc, char *argv[])
     int ii, use_mmap;
     int res;
 
-    start();
+    start(&argc, argv);
 
     we.we_wordc = 0;
     we.we_wordv = NULL;

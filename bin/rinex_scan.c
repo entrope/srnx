@@ -84,7 +84,9 @@ void process_file(struct rinex_parser *p, const char filename[])
         count, max_obs, max_sats, p->n_obs[0], act_obs, tot_obs, max_sat_epochs);
 }
 
-void start(void)
+void start(int *argc, char *argv[])
 {
+    (void)argc;
+    (void)argv;
     printf("filename,epochs,maxobs,maxsats,sysobs,satobs,totobs,maxepochs\n");
 }
