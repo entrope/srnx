@@ -75,29 +75,33 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
                 }
             }
 
-            /* If at EOL or a blank, skip this observation. */
+            /* If at EOL or a blank, skip this observation; otherwise
+             * parse it.  In the blank-slot case, advance past the 16
+             * blanks; in the EOL case, leave obs at '\n' for the
+             * shared end-of-line handling below.
+             */
             if ((*obs == '\n') || !memcmp(obs, blank, 16))
             {
                 p->base.obs[nn] = 0;
-                p->base.lli[nn] = '\0';
-                p->base.ssi[nn] = '\0';
-                /* If *obs == '\n', consume it at the last observation
-                 * for the satellite OR the line.  Otherwise, consume
-                 * the 16 blanks that we are looking at.
-                 */
-                obs += (*obs == '\n')
-                    ? (((jj + 1) == n_obs) || ((jj % 5) == 4))
-                    : 16;
-                continue;
+                p->base.lli[nn] = ' ';
+                p->base.ssi[nn] = ' ';
+                if (*obs != '\n')
+                    obs += 16;
             }
-
-            SIMD_PARSE_OBS;
-            if (!obs)
+            else
             {
-                p->base.error_line = __LINE__;
-                return RINEX_ERR_BAD_FORMAT;
+                SIMD_PARSE_OBS;
+                if (!obs)
+                {
+                    p->base.error_line = __LINE__;
+                    return RINEX_ERR_BAD_FORMAT;
+                }
             }
 
+            /* At end of a 5-obs line (or end of satellite), consume
+             * the trailing newline if obs is sitting on one.  Applies
+             * uniformly whether the slot was parsed or skipped.
+             */
             if ((*obs == '\n') && (((jj + 1) == n_obs) || ((jj % 5) == 4)))
             {
                 obs += 1;
@@ -154,7 +158,7 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
                 }
             }
 
-            /* If at EOL or a blank, zero-fill this observation. */
+            /* If at EOL or a blank, skip this observation. */
             if ((*obs == '\n') || !memcmp(obs, blank, 16))
             {
                 if (*obs != '\n')
@@ -162,8 +166,8 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
                     obs += 16;
                 }
                 p->base.obs[nn] = 0;
-                p->base.lli[nn] = '\0';
-                p->base.ssi[nn] = '\0';
+                p->base.lli[nn] = ' ';
+                p->base.ssi[nn] = ' ';
                 continue;
             }
 

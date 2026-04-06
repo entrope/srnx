@@ -333,16 +333,22 @@ const char *rinex_find_header
     return p->buffer + ofs;
 }
 
-/** rnx_open_v2 reads the observation codes in \a p->base.header. */
-static const char *rnx_open_v2(struct rnx_v234_parser *p)
+/** rnx_open_v2 reads the observation codes in \a p->base.header.
+ * \param hdr_ofs Offset of the RINEX VERSION / TYPE line in the stream buffer.
+ */
+static const char *rnx_open_v2(struct rnx_v234_parser *p, int hdr_ofs)
 {
     static const char n_obs[] = "# / TYPES OF OBSERV";
     const char *line;
     int res, value;
     char obs_type;
 
-    /* What type of observations are in this file? */
-    obs_type = p->base.buffer[40];
+    /* What type of observations are in this file?
+     * Column 40 of the RINEX VERSION / TYPE line holds the satellite system
+     * character.  For CRX files the copied header buffer starts with CRINEX
+     * header lines, so use hdr_ofs into the original stream buffer instead.
+     */
+    obs_type = p->base.stream->buffer[hdr_ofs + 40];
     if (!strchr(" GRSEM", obs_type))
     {
         return "Invalid satellite system for file";
@@ -542,7 +548,7 @@ const char *rnx_open_v23
     else if (!memcmp("     2.", stream->buffer + hdr_ofs, 7))
     {
         p->base.read = rnx_read_v2;
-        err = rnx_open_v2(p);
+        err = rnx_open_v2(p, hdr_ofs);
     }
     else if (!memcmp("     3.", stream->buffer + hdr_ofs, 7)
         || !memcmp("     4.", stream->buffer + hdr_ofs, 7))
