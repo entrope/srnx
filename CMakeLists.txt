@@ -28,18 +28,20 @@ try_compile(HAVE_AVX2
     COMPILE_DEFINITIONS -DHAVE_AVX2)
 add_compile_definitions($<$<BOOL:${HAVE_AVX2}>:HAVE_AVX2>)
 
-add_library(rinex
+add_library(rinex SHARED
     rinex/crx_parse.c
     rinex/parse_std.c
     rinex/parse_neon.c
     $<$<BOOL:${HAVE_NEON}>:rinex/parse_neon.c>
     $<$<BOOL:${HAVE_AVX2}>:rinex/parse_avx2.c>
     rinex/rinex_buffer.c
+    rinex/rinex_load.c
     rinex/rinex_mmap.c
     rinex/rinex_stdio.c
     rinex/rnx_parse.c
     rinex/rnx_priv.c
-    rinex/transpose.c)
+    rinex/transpose.c
+    python/rinex_bridge.c)
 add_library(tap STATIC
     libtap/tap.c)
 

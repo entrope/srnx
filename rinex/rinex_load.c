@@ -111,7 +111,7 @@ const char *rnx_data_init_cons_v34(struct rinex_data *out)
 
     /* Process the per-constellation data. */
     sep = (char *)out->file_header + ofs;
-    while (!strncmp(sep + 60, sys_n_obs_types, sizeof sys_n_obs_types))
+    while (!strncmp(sep + 60, sys_n_obs_types, sizeof sys_n_obs_types - 1))
     {
         /* Get the constellation ID and observable count. */
         cons = *sep;
@@ -149,6 +149,12 @@ const char *rnx_data_init_cons_v34(struct rinex_data *out)
                     sep += 6; /* skip first six spaces of next line */
             }
         }
+
+        /* Advance to the start of the next line. */
+        sep = strchr(sep, '\n');
+        if (!sep)
+            break;
+        ++sep;
     }
 
     return NULL;
@@ -226,15 +232,19 @@ const char *rnx_load_grow_system(struct rinex_data *out, char sys_id, int svn)
     {
         switch (sys_id)
         {
-        case 'C' & 31: n_sv = 38; break; /* Beidou */
-        case 'E' & 31: n_sv = 32; break; /* Galileo */
-        case 'G' & 31: n_sv = 32; break; /* GPS */
-        case 'I' & 31: n_sv = 8; break; /* NavIC */
-        case 'J' & 31: n_sv = 10; break; /* QZSS */
-        case 'R' & 31: n_sv = 32; break; /* GLONASS */
-        case 'S' & 31: n_sv = 58; break; /* SBAS */
+        case 'C': n_sv = 38; break; /* Beidou */
+        case 'E': n_sv = 32; break; /* Galileo */
+        case 'G': n_sv = 32; break; /* GPS */
+        case 'I': n_sv = 8; break; /* NavIC */
+        case 'J': n_sv = 10; break; /* QZSS */
+        case 'R': n_sv = 32; break; /* GLONASS */
+        case 'S': n_sv = 58; break; /* SBAS */
         default: return "unknown satellite system";
         }
+    }
+    else
+    {
+        n_sv = old_n_sv;
     }
     while (n_sv <= svn)
         n_sv *= 2;
@@ -268,6 +278,7 @@ const char *rnx_load_grow_system(struct rinex_data *out, char sys_id, int svn)
         new_sv = realloc(out->sv, (tot_sv + n_sv) * sizeof *out->sv);
         if (!new_sv)
             return "unable to grow satellite array";
+        memset(new_sv + tot_sv, 0, n_sv * sizeof *new_sv);
     }
 
     out->sv = new_sv;
@@ -296,12 +307,12 @@ const char *rnx_load_alloc_satellite(struct rinex_data *out, char sys_id, int sv
         free(p_sv);
         return "unable to allocate initial epoch range for satellite";
     }
-    p_sv->when[0].start = out->epoch_used;
+    p_sv->when[0].start = out->epoch_used - 1;
 
-    /* Save the satellite's ID. */
+    /* Save the satellite's ID (1-based satellite number). */
     p_sv->id[0] = sys_id;
-    p_sv->id[1] = '0' + (svn / 10);
-    p_sv->id[2] = '0' + (svn % 10);
+    p_sv->id[1] = '0' + ((svn + 1) / 10);
+    p_sv->id[2] = '0' + ((svn + 1) % 10);
     p_sv->id[3] = '\0';
 
     /* Zero the satellite's observation ranges. */
@@ -310,6 +321,7 @@ const char *rnx_load_alloc_satellite(struct rinex_data *out, char sys_id, int sv
     for (ii = 0; ii < n_obs; ++ii)
         p_sv->start[ii] = -1;
 
+    out->sv[out->sys[sys_id & 31].sv.start + svn] = p_sv;
     return NULL;
 }
 
@@ -335,22 +347,37 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
     /* Is this the very first allocation? */
     if (!out->obs)
     {
-        /* TODO */
+        alloc = RNX_OBS_RESERVED + req;
+        if (alloc < 4096)
+            alloc = 4096;
+        out->obs = malloc(alloc * sizeof *out->obs);
+        out->ssi = malloc(alloc);
+        out->lli = malloc(alloc);
+        if (!out->obs || !out->ssi || !out->lli)
+            return -1;
+        out->obs[0] = alloc;
+        out->obs[1] = RNX_OBS_RESERVED;
+        out->obs[2] = 0;
+        out->obs[3] = 0;
+        out->obs[RNX_OBS_RESERVED] = alloc - RNX_OBS_RESERVED;
+        out->obs[RNX_OBS_RESERVED + 1] = 0;
+        memset(out->ssi, ' ', alloc);
+        memset(out->lli, ' ', alloc);
     }
 
     /* Find the best fit for `req`. */
     best = best_prev = -1;
     best_size = INT_MAX;
-    for (prev = 0; prev > 0; prev = curr)
+    for (curr = (int)out->obs[1], prev = 0; curr > 0;
+         prev = curr, curr = (int)out->obs[curr + 1])
     {
-        curr = out->obs[prev + 1];
         if (out->obs[curr] < req)
             continue;
         if (out->obs[curr] < best_size)
         {
             best = curr;
             best_prev = prev;
-            best_size = out->obs[curr];
+            best_size = (int)out->obs[curr];
         }
     }
 
@@ -388,9 +415,35 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
         return best;
     }
 
-    /* TODO: implement (grow out->obs) */
+    /* Grow the observation arrays. */
+    {
+        int old_alloc = (int)out->obs[0];
+        int64_t *new_obs;
+        char *new_ssi, *new_lli;
 
-    return -1;
+        alloc = old_alloc * 2;
+        while (alloc - old_alloc < req)
+            alloc *= 2;
+
+        new_obs = realloc(out->obs, alloc * sizeof *out->obs);
+        new_ssi = realloc(out->ssi, alloc);
+        new_lli = realloc(out->lli, alloc);
+        if (!new_obs || !new_ssi || !new_lli)
+            return -1;
+
+        out->obs = new_obs;
+        out->ssi = new_ssi;
+        out->lli = new_lli;
+        out->obs[0] = alloc;
+
+        /* Add the new space as a free block. */
+        out->obs[old_alloc] = alloc - old_alloc;
+        out->obs[old_alloc + 1] = out->obs[1];
+        out->obs[1] = old_alloc;
+    }
+
+    /* Retry with the newly available space. */
+    return rnx_load_realloc_obs(out, start, len, req);
 }
 
 const char *rnx_load_grow_obs(struct rinex_data *out, struct rinex_satellite_data *p_sv)
@@ -439,14 +492,14 @@ const char *rnx_load_alloc_obs(struct rinex_data *out, struct rinex_satellite_da
 
 const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
 {
-    struct rinex_parser *p;
+    struct rinex_parser *p = NULL;
     struct rinex_range *p_range;
     struct rinex_system_data *p_sys;
     struct rinex_satellite_data *p_sv;
     const char *errmsg;
     char sys_id, lli, ssi, *buf;
     int64_t obs;
-    int ii, jj, kk, bit, ofs, res, svn;
+    int ii, jj, kk, ofs, res, svn, ver_ofs;
 
     /* Initialize our output structure. */
     memset(out, 0, sizeof *out);
@@ -493,7 +546,7 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
     while ((res = p->read(p)) > 0)
     {
         /* TODO: Record special event epochs. */
-        if (p->epoch.flag != '1' && p->epoch.flag != '6')
+        if (p->epoch.flag != '0' && p->epoch.flag != '1' && p->epoch.flag != '6')
             continue;
 
         /* Copy epoch timestamp, first growing out->epoch if needed. */
@@ -507,12 +560,13 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
         ++out->epoch_used;
 
         /* Process each satellite observed during this epoch. */
-        buf = p->buffer;
-        for (ii = jj = 0; ii < p->epoch.n_sats; ++ii)
+        for (ii = 0; ii < p->epoch.n_sats; ++ii)
         {
-            sys_id = *buf++;
+            sys_id = p->sats[ii].system;
+            if (sys_id == ' ')
+                sys_id = 'G';
             p_sys = &out->sys[sys_id & 31];
-            svn = *buf++ - 1;
+            svn = p->sats[ii].number - 1;
 
             /* Do we have a slot for this satellite? */
             if (svn + p_sys->sv.start >= p_sys->sv.end)
@@ -534,7 +588,7 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
 
             /* Is this a new run of epochs? */
             p_range = &p_sv->when[p_sv->when_used - 1];
-            if (p_range->end < out->epoch_used)
+            if (p_range->end < out->epoch_used - 1)
             {
                 if (p_sv->when_used >= p_sv->when_alloc)
                 {
@@ -544,9 +598,9 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
                 }
 
                 p_range = &p_sv->when[p_sv->when_used++];
-                p_range->start = out->epoch_used;
+                p_range->start = out->epoch_used - 1;
             }
-            p_range->end = out->epoch_used + 1;
+            p_range->end = out->epoch_used;
 
             /* Do we need to grow the observation array? */
             if (p_sv->obs_used >= p_sv->obs_alloc)
@@ -557,13 +611,14 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
             }
 
             /* Save the observations. */
+            jj = p->sats[ii].obs_0;
             for (kk = 0; kk < p_sys->n_obs; ++kk)
             {
-                ofs = p_sv->obs_used + p_sv->start[kk];
+                obs = p->obs[jj + kk];
+                lli = p->lli[jj + kk];
+                ssi = p->ssi[jj + kk];
 
-                /* Was the observation present or defaulted? */
-                bit = kk & 7;
-                if (*buf & (1 << bit))
+                if (obs >= RINEX_MIN_OBS && (obs != 0 || lli != ' '))
                 {
                     if (p_sv->start[kk] < 0)
                     {
@@ -571,28 +626,20 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
                         if (errmsg)
                             goto fail_errmsg;
                     }
-                    out->obs[ofs] = p->obs[jj];
-                    out->lli[ofs] = p->lli[jj];
-                    out->ssi[ofs] = p->ssi[jj];
-                    ++jj;
+                    ofs = p_sv->start[kk] + p_sv->obs_used;
+                    out->obs[ofs] = obs;
+                    out->lli[ofs] = lli;
+                    out->ssi[ofs] = ssi;
                 }
                 else if (p_sv->start[kk] >= 0)
                 {
+                    ofs = p_sv->start[kk] + p_sv->obs_used;
                     out->obs[ofs] = INT64_MIN;
                     out->lli[ofs] = ' ';
                     out->ssi[ofs] = ' ';
                 }
-                if (bit == 7)
-                {
-                    buf++;
-                }
             }
 
-            /* Advance our indexes. */
-            if (kk & 7)
-            {
-                buf++;
-            }
             ++p_sv->obs_used;
         }
     }
