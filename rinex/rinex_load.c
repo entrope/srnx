@@ -4,10 +4,15 @@
  */
 
 #include "rinex/rinex_load.h"
+#include "rinex/srnx.h"
 #include "rinex/rnx_priv.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <unistd.h>
+
+int rinex_load_error_line;
 
 void free_rinex_data(struct rinex_data *data)
 {
@@ -74,7 +79,7 @@ const char *rnx_data_init_cons_v2(struct rinex_data *out)
         sep += 6;
 
         /* Are we at the end of the current line? (9 per line) */
-        if (ofs % 9 == 8)
+        if (ofs % 9 == 8 && (ofs + 1) < n_obs)
         {
             sep = strchr(sep, '\n');
             if (!sep || (sep + 72) > (out->file_header + out->file_header_len))
@@ -103,7 +108,7 @@ const char *rnx_data_init_cons_v34(struct rinex_data *out)
     char cons, *sep;
     long n_obs;
     int ofs;
- 
+
     /* Find the observable-list header. */
     ofs = rnx_find_header(out->file_header, out->file_header_len, sys_n_obs_types, sizeof sys_n_obs_types);
     if (ofs < 0)
@@ -226,7 +231,7 @@ const char *rnx_load_grow_system(struct rinex_data *out, char sys_id, int svn)
             out->sys[ii].sv.end -= old_n_sv;
         }
     }
- 
+
     /* How many satellites do we want for this system afterwards? */
     if (old_n_sv == 0)
     {
@@ -260,7 +265,7 @@ const char *rnx_load_grow_system(struct rinex_data *out, char sys_id, int svn)
         /* Copy old satellite data to the new positions. */
         memcpy(new_sv, out->sv, p_sys->sv.start * sizeof *new_sv);
         memcpy(new_sv + p_sys->sv.start, out->sv + p_sys->sv.end,
-            (tot_sv - old_n_sv) * sizeof *out->sv);
+            (tot_sv - p_sys->sv.end) * sizeof *out->sv);
         memcpy(new_sv + tot_sv - old_n_sv, out->sv + p_sys->sv.start,
             old_n_sv * sizeof *out->sv);
         free(out->sv);
@@ -308,6 +313,7 @@ const char *rnx_load_alloc_satellite(struct rinex_data *out, char sys_id, int sv
         return "unable to allocate initial epoch range for satellite";
     }
     p_sv->when[0].start = out->epoch_used - 1;
+    p_sv->when[0].end = out->epoch_used - 1;
 
     /* Save the satellite's ID (1-based satellite number). */
     p_sv->id[0] = sys_id;
@@ -342,7 +348,13 @@ const char *rnx_load_grow_when(struct rinex_satellite_data *p_sv)
 
 int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
 {
-    int prev, curr, best, best_prev, best_size, alloc;
+    int prev, curr, best, best_prev, best_size, alloc = 0;
+
+    /* We need at least two words of space when we free a block. */
+    if (req == 1)
+    {
+        req = 2;
+    }
 
     /* Is this the very first allocation? */
     if (!out->obs)
@@ -368,8 +380,9 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
     /* Find the best fit for `req`. */
     best = best_prev = -1;
     best_size = INT_MAX;
-    for (curr = (int)out->obs[1], prev = 0; curr > 0;
-         prev = curr, curr = (int)out->obs[curr + 1])
+    for (curr = (int)out->obs[1], prev = 0;
+        curr > 0 && curr < out->obs[0];
+        prev = curr, curr = (int)out->obs[curr + 1])
     {
         if (out->obs[curr] < req)
             continue;
@@ -385,15 +398,20 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
     if (best > 0)
     {
         /* If this block is bigger than we want, make a new block with
-         * the leftover space.
+         * the leftover space.  Otherwise use the whole block.
          */
-        if (best_size > req)
+        if (best_size - req <= 2)
+        {
+            out->obs[best_prev + 1] = out->obs[best + 1];
+        }
+        /* Check that we have space for the new free block's header. */
+        else if (best + req >= 0 && best + req + 1 < out->obs[0])
         {
             out->obs[best + req + 0] = out->obs[best + 0] - req;
             out->obs[best + req + 1] = out->obs[best + 1];
             out->obs[best_prev + 1] = best + req;
         }
-        else
+        else /* Not enough space to split, so use the whole block. */
         {
             out->obs[best_prev + 1] = out->obs[best + 1];
         }
@@ -435,6 +453,8 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
         out->ssi = new_ssi;
         out->lli = new_lli;
         out->obs[0] = alloc;
+        memset(new_ssi + old_alloc, ' ', alloc - old_alloc);
+        memset(new_lli + old_alloc, ' ', alloc - old_alloc);
 
         /* Add the new space as a free block. */
         out->obs[old_alloc] = alloc - old_alloc;
@@ -529,8 +549,28 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
     buf[out->file_header_len] = '\0';
     out->file_header = buf;
 
-    /* What format version is the file? */
-    out->rinex_version = strtol(out->file_header, &buf, 10);
+    /* What format version is the file?  Hatanaka-compressed files begin
+     * with the CRINEX VERS / TYPE line, so the RINEX VERSION / TYPE line
+     * may not be first.  rnx_find_header requires a preceding newline, so
+     * check the first line separately before falling back to a search.
+     */
+    ver_ofs = -1;
+    if (out->file_header_len >= 80
+        && !memcmp(out->file_header + 60, rnx_version_type, 20))
+    {
+        ver_ofs = 0;
+    }
+    else
+    {
+        ver_ofs = rnx_find_header(out->file_header, out->file_header_len,
+            rnx_version_type, 21);
+    }
+    if (ver_ofs < 0)
+    {
+        free((char *)out->file_header);
+        return "unrecognized RINEX version";
+    }
+    out->rinex_version = strtol(out->file_header + ver_ofs, &buf, 10);
     if (out->rinex_version < 2 || out->rinex_version > 4 || *buf != '.')
     {
         free((char *)out->file_header);
@@ -659,4 +699,32 @@ fail_errmsg:
     free_rinex_data(out);
     p->destroy(p);
     return errmsg;
+}
+
+const char *rinex_load_file(const char *filename, struct rinex_data *out)
+{
+    struct rinex_stream *stream;
+    const char *err;
+    char magic[4];
+    int fd, res;
+
+    /* Probe file type by reading the first 4 bytes. */
+    fd = open(filename, O_RDONLY);
+    if (fd < 0)
+        return strerror(errno);
+    if (read(fd, magic, 4) == 4 && !memcmp(magic, "SRNX", 4))
+    {
+        static char msgbuf[300];
+        close(fd);
+        return srnx_load(filename, out);
+    }
+    close(fd);
+
+    /* Not SRNX; try loading as RINEX/CRX. */
+    stream = rinex_mmap_stream(filename);
+    if (!stream)
+        return "unable to open file";
+    err = rinex_load(stream, out);
+    stream->destroy(stream);
+    return err;
 }

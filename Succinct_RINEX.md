@@ -1,10 +1,12 @@
 # Succinct RINEX File Format
 
-## Format Version
+## General Overview
+
+### Format Version
 
 This file describes revision 1 of the Succinct RINEX (SRNX) file format.
 
-## Introduction
+### Introduction
 
 The SRNX file format is a binary format that allows fast sequential
 access to RINEX-like observation data on a per-signal basis, while still
@@ -48,13 +50,13 @@ For example, it ensures newlines are in Unix format, does not preserve
 the order of satellites observed in each epoch, and does not preserve
 leading zeros in observation values.
 
-## Mandatory and Prohibitive Words
+### Mandatory and Prohibitive Words
 
 The key words MUST, MUST NOT, SHOULD and MAY are intended to be
 interpreted as described in [RFC 2119](https://tools.ietf.org/html/rfc2119)
 when, and only when, they appear in all capitals.
 
-## SRNX FOURCC Codes
+### SRNX FOURCC Codes
 
 In the following table, Count indicates how many times the chunk may
 occur in a single SRNX file.
@@ -75,16 +77,17 @@ If an `EPOC` chunk is not present, the file MUST NOT have any `EVTF`,
 `SATE` or `SOCD` chunks (it has no special events or observations).
 
 Additional chunks, if any are present, MAY appear in any order, but:
- - The `EPOC` chunk, if present, SHOULD be the third chunk.
- - The file SHOULD store `EVTF` chunks consecutively.
- - The order of the table above means most offsets point "backwards"
-   in the file, simplifying the creation of the SRNX file.
- - Chunks with different FOURCC codes MAY be interleaved.
-   This is helpful in reducing the offsets stored in the `SATE` chunks.
 
-# Chunk Payload Definitions
+- The `EPOC` chunk, if present, SHOULD be the third chunk.
+- The file SHOULD store `EVTF` chunks consecutively.
+- The order of the table above means most offsets point "backwards"
+  in the file, simplifying the creation of the SRNX file.
+- Chunks with different FOURCC codes MAY be interleaved.
+  This is helpful in reducing the offsets stored in the `SATE` chunks.
 
-## <a name="srnx"></a>SRNX: Succinct RINEX Header
+## Chunk Payload Definitions
+
+### <a name="srnx"></a>SRNX: Succinct RINEX Header
 
 The `SRNX` payload consists of five ULEB128 values and optional padding,
 in this order:
@@ -108,14 +111,14 @@ unknown until all the other chunks are written.
 Padding in this chunk provides for enough space to store that offset
 once it is known.
 
-## <a name="rhdr"></a>RHDR: RINEX Header
+### <a name="rhdr"></a>RHDR: RINEX Header
 
 The `RHDR` payload is simply the RINEX 2.x or 3.x file header, including
 the newline following the END OF HEADER label.
 Each newline is represented as a single line feed (LF, '\n'; Unix
 style).
 
-## <a name="sdir"></a>SDIR: Satellite Directory
+### <a name="sdir"></a>SDIR: Satellite Directory
 
 The `SDIR` payload consists of the file offset of the `EPOC` chunk,
 followed by the file offset of the first `EVTF` chunk, followed by a
@@ -126,7 +129,7 @@ Each satellite directory entry contains the three-character satellite
 identifier as used in RINEX, followed by the file offset of the
 satellite's `SATE` chunk.
 
-## <a name="evtf"></a>EVTF: Event Flag or Special Record
+### <a name="evtf"></a>EVTF: Event Flag or Special Record
 
 The `EVTF` payload consists of an epoch index, followed by the event
 record in standard RINEX format, including all newlines.
@@ -139,7 +142,7 @@ epoch, 1 indicates between the first and second epoch, and so forth.
 
 As in the `RHDR` chunk, each newline is represented as a single LF.
 
-## <a name="epoc"></a>EPOC: Epoch records
+### <a name="epoc"></a>EPOC: Epoch records
 
 The `EPOC` payload consists of a ULEB128 count of epochs, one or more
 epoch spans, and run-length-encoded (RLE-encoded) receiver clock offsets.
@@ -175,7 +178,7 @@ the remainding receiver clock offsets are zero.
 The number of satellites observed in each epoch is not directly
 represented in the SRNX file.
 
-## <a name="sate"></a>SATE: Satellite observations
+### <a name="sate"></a>SATE: Satellite observations
 
 The `SATE` payload lists the observation times and codes for a single
 satellite.
@@ -186,9 +189,9 @@ order.
 The number of signals is controlled by the `RHDR` chunk payload.
 A zero file offset means that signal was never observed.
 
-`SATE` chunks at different places in a file MUST NOT have the same name.
+A given satellite name must be used in at most one `SATE` chunk.
 
-### Satellite epoch presence
+#### Satellite epoch presence
 
 The epoch presence data within a `SATE` chunk is represented as a
 count-minus-1 of runs, followed by interleaved counts-minus-1 of how
@@ -197,12 +200,13 @@ All of these count-minus-1 values are encoded as ULEB128s.
 
 For example, if this consists of the values `1 2 5 4 6`, the satellite
 was observed during two (1+1) spans of epochs:
- - six (5+1) epochs starting at the third (2+1) epoch described in the
-   `EPOC` chunk, and
- - seven (6+1) epochs starting at the 14th epoch (4+1 epochs after the
-   last epoch in the first span).
 
-## <a name="socd"></a>SOCD: Satellite observation code data
+- six (5+1) epochs starting at the third (2+1) epoch described in the
+  `EPOC` chunk, and
+- seven (6+1) epochs starting at the 14th epoch (4+1 epochs after the
+  last epoch in the first span).
+
+### <a name="socd"></a>SOCD: Satellite observation code data
 
 The `SOCD` payload holds the observations for a single combination of
 satellite and observation code.
@@ -210,14 +214,14 @@ It consists of the observation name, a ULEB128 count-minus-1 of
 observations, loss-of-lock indicators, signal-strength indicators, and
 packed observation data.
 
-### Observation name
+#### Observation name
 
 The observation name is stored as an eight-byte name, with the satellite
 name in the first three bytes, a zero ('\0') pad, the signal name in the
 next two or three bytes (depending on RINEX version), and zero ('\0')
 padding to fill out the eight bytes.
 
-### Loss-of-lock indicators
+#### Loss-of-lock indicators
 
 Loss-of-lock indicators (LLIs) are represented with a ULEB128 length of
 the compressed LLIs, in bytes of file content.
@@ -227,12 +231,12 @@ The compressed LLIs are run-length encoded, with the LLI character
 If the total number of encoded LLIs is smaller than the number of
 observations given for the signal, the remainder are spaces (' ').
 
-### Signal-strength indicators
+#### Signal-strength indicators
 
 Signal-strength indicators are represented using the same RLE encoding
 as loss-of-lock indicators.
 
-### Packed observation data
+#### Packed observation data
 
 Packed observation data is represented as delta encoding of scaled
 observation data.
@@ -254,6 +258,13 @@ are multiplied by 1000 before delta encoding.
 The maximum scale is 1e6, represented as one billion in ULEB128.
 The scaled values MUST all be integers.
 
+The scale factor doubles as GCD extraction: when all observations for a
+(satellite, observation code) pair — i.e., within a single `SOCD` chunk —
+share a greatest common divisor larger than 1, the encoder SHOULD divide
+each observation by that GCD and record the GCD as the explicit scale.
+This reduces the bit-widths of delta-encoded values without any loss of
+information.
+
 Following this are `n` SLEB128 values representing the initial state of
 the delta coder.
 
@@ -263,37 +274,88 @@ Each block begins with one byte that identifies the block packing.
 
 | Block Header | Description |
 | :----------: | :---------- |
-| `000kkkkk` | 8*`(k+1)` bit matrix |
-| `001kkkkk` | 16*`(k+1)` bit matrix |
-| `010kkkkk` | 32*`(k+1)` bit matrix |
+| `000kkkkk` | 8×`(k+1)` bit matrix |
+| `001kkkkk` | 16×`(k+1)` bit matrix |
+| `010kkkkk` | 32×`(k+1)` bit matrix |
+| `011kkkkk` | 64×`(k+1)` bit matrix |
+| `100xxxxx` through `11111100` | reserved |
+| `11111101` | ULEB128 count-minus-1 of absent values |
 | `11111110` | ULEB128 count-minus-1 of zero values |
 | `11111111` | ULEB128 count-minus-1 of SLEB128 values |
-| others | reserved |
 
-[//]: # (We might want a ULEB128 count-minus-1 of zero/absent values AFTER delta)
-[//]: # (decoding, but this makes the decoding logic somewhat trickier.)
+An absent-values block (`0xFD`) represents observations that were not
+recorded for those epochs (encoded as `INT64_MIN` in the library).
+Absent values MUST be excluded from GCD computation and from delta
+encoding.
+Accordingly, the delta accumulator is not advanced when decoding an
+absent-values block; absent values are returned as `INT64_MIN` without
+altering the decoder's running state.
 
-An `m*(k+1)` bit matrix is stored as `m` values, each with `k+1` bits in
-the file, in bitwise transposed order.
+An `m×(k+1)` bit matrix (where `m` is 8, 16, 32 or 64) is stored as `m`
+values, each with `k+1` bits in the file, in bitwise transposed order.
 That is, the most significant bit from each value is stored first, with
 the MSB of the first value in the MSB of the first byte and continuing
-for `m/8` bytes.  (Thus the `m*(k+1)` bit matrix is represented as `k+1`
-values, each `m` bits long, in big-endian bit and byte order.)
+for `m/8` bytes (1, 2, 4 or 8 bytes respectively).
+The full matrix is thus `k+1` rows, each `m/8` bytes long, in big-endian
+bit and byte order, for a total of `(k+1) × m/8` bytes.
 The `k+1` bits are in two's-complement format, so the first (most
 significant) bit is repeated to sign-extend the values.
 
 The use of this bit matrix representation was inspired by
 [Lemire and Boytsov, 2013](https://onlinelibrary.wiley.com/doi/full/10.1002/spe.2203).
 
-# <a name="digests"></a>Digest Identifiers
+#### Encoder guidance
 
-## Table of Digest Functions
+The variable block sizes (8, 16, 32, 64) allow an encoder to adapt to local
+variation in bit-widths — a strategy referred to as BMvar.
+Recommended encoding procedure for each (satellite, observation code):
+
+1. **Delta order selection.**
+   First, partition the observations into present and absent (`INT64_MIN`)
+   values.
+   Absent values will be encoded with `0xFD` blocks and are excluded from
+   all subsequent steps.
+   Compute delta chains of orders 0 through 5 on the present values only.
+   For each order, compute the SLEB128 byte cost of every delta value and
+   estimate the encoded size (e.g. as the sum of those costs).
+   Select the order that minimizes the estimate.
+
+2. **GCD extraction.**
+   Before delta encoding, divide all present observations by the
+   per-observable GCD and record it as the explicit scale factor (see
+   above).
+   Absent values do not participate in GCD computation.
+
+3. **Greedy block-size selection.**
+   Walk the bit-width sequence from left to right.
+   At each position, evaluate each candidate block size `m` ∈ {8, 16, 32, 64}:
+   the cost is `8 + max_bw × m` bits, where `max_bw` is the maximum
+   two's-complement bit-width in the candidate block (capped at 32).
+   Pick the block size with the lowest cost per value, `cost / m`.
+
+4. **Fallback blocks.**
+   Runs of absent values are encoded as absent-value (`0xFD`) blocks
+   regardless of position in the sequence.
+   If a region has `max_bw` > 32, or contains only a few values that
+   would not fill an 8-element block, use zero-run (`0xFE`) or
+   SLEB128-run (`0xFF`) blocks instead.
+   A SLEB128-run is also typically used when (re-)initializing the
+   delta chain.
+
+5. **Trailing values.**
+   If fewer than 16 values remain at the end of the sequence, encode
+   them as a SLEB128-run block.
+
+## <a name="digests"></a>Digest Identifiers
+
+### Table of Digest Functions
 
 | Identifier | Length | Description |
 | :--------: | :----: | :---------- |
 | 0 | 0 | Null digest |
 | 2 | 4 | CRC32C |
 | 6 | 32 | SHA-256 |
+| 7 | 64 | SHA3-512 |
 | 20 | 16 | BLAKE2b, 16-byte output |
 | 21 | 32 | BLAKE2b, 32-byte output |
 | 22 | 64 | BLAKE2b, 64-byte output |
@@ -313,25 +375,34 @@ intended to indicate the digest length in bytes:
 | 6 | 64 |
 | 7 | reserved |
 
-## <a name="digest-0"></a>Digest 0: Null digest
+### <a name="digest-0"></a>Digest 0: Null digest
 
 The null digest has length zero.
 
-## <a name="digest-2"></a>Digest 2: CRC32C
+### <a name="digest-2"></a>Digest 2: CRC32C
 
 The CRC32C digest is a 32-bit cyclic redundancy checksum using the
 generator polynomial given by G. Castagnoli et al.
 A formal definition is given in [RFC 3720](https://tools.ietf.org/html/rfc3720), section 12.1.
 
-## <a name="digest-6"></a>Digest 6: SHA-256
+### <a name="digest-6"></a>Digest 6: SHA-256
 
 The SHA-256 digest is a cryptographic message digest defined by the
 United States government.
 A formal definition is given in [FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final).
 
-## <a name="digest-20"></a>Digest 20: BLAKE2b, 16-byte output
-## <a name="digest-21"></a>Digest 21: BLAKE2b, 32-byte output
-## <a name="digest-22"></a>Digest 22: BLAKE2b, 64-byte output
+### <a name="digest-7"></a>Digest 7: SHA3-512
+
+The SHA-256 digest is a cryptographic message digest defined by the
+United States government.
+A formal definition is given in [FIPS 202](https://csrc.nist.gov/pubs/fips/202/final).
+
+
+### <a name="digest-20"></a>Digest 20: BLAKE2b, 16-byte output
+
+### <a name="digest-21"></a>Digest 21: BLAKE2b, 32-byte output
+
+### <a name="digest-22"></a>Digest 22: BLAKE2b, 64-byte output
 
 The BLAKE2b digest is a cryptographic message digest defined by the
 cryptographic research community with different tradeoffs than the SHA
@@ -340,7 +411,7 @@ The [libsodium](https://doc.libsodium.org/) library provides a convenient
 implementation of these variants of BLAKE2b.
 A formal definition is given in [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.txt).
 
-## Rationale for digest choices
+### Rationale for digest choices
 
 The selection of defined digest functions was a balance between a
 variety of lengths, robustness to random errors, and the availability

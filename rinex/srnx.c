@@ -5,11 +5,13 @@
 
 #include "srnx.h"
 #include "rinex/rnx_priv.h" /* rnx_page_size, rnx_find_header(), etc. */
+#include "rinex/rinex_load.h"
 #include "transpose.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -29,7 +31,8 @@
 #define MATRIX_16X 0x20
 #define MATRIX_32X 0x40
 #define MATRIX_64X 0x60
-#define BLOCK_ZERO 0xFE
+#define BLOCK_ABSENT  0xFD
+#define BLOCK_ZERO    0xFE
 #define BLOCK_SLEB128 0xFF
 
 /** srnx_system_info holds information about a satellite system's
@@ -101,22 +104,19 @@ struct srnx_reader
 struct srnx_obs_reader
 {
     /** SRNX reader that this reader is associated with. */
-    const struct srnx_reader *parent;
+    struct srnx_reader *parent;
 
     /** Number of valid elements in #obs. */
     unsigned short obs_valid;
-
-    /* Manually control the location of padding. */
-    unsigned char pad[3];
-
-    /** Read pointer within #obs. */
-    unsigned char obs_idx;
 
     /** Order of delta coding (0 to 7 inclusive). */
     unsigned char order;
 
     /** When block_left > 0, what type is the block? */
     unsigned char block_code;
+
+    /** Read pointer within #obs. */
+    int obs_idx;
 
     /** Observation scaling value. */
     unsigned int scale;
@@ -210,14 +210,15 @@ const char *srnx_strerror(int err)
 /** Decodes a ULEB128 from \a *d, returning it and advancing \a *d. */
 static uint64_t uleb128(const char **d)
 {
-    uint64_t accum = **d & 127;
+    uint64_t accum = 0;
     int shift = 0;
+    unsigned char ch;
 
-    while (**d & 128)
-    {
+    do {
+        ch = (unsigned char)*(*d)++;
+        accum |= (uint64_t)(ch & 127) << shift;
         shift += 7;
-        accum = (uint64_t)((*++*d) & 127) << shift;
-    }
+    } while (ch & 128);
 
     return accum;
 }
@@ -225,12 +226,8 @@ static uint64_t uleb128(const char **d)
 /** Decodes a SLEB128 from \a *d, returning it and advancing \a *d. */
 static int64_t sleb128(const char **d)
 {
-    uint64_t ul;
-    int64_t mag;
-
-    ul = uleb128(d);
-    mag = ul >> 1;
-    return (ul & 1) ? -mag : mag;
+    uint64_t ul = uleb128(d);
+    return (int64_t)(ul >> 1) ^ -(int64_t)(ul & 1);
 }
 
 /** Returns the length of digests for digest \a digest_id. */
@@ -424,8 +421,14 @@ static int srnx_parse_rhdr_v3(
             }
         }
 
-        /* Advance to the next satellite system. */
-        srnx->sys_info[kk++].codes_len = n_obs;
+        /* Save codes_len for this system. */
+        srnx->sys_info[kk].codes_len = n_obs;
+
+        /* Advance to the next line for the outer loop check. */
+        line = strchr(line, '\n');
+        if (!line || line >= rhdr + rhdr_len)
+            break;
+        ++line;
     }
 
     return 0;
@@ -622,6 +625,13 @@ srnx_corrupt:
     }
     file_size -= file_digest_length + chunk_digest_length;
 
+    /* Read the SDIR chunk offset (or 0 if absent). */
+    if ((uint64_t)(rptr - payload_start) < payload_len)
+    {
+        ul = uleb128(&rptr);
+        (*p_srnx)->sdir_offset = ul ? (int64_t)ul : 0;
+    }
+
     /* Check that we didn't walk past the end of the chunk payload. */
     if ((uint64_t)(rptr - payload_start) > payload_len)
     {
@@ -676,7 +686,7 @@ int srnx_get_header(
         return SRNX_BAD_STATE;
     }
 
-    *p_rhdr = srnx->data + srnx->rhdr_offset;
+    *p_rhdr = srnx->data + srnx->rhdr_offset + 4;
     *rhdr_len = uleb128(p_rhdr);
     return 0;
 }
@@ -780,6 +790,7 @@ static int srnx_find_chunk_cached(
         {
             return SRNX_BAD_STATE;
         }
+        chunk += 4;
         *p_len = uleb128(&chunk);
         if ((chunk - srnx->data) + *p_len > srnx->data_size)
         {
@@ -860,7 +871,7 @@ int srnx_get_epochs(
             i64 *= -10000000;
         }
 
-        len = uleb128(&epoc);
+        len = uleb128(&epoc) + 1;
         if (epoc >= end || idx + len > n_epoch)
         {
             srnx->error_line = __LINE__;
@@ -880,14 +891,14 @@ int srnx_get_epochs(
         }
 
         time = uleb128(&epoc);
-        if (epoc >= end || time > 2460610000000)
+        if (epoc > end || time > 2460610000000)
         {
             srnx->error_line = __LINE__;
             return SRNX_CORRUPT;
         }
         sec_e7 = time % 1000000000;
         hh_mm = time / 1000000000;
-        mm = hh_mm % 60;
+        mm = hh_mm % 100;
 
         /* Unpack this epoch span. */
         for (; len > 0; ++idx, --len)
@@ -919,14 +930,14 @@ int srnx_get_epochs(
     for (idx = 0; (epoc < end) && (idx < n_epoch); )
     {
         i64 = sleb128(&epoc);
-        if (epoc >= end)
+        if (epoc > end)
         {
             srnx->error_line = __LINE__;
             return SRNX_CORRUPT;
         }
 
-        len = uleb128(&epoc);
-        if (epoc >= end)
+        len = uleb128(&epoc) + 1;
+        if (epoc > end)
         {
             srnx->error_line = __LINE__;
             return SRNX_CORRUPT;
@@ -1050,7 +1061,7 @@ int srnx_get_satellites(
                 *p_name = next;
             }
 
-            next = (*p_name) + *p_names_len++;
+            next = (*p_name) + (*p_names_len)++;
             memcpy(next->name, rptr, 3);
             next->name[3] = '\0';
             rptr += 3;
@@ -1090,7 +1101,7 @@ int srnx_get_satellites(
         }
 
         /* Save this satellite name. */
-        next = (*p_name) + *p_names_len++;
+        next = (*p_name) + (*p_names_len)++;
         memcpy(next->name, payload, sizeof next->name);
 
         /* Continue searching at next chunk in file. */
@@ -1117,26 +1128,26 @@ static int64_t srnx_find_sate(
     int res;
 
     /* Do we have a satellite directory? */
-    if (srnx->sdir_offset)
+    if (srnx->sdir_offset > 0)
     {
         /* Read payload length. */
-        rptr = payload = srnx->data + srnx->sdir_offset + 4;
+        rptr = srnx->data + srnx->sdir_offset + 4;
         u64 = uleb128(&rptr);
-        if ((int64_t)(srnx->sdir_offset + u64) < srnx->sdir_offset
-            || srnx->sdir_offset + u64 > srnx->data_size)
+        if ((uint64_t)(rptr - srnx->data) + u64 > srnx->data_size)
         {
             return SRNX_CORRUPT;
         }
-        payload += u64;
+        payload = rptr + u64;
 
         /* Skip the EPOC and EVTF chunk offsets. */
         uleb128(&rptr);
         uleb128(&rptr);
 
         /* Scan through the satellite directory. */
-        while (rptr < payload)
+        while (rptr + 3 < payload)
         {
-            res = !memcmp(rptr, name.name, sizeof name.name);
+            res = !memcmp(rptr, name.name, 3);
+            rptr += 3;
             u64 = uleb128(&rptr);
             if (res)
             {
@@ -1249,8 +1260,13 @@ static int64_t srnx_find_socd(
         /* Validate SOCD block is for the expected SV and observation. */
         s64 += sate_offset;
         payload = srnx->data + s64;
-        if (memcmp(payload, "SOCD", 4)
-            || (uleb128(&payload) < 8)
+        if (memcmp(payload, "SOCD", 4))
+        {
+            srnx->error_line = __LINE__;
+            return SRNX_CORRUPT;
+        }
+        payload += 4;
+        if ((uleb128(&payload) < 8)
             || memcmp(payload, name.name, sizeof name)
             || memcmp(payload + 4, code.name, sizeof code))
         {
@@ -1669,10 +1685,10 @@ static int decode_observations(
     /* Try to read more until we cannot read any more. */
     data = p_socd->parent->data + p_socd->data_offset;
     end = p_socd->parent->data + p_socd->data_end;
-    while (data < end)
+    while (data < end || p_socd->block_left > 0)
     {
         /* How many observations can we read right now? */
-        avail = sizeof(p_socd->obs) / sizeof(p_socd->obs[0]) - p_socd->obs_valid;
+        avail = sizeof(p_socd->obs) / sizeof(p_socd->obs[0]) - idx;
 
         /* Do we have block-coded observations to read? */
     try_block:
@@ -1693,6 +1709,7 @@ static int decode_observations(
                     if (data > end)
                     {
                         p_socd->block_left -= ii;
+                        p_socd->parent->error_line = __LINE__;
                         res = SRNX_CORRUPT;
                         goto out;
                     }
@@ -1702,6 +1719,18 @@ static int decode_observations(
             {
                 ii = count;
                 memset(p_socd->obs + idx, 0, ii * sizeof(p_socd->obs[0]));
+                idx += ii;
+            }
+            else if (p_socd->block_code == BLOCK_ABSENT)
+            {
+                /* Finalize pending delta-coded values before inserting absent
+                 * markers; the delta accumulator must not advance for absent
+                 * values. */
+                undelta_and_scale(p_socd, idx);
+                ii = count;
+                while (count-- > 0)
+                    p_socd->obs[idx++] = INT64_MIN;
+                p_socd->obs_valid = idx;
             }
             else
             {
@@ -1714,29 +1743,47 @@ static int decode_observations(
             avail -= ii;
         }
 
+        /* After a partial-block decode (block_left > 0 and obs buffer full),
+         * or after consuming all packed data exactly, stop here. */
+        if (p_socd->block_left > 0 || data >= end)
+            break;
+
         /* The next byte indicates the encoding scheme. */
         ch = *data++;
-        if ((unsigned char)ch == BLOCK_ZERO
+        if ((unsigned char)ch == BLOCK_ABSENT
+            || (unsigned char)ch == BLOCK_ZERO
             || (unsigned char)ch == BLOCK_SLEB128)
         {
             u64 = uleb128(&data);
             if (u64 > INT_MAX || data > end)
             {
+                p_socd->parent->error_line = __LINE__;
                 res = SRNX_CORRUPT;
                 goto out;
             }
-            p_socd->block_left = u64;
+            /* Store count (not count-1) in block_left. */
+            p_socd->block_left = (int)u64 + 1;
             p_socd->block_code = ch;
             goto try_block;
         }
 
-        /* It looks like a transposed bit matrix. */
-        count = 8 << (ch >> 5); /* number of output values */
-        bits = (ch & 31) + 1; /* bits per output value */
-
-        /* Is the word count valid?  Do we have enough data? */
-        if ((count > 32) || (data + (count >> 3) * bits > end))
+        /* It looks like a transposed bit matrix.
+         * Top two bits select width: 00=16, 01=32, 10=64.
+         * Bottom six bits are k; bits per value = k+1 (1..64).
+         * Cast to unsigned char before shifting to avoid sign-extension UB. */
+        if ((unsigned char)ch >> 5 > 3)
         {
+            p_socd->parent->error_line = __LINE__;
+            res = SRNX_CORRUPT;
+            goto out;
+        }
+        count = 8 << ((unsigned char)ch >> 5); /* number of output values: 8, 16, 32, or 64 */
+        bits = ((unsigned char)ch & 31) + 1; /* bits per output value: 1..32 */
+
+        /* Do we have enough data? */
+        if (data + (count >> 3) * bits > end)
+        {
+            p_socd->parent->error_line = __LINE__;
             res = SRNX_CORRUPT;
             goto out;
         }
@@ -1744,14 +1791,31 @@ static int decode_observations(
         /* Would this overflow the observation buffer? */
         if (avail < (size_t)count)
         {
+            data--;  /* put back the block header byte */
             break;
         }
 
         /* Transpose the matrix. */
-        transpose(p_socd->obs + idx, data, bits, count);
+        if (count == 64)
+        {
+            /* Split a 64-wide matrix into two 32-wide transposes. */
+            char tmp[4 * 32];
+            int rr;
+
+            for (rr = 0; rr < bits; rr++)
+                memcpy(tmp + rr * 4, data + rr * 8, 4);
+            transpose(p_socd->obs + idx, tmp, bits, 32);
+            for (rr = 0; rr < bits; rr++)
+                memcpy(tmp + rr * 4, data + rr * 8 + 4, 4);
+            transpose(p_socd->obs + idx + 32, tmp, bits, 32);
+        }
+        else
+        {
+            transpose(p_socd->obs + idx, data, bits, count);
+        }
 
         /* Update bookkeeping. */
-        data += bits;
+        data += (count >> 3) * bits;
         idx += count;
     }
 
@@ -1871,7 +1935,7 @@ int srnx_get_obs_by_name(
     }
 
     return srnx_get_obs_by_index(srnx, name, codes_len, idx, n_values,
-        p_obs, p_ssi, p_lli);
+        p_obs, p_lli, p_ssi);
 }
 
 /* Doc comment in srnx.h. */
@@ -1947,9 +2011,14 @@ int srnx_get_obs_by_index(
             res = decode_observations(p_socd);
             if (res)
             {
-                srnx->error_line = __LINE__;
                 srnx_free_obs_reader(p_socd);
                 return res;
+            }
+            if (!p_socd->obs_valid)
+            {
+                srnx->error_line = __LINE__;
+                srnx_free_obs_reader(p_socd);
+                return SRNX_CORRUPT;
             }
 
             if (p_socd->obs_valid < n_values[ii] - jj)
@@ -1969,4 +2038,435 @@ int srnx_get_obs_by_index(
     srnx_free_obs_reader(p_socd);
 
     return 0;
+}
+
+/** Parses epoch presence from a SATE chunk into \a sv->when[].
+ *
+ * \param[in] srnx SRNX reader.
+ * \param[in] name Satellite name to find.
+ * \param[in] n_signals Number of signal offsets to skip in the SATE payload.
+ * \param[out] sv Satellite data to populate (when[], when_used, obs_used).
+ * \returns NULL on success, else error description.
+ */
+static const char *srnx_load_epoch_presence(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int n_signals,
+    struct rinex_satellite_data *sv
+)
+{
+    int64_t sate_offset;
+    uint64_t payload_len, n_runs;
+    const char *rptr, *payload_end;
+    int ii, epoch, obs_count;
+
+    /* Find the SATE chunk. */
+    sate_offset = srnx_find_sate(srnx, name);
+    if (sate_offset < 0)
+        return srnx_strerror(sate_offset);
+
+    /* Read SATE payload. */
+    rptr = srnx->data + sate_offset + 4;
+    payload_len = uleb128(&rptr);
+    payload_end = rptr + payload_len;
+
+    /* Skip satellite name (4 bytes). */
+    rptr += 4;
+
+    /* Skip SLEB128 signal offsets. */
+    for (ii = 0; ii < n_signals; ++ii)
+        sleb128(&rptr);
+
+    if (rptr >= payload_end)
+        return "corrupt SATE chunk: no epoch presence data";
+
+    /* Parse epoch presence RLE. */
+    n_runs = uleb128(&rptr) + 1;
+
+    /* Allocate when[] with enough capacity. */
+    sv->when_alloc = (n_runs > 4) ? (int)n_runs : 4;
+    sv->when = calloc(sv->when_alloc, sizeof *sv->when);
+    if (!sv->when)
+        return "unable to allocate epoch ranges";
+    sv->when_used = 0;
+
+    epoch = 0;
+    obs_count = 0;
+    for (ii = 0; ii < (int)n_runs && rptr < payload_end; ++ii)
+    {
+        uint64_t absent_val = uleb128(&rptr);
+        if (absent_val > INT_MAX)
+            return "absence run too long";
+        int absent = (int)absent_val;
+        int present;
+
+        epoch += absent;
+
+        if (rptr >= payload_end)
+            break;
+        uint64_t present_val = uleb128(&rptr) + 1;
+        if (present_val > INT_MAX)
+            return "presence run too long";
+        present = (int)present_val;
+
+        /* Grow when[] if needed. */
+        if (sv->when_used >= sv->when_alloc)
+        {
+            struct rinex_range *new_when;
+            sv->when_alloc *= 2;
+            new_when = realloc(sv->when, sv->when_alloc * sizeof *sv->when);
+            if (!new_when)
+                return "unable to grow epoch ranges";
+            sv->when = new_when;
+        }
+
+        sv->when[sv->when_used].start = epoch;
+        sv->when[sv->when_used].end = epoch + present;
+        sv->when_used++;
+        obs_count += present;
+        epoch += present;
+    }
+
+    sv->obs_used = obs_count;
+    return NULL;
+}
+
+/* Doc comment in srnx.h. */
+const char *srnx_load(const char *filename, struct rinex_data *out)
+{
+    struct srnx_reader *srnx = NULL;
+    struct srnx_satellite_name *sat_names = NULL;
+    struct rinex_epoch *epochs = NULL;
+    uint64_t n_sat_names = 0;
+    size_t n_epochs = 0;
+    const char *rhdr, *errmsg;
+    size_t rhdr_len;
+    char *buf;
+    int res, ii;
+
+    /* Initialize output. */
+    memset(out, 0, sizeof *out);
+
+    /* Open the SRNX file. */
+    res = srnx_open(&srnx, filename);
+    if (res)
+    {
+        rinex_load_error_line = srnx->error_line;
+        return srnx_strerror(res);
+    }
+
+    /* Get the RINEX header. */
+    res = srnx_get_header(srnx, &rhdr, &rhdr_len);
+    if (res)
+    {
+        errmsg = srnx_strerror(res);
+        goto fail;
+    }
+
+    /* Copy header to out->file_header. */
+    buf = malloc(rhdr_len + 1);
+    if (!buf)
+    {
+        errmsg = "unable to allocate file header";
+        goto fail;
+    }
+    memcpy(buf, rhdr, rhdr_len);
+    buf[rhdr_len] = '\0';
+    out->file_header = buf;
+    out->file_header_len = rhdr_len;
+
+    /* Determine RINEX version. */
+    out->rinex_version = strtol(out->file_header, &buf, 10);
+    if (out->rinex_version < 2 || out->rinex_version > 4 || *buf != '.')
+    {
+        errmsg = "unrecognized RINEX version in SRNX header";
+        goto fail;
+    }
+
+    /* Initialize constellation metadata from the header. */
+    errmsg = rnx_data_init_cons(out);
+    if (errmsg)
+        goto fail;
+
+    /* Load all epochs. */
+    res = srnx_get_epochs(srnx, &epochs, &n_epochs);
+    if (res)
+    {
+        errmsg = srnx_strerror(res);
+        goto fail;
+    }
+    out->epoch = epochs;
+    out->epoch_used = n_epochs;
+    out->epoch_alloc = n_epochs;
+    epochs = NULL; /* ownership transferred */
+
+    /* Load special events from EVTF chunks. */
+    {
+        const char *event_text = NULL;
+        size_t event_len;
+        uint64_t epoch_index;
+
+        while ((res = srnx_next_special_event(srnx, &event_text,
+                &event_len, &epoch_index)) == 0)
+        {
+            struct rinex_event *ev;
+            char *text;
+
+            if (out->event_used >= out->event_alloc)
+            {
+                struct rinex_event *new_ev;
+                out->event_alloc = out->event_alloc ? out->event_alloc * 2 : 8;
+                new_ev = realloc(out->event,
+                    out->event_alloc * sizeof *out->event);
+                if (!new_ev)
+                {
+                    errmsg = "unable to grow event array";
+                    goto fail;
+                }
+                out->event = new_ev;
+            }
+
+            text = malloc(event_len);
+            if (!text)
+            {
+                errmsg = "unable to allocate event text";
+                goto fail;
+            }
+            memcpy(text, event_text, event_len);
+
+            ev = &out->event[out->event_used++];
+            ev->epoch_index = (int)epoch_index;
+            ev->text_len = (int)event_len;
+            ev->text = text;
+        }
+
+        if (res != SRNX_NO_CHUNK)
+        {
+            errmsg = srnx_strerror(res);
+            goto fail;
+        }
+    }
+
+    /* Load satellite list. */
+    res = srnx_get_satellites(srnx, &sat_names, &n_sat_names);
+    if (res)
+    {
+        errmsg = srnx_strerror(res);
+        goto fail;
+    }
+
+    /* Process each satellite. */
+    for (ii = 0; ii < (int)n_sat_names; ++ii)
+    {
+        struct srnx_satellite_name name = sat_names[ii];
+        struct rinex_system_data *p_sys;
+        struct rinex_satellite_data *p_sv;
+        char sys_id = name.name[0];
+        int svn = (name.name[1] - '0') * 10 + (name.name[2] - '0') - 1;
+        int n_obs, jj, sys_idx;
+
+        if (sys_id == ' ')
+            sys_id = 'G';
+        p_sys = &out->sys[sys_id & 31];
+        n_obs = p_sys->n_obs;
+        if (n_obs <= 0 || svn < 0)
+            continue; /* unknown system or SV ID, skip */
+
+        /* Ensure there is room for this satellite. */
+        if (svn + p_sys->sv.start >= p_sys->sv.end)
+        {
+            errmsg = rnx_load_grow_system(out, sys_id, svn);
+            if (errmsg)
+                goto fail;
+            p_sys = &out->sys[sys_id & 31];
+        }
+
+        /* Allocate the satellite data structure. */
+        p_sv = malloc(sizeof *p_sv + (n_obs - 1) * sizeof p_sv->start[0]);
+        if (!p_sv)
+        {
+            errmsg = "unable to allocate satellite data";
+            goto fail;
+        }
+        memcpy(p_sv->id, name.name, 4);
+        p_sv->obs_used = 0;
+        p_sv->obs_alloc = 0;
+        p_sv->when = NULL;
+        p_sv->when_used = 0;
+        p_sv->when_alloc = 0;
+        for (jj = 0; jj < n_obs; ++jj)
+            p_sv->start[jj] = -1;
+        out->sv[p_sys->sv.start + svn] = p_sv;
+
+        /* Parse epoch presence from the SATE chunk. */
+        sys_idx = srnx->sys_idx[sys_id & 31];
+        errmsg = srnx_load_epoch_presence(srnx, name,
+            sys_idx ? srnx->sys_info[sys_idx].codes_len : 0, p_sv);
+        if (errmsg)
+            goto fail;
+
+        if (p_sv->obs_used == 0)
+            continue;
+
+        /* Load observations for all signals. */
+        {
+            int *idx, *n_values;
+            int64_t **p_obs;
+            char **p_lli, **p_ssi;
+
+            idx = alloca(n_obs * sizeof *idx);
+            n_values = alloca(n_obs * sizeof *n_values);
+            p_obs = alloca(n_obs * sizeof *p_obs);
+            p_lli = alloca(n_obs * sizeof *p_lli);
+            p_ssi = alloca(n_obs * sizeof *p_ssi);
+
+            for (jj = 0; jj < n_obs; ++jj)
+            {
+                idx[jj] = jj;
+                n_values[jj] = 0;
+                p_obs[jj] = NULL;
+                p_lli[jj] = NULL;
+                p_ssi[jj] = NULL;
+            }
+
+            res = srnx_get_obs_by_index(srnx, name, n_obs, idx,
+                n_values, p_obs, p_lli, p_ssi);
+            if (res)
+            {
+                /* Some signals may not exist; that's OK for
+                 * SRNX_UNKNOWN_CODE.  Other errors are fatal.
+                 */
+                if (res != SRNX_UNKNOWN_CODE)
+                {
+                    for (jj = 0; jj < n_obs; ++jj)
+                    {
+                        free(p_obs[jj]);
+                        free(p_lli[jj]);
+                        free(p_ssi[jj]);
+                    }
+                    errmsg = srnx_strerror(res);
+                    goto fail;
+                }
+
+                /* Load signals one at a time so missing ones are skipped.
+                 * Free any buffers already allocated by the batch call
+                 * above, which returns on first error without cleanup.
+                 */
+                for (jj = 0; jj < n_obs; ++jj)
+                {
+                    free(p_obs[jj]);
+                    free(p_lli[jj]);
+                    free(p_ssi[jj]);
+                    p_obs[jj] = NULL;
+                    p_lli[jj] = NULL;
+                    p_ssi[jj] = NULL;
+                }
+
+                for (jj = 0; jj < n_obs; ++jj)
+                {
+                    int one_idx = jj, one_nv = 0;
+                    int64_t *one_obs = NULL;
+                    char *one_lli = NULL, *one_ssi = NULL;
+
+                    res = srnx_get_obs_by_index(srnx, name, 1, &one_idx,
+                        &one_nv, &one_obs, &one_lli, &one_ssi);
+                    if (res == 0)
+                    {
+                        n_values[jj] = one_nv;
+                        p_obs[jj] = one_obs;
+                        p_lli[jj] = one_lli;
+                        p_ssi[jj] = one_ssi;
+                    }
+                    /* else signal not present, leave as NULL */
+                }
+            }
+
+            /* Copy observations into the rinex_data allocator. */
+            p_sv->obs_alloc = p_sv->obs_used;
+            for (jj = 0; jj < n_obs; ++jj)
+            {
+                int pos, kk;
+
+                if (!p_obs[jj] || n_values[jj] <= 0)
+                {
+                    free(p_obs[jj]);
+                    free(p_lli[jj]);
+                    free(p_ssi[jj]);
+                    continue;
+                }
+
+                pos = rnx_load_realloc_obs(out, -1, 0, p_sv->obs_alloc);
+                if (pos < 0)
+                {
+                    for (; jj < n_obs; ++jj)
+                    {
+                        free(p_obs[jj]);
+                        free(p_lli[jj]);
+                        free(p_ssi[jj]);
+                    }
+                    errmsg = "unable to allocate observation block";
+                    goto fail;
+                }
+                p_sv->start[jj] = pos;
+
+                for (kk = 0; kk < n_values[jj] && kk < p_sv->obs_used; ++kk)
+                {
+                    out->obs[pos + kk] = p_obs[jj][kk];
+                    if (p_obs[jj][kk] == INT64_MIN)
+                    {
+                        out->lli[pos + kk] = ' ';
+                        out->ssi[pos + kk] = ' ';
+                    }
+                    else
+                    {
+                        out->lli[pos + kk] = p_lli[jj][kk];
+                        out->ssi[pos + kk] = p_ssi[jj][kk];
+                    }
+                }
+                /* Fill any remaining slots with missing markers. */
+                for (; kk < p_sv->obs_used; ++kk)
+                {
+                    out->obs[pos + kk] = INT64_MIN;
+                    out->lli[pos + kk] = ' ';
+                    out->ssi[pos + kk] = ' ';
+                }
+
+                free(p_obs[jj]);
+                free(p_lli[jj]);
+                free(p_ssi[jj]);
+            }
+        }
+    }
+    res = 0;
+
+    /* Clean up and return success. */
+    srnx_free(sat_names);
+    /* Close the SRNX reader (munmap and free). */
+    if (srnx->data)
+        munmap((void *)srnx->data, srnx->data_mapped);
+    {
+        uint64_t kk;
+        for (kk = 0; kk < 33; ++kk)
+            free(srnx->sys_info[kk].code);
+    }
+    free(srnx);
+    return NULL;
+
+fail:
+    rinex_load_error_line = srnx->error_line;
+    srnx_free(sat_names);
+    srnx_free(epochs);
+    if (srnx)
+    {
+        if (srnx->data)
+            munmap((void *)srnx->data, srnx->data_mapped);
+        {
+            uint64_t kk;
+            for (kk = 0; kk < 33; ++kk)
+                free(srnx->sys_info[kk].code);
+        }
+        free(srnx);
+    }
+    free_rinex_data(out);
+    return errmsg;
 }

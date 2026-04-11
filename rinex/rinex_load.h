@@ -171,4 +171,38 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out);
 /** free_rinex_data deallocates the contents of \a data. */
 void free_rinex_data(struct rinex_data *data);
 
+/** Loads a RINEX or SRNX file by name.
+ * Auto-detects format from file contents.
+ *
+ * \param[in] filename Path to the file.
+ * \param[out] out Receives the loaded data.
+ * \returns NULL on success, else an explanation of the failure.
+ */
+const char *rinex_load_file(const char *filename, struct rinex_data *out);
+
+/** When rinex_load_file() fails on an SRNX file, this holds the
+ * srnx.c source line number that generated the error, to aid debugging.
+ * Zero if the error did not originate in srnx.c.
+ */
+extern int rinex_load_error_line;
+
+/** Initializes constellation metadata from the header in \a out. */
+const char *rnx_data_init_cons(struct rinex_data *out);
+
+/** Grows the satellite array to accommodate satellite \a svn in system \a sys_id. */
+const char *rnx_load_grow_system(struct rinex_data *out, char sys_id, int svn);
+
+/** Allocates a new rinex_satellite_data for satellite \a svn in system \a sys_id. */
+const char *rnx_load_alloc_satellite(struct rinex_data *out, char sys_id, int svn);
+
+/** (Re)allocates an observation block of size \a req in the obs/lli/ssi arrays.
+ *
+ * \param[in,out] out Container for the block.
+ * \param[in] start Start offset of current block, or -1 for a new block.
+ * \param[in] len Length of current block, or 0 if \a start == -1.
+ * \param[in] req Number of elements to allocate.
+ * \returns Non-negative start index on success, -1 on failure.
+ */
+int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req);
+
 #endif /* !defined(RINEX_LOAD_H_6A681D3E_5B11_4202_B4C8_AF41A4871BB9) */

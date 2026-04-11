@@ -31,7 +31,6 @@ add_compile_definitions($<$<BOOL:${HAVE_AVX2}>:HAVE_AVX2>)
 add_library(rinex SHARED
     rinex/crx_parse.c
     rinex/parse_std.c
-    rinex/parse_neon.c
     $<$<BOOL:${HAVE_NEON}>:rinex/parse_neon.c>
     $<$<BOOL:${HAVE_AVX2}>:rinex/parse_avx2.c>
     rinex/rinex_buffer.c
@@ -40,6 +39,7 @@ add_library(rinex SHARED
     rinex/rinex_stdio.c
     rinex/rnx_parse.c
     rinex/rnx_priv.c
+    rinex/srnx.c
     rinex/transpose.c
     python/rinex_bridge.c)
 add_library(tap STATIC
@@ -57,8 +57,14 @@ target_link_libraries(rinex_n_obs rinex)
 add_executable(rinex_scan bin/rinex_scan.c bin/driver.c)
 target_link_libraries(rinex_scan rinex)
 
-add_executable(rnxcmp bin/rnxcmp.c bin/driver.c)
+add_executable(rnxcmp bin/rnxcmp.c)
 target_link_libraries(rnxcmp rinex)
+
+add_executable(rnx2srnx bin/rnx2srnx.c)
+target_link_libraries(rnx2srnx rinex)
+
+add_executable(srnx_scan bin/srnx_scan.c)
+target_link_libraries(srnx_scan rinex)
 
 include(InstallRequiredSystemLibraries)
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/COPYING")

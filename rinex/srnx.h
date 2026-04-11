@@ -4,6 +4,7 @@
  */
 
 #if !defined(SRNX_H_a2b6e4a7_3fda_4ba2_8ed1_67b906d55b2c)
+#define SRNX_H_a2b6e4a7_3fda_4ba2_8ed1_67b906d55b2c
 
 #include <stddef.h>
 
@@ -275,5 +276,15 @@ void srnx_convert_s64_to_double(
     int count,
     int scale
 );
+
+struct rinex_data;
+
+/** Loads an SRNX file into a rinex_data structure.
+ *
+ * \param[in] filename Path to the SRNX file.
+ * \param[out] out Receives the loaded data.
+ * \returns NULL on success, else an error description.
+ */
+const char *srnx_load(const char *filename, struct rinex_data *out);
 
 #endif /* !defined(SRNX_H_a2b6e4a7_3fda_4ba2_8ed1_67b906d55b2c) */
