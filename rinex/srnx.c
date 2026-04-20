@@ -6,6 +6,7 @@
 #include "srnx.h"
 #include "rinex/rnx_priv.h" /* rnx_page_size, rnx_find_header(), etc. */
 #include "rinex/rinex_load.h"
+#include "digest.h"
 #include "transpose.h"
 
 #include <errno.h>
@@ -228,12 +229,6 @@ static int64_t sleb128(const char **d)
 {
     uint64_t ul = uleb128(d);
     return (int64_t)(ul >> 1) ^ -(int64_t)(ul & 1);
-}
-
-/** Returns the length of digests for digest \a digest_id. */
-static int srnx_digest_length(int digest_id)
-{
-    return digest_id ? (1 << (digest_id & 7)) : 0;
 }
 
 /* Doc comment in srnx.h */
@@ -606,7 +601,7 @@ srnx_corrupt:
         goto srnx_corrupt;
     }
     (*p_srnx)->chunk_digest = ul;
-    chunk_digest_length = srnx_digest_length((*p_srnx)->chunk_digest);
+    chunk_digest_length = rnx_digest_length((*p_srnx)->chunk_digest);
 
     /* Read file digest identifer. */
     ul = uleb128(&rptr);
@@ -616,7 +611,7 @@ srnx_corrupt:
         goto srnx_corrupt;
     }
     file_digest = ul;
-    file_digest_length = srnx_digest_length(file_digest);
+    file_digest_length = rnx_digest_length(file_digest);
     if ((uint64_t)(rptr - (const char *)addr + file_digest_length
         + chunk_digest_length) > file_size)
     {
@@ -718,7 +713,7 @@ static int srnx_find_chunk(
     uint64_t payload_len;
     int chunk_digest_length;
 
-    chunk_digest_length = srnx_digest_length(srnx->chunk_digest);
+    chunk_digest_length = rnx_digest_length(srnx->chunk_digest);
     while (whence + 4 < srnx->data_size)
     {
         chunk = srnx->data + whence;
@@ -800,7 +795,7 @@ static int srnx_find_chunk_cached(
         if (p_next)
         {
             *p_next = chunk - srnx->data + *p_len
-                + srnx_digest_length(srnx->chunk_digest);
+                + rnx_digest_length(srnx->chunk_digest);
         }
         *p_payload = chunk;
         return 0;
@@ -1078,7 +1073,7 @@ int srnx_get_satellites(
 
     /* No satellite directory; must scan SATE chunks. */
     whence = srnx->next_offset;
-    chunk_digest_length = srnx_digest_length(srnx->chunk_digest);
+    chunk_digest_length = rnx_digest_length(srnx->chunk_digest);
     while (!srnx_find_chunk(srnx, "SATE", whence, &payload, &payload_len, NULL, &whence))
     {
         if (payload_len < 4)

@@ -30,6 +30,7 @@ add_compile_definitions($<$<BOOL:${HAVE_AVX2}>:HAVE_AVX2>)
 
 add_library(rinex SHARED
     rinex/crx_parse.c
+    rinex/digest.c
     rinex/parse_std.c
     $<$<BOOL:${HAVE_NEON}>:rinex/parse_neon.c>
     $<$<BOOL:${HAVE_AVX2}>:rinex/parse_avx2.c>
@@ -74,6 +75,11 @@ set(CPACK_SOURCE_GENERATOR "TGZ")
 include(CPack)
 
 enable_testing()
+
+add_executable(test_digest test/test_digest.c)
+target_link_libraries(test_digest rinex tap)
+add_test(NAME digest COMMAND test_digest)
+set_property(TEST digest PROPERTY LABELS function)
 
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)
