@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
+#include "rinex/digest.h"
 #include "rinex/rinex_load.h"
 
 #include <ctype.h>
@@ -10,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Digest id used for per-chunk digests; default is CRC32C (id=2). */
+static int g_chunk_digest_id = 2;
 
 /* ---- Growable write buffer ---- */
 
@@ -106,6 +110,34 @@ static int twos_comp_bw(int64_t val)
 
 /* ---- Write a chunk to a FILE ---- */
 
+/** Compute and write the trailing chunk digest for the current
+ * chunk-digest algorithm.  \a header is the FOURCC + ULEB128(len) bytes
+ * as written; \a payload is the chunk payload.  Returns the number of
+ * digest bytes written (0 if the current digest id is null).
+ */
+static size_t write_chunk_digest(FILE *fp,
+    const void *header, size_t header_len,
+    const void *payload, size_t payload_len)
+{
+    struct rnx_digest d;
+    unsigned char dig[64];
+    int dig_len;
+
+    dig_len = rnx_digest_length(g_chunk_digest_id);
+    if (dig_len <= 0)
+        return 0;
+    if (rnx_digest_init(&d, g_chunk_digest_id) < 0)
+    {
+        fprintf(stderr, "Unsupported chunk digest id=%d\n", g_chunk_digest_id);
+        exit(EXIT_FAILURE);
+    }
+    rnx_digest_update(&d, header, header_len);
+    rnx_digest_update(&d, payload, payload_len);
+    rnx_digest_final(&d, dig);
+    fwrite(dig, 1, (size_t)dig_len, fp);
+    return (size_t)dig_len;
+}
+
 static void write_chunk(FILE *fp, const char fourcc[4],
     const void *payload, size_t payload_len)
 {
@@ -115,6 +147,7 @@ static void write_chunk(FILE *fp, const char fourcc[4],
     wbuf_uleb128(&hdr, payload_len);
     fwrite(hdr.data, 1, hdr.used, fp);
     fwrite(payload, 1, payload_len, fp);
+    write_chunk_digest(fp, hdr.data, hdr.used, payload, payload_len);
     wbuf_free(&hdr);
 }
 
@@ -779,15 +812,15 @@ static size_t write_srnx_header(FILE *fp)
     memset(payload, 0, sizeof payload);
 
     /* Build payload into a fixed-size buffer.
-     * Fields: major=1, minor=0, chunk_digest=0, file_digest=0,
-     * sdir_offset=0 (patched later), padding.
+     * Fields: major=1, minor=0, chunk_digest=<g_chunk_digest_id>,
+     * file_digest=0, sdir_offset=0 (patched later), padding.
      */
     {
         struct wbuf tmp;
         wbuf_init(&tmp);
         wbuf_uleb128(&tmp, 1); /* major */
         wbuf_uleb128(&tmp, 0); /* minor */
-        wbuf_uleb128(&tmp, 0); /* chunk digest */
+        wbuf_uleb128(&tmp, (uint64_t)g_chunk_digest_id); /* chunk digest */
         wbuf_uleb128(&tmp, 0); /* file digest */
         /* sdir_offset starts here; leave as zeros for patching */
         sdir_field_offset = tmp.used; /* offset within payload */
@@ -800,13 +833,14 @@ static size_t write_srnx_header(FILE *fp)
         wbuf_free(&tmp);
     }
 
-    /* Write FOURCC + length + payload. */
+    /* Write FOURCC + length + payload + digest. */
     wbuf_init(&hdr);
     wbuf_append(&hdr, "SRNX", 4);
     wbuf_uleb128(&hdr, SRNX_PAYLOAD_SIZE);
     sdir_field_offset += hdr.used; /* now relative to file start */
     fwrite(hdr.data, 1, hdr.used, fp);
     fwrite(payload, 1, SRNX_PAYLOAD_SIZE, fp);
+    write_chunk_digest(fp, hdr.data, hdr.used, payload, SRNX_PAYLOAD_SIZE);
     wbuf_free(&hdr);
 
     return sdir_field_offset;
@@ -851,6 +885,7 @@ static void patch_srnx_sdir(FILE *fp, size_t sdir_field_offset,
     unsigned char buf[10];
     int len = 0;
     uint64_t val = sdir_offset;
+    int dig_len;
 
     /* Encode ULEB128 into buf. */
     do {
@@ -863,6 +898,36 @@ static void patch_srnx_sdir(FILE *fp, size_t sdir_field_offset,
 
     fseek(fp, sdir_field_offset, SEEK_SET);
     fwrite(buf, 1, len, fp);
+
+    /* Recompute the SRNX chunk digest over FOURCC + ULEB128(16) + payload.
+     * The SRNX chunk always starts at file offset 0, with a 5-byte header
+     * ("SRNX" + one-byte 0x10 for ULEB128(16)) followed by a 16-byte
+     * payload, so the digest bytes sit at file offset 21.
+     */
+    dig_len = rnx_digest_length(g_chunk_digest_id);
+    if (dig_len > 0)
+    {
+        unsigned char chunk_bytes[5 + SRNX_PAYLOAD_SIZE];
+        struct rnx_digest d;
+        unsigned char dig[64];
+
+        fflush(fp);
+        fseek(fp, 0, SEEK_SET);
+        if (fread(chunk_bytes, 1, sizeof chunk_bytes, fp) != sizeof chunk_bytes)
+        {
+            fprintf(stderr, "Short read while recomputing SRNX digest\n");
+            exit(EXIT_FAILURE);
+        }
+        if (rnx_digest_init(&d, g_chunk_digest_id) < 0)
+        {
+            fprintf(stderr, "Unsupported chunk digest id=%d\n", g_chunk_digest_id);
+            exit(EXIT_FAILURE);
+        }
+        rnx_digest_update(&d, chunk_bytes, sizeof chunk_bytes);
+        rnx_digest_final(&d, dig);
+        fseek(fp, (long)sizeof chunk_bytes, SEEK_SET);
+        fwrite(dig, 1, (size_t)dig_len, fp);
+    }
 }
 
 /* ---- Main converter ---- */
@@ -885,8 +950,8 @@ static void rnx2srnx(const char input_name[], const char output_name[])
         return;
     }
 
-    /* Open the output file. */
-    fp = fopen(output_name, "wb");
+    /* Open the output file (read+write so we can re-digest the SRNX chunk). */
+    fp = fopen(output_name, "wb+");
     if (!fp)
     {
         fprintf(stderr, "Unable to create %s\n", output_name);
