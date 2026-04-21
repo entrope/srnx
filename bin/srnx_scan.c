@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT-Modern-Variant
  */
 
+#include "rinex/digest.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -149,7 +151,25 @@ static void scan_file(const char *filename)
     int chunk_digest_id = (int)read_uleb128(&rptr);
     int file_digest_id = (int)read_uleb128(&rptr);
 
-    chunk_digest_length = chunk_digest_id ? (1 << (chunk_digest_id & 7)) : 0;
+    int chunk_dig_raw = rnx_digest_length(chunk_digest_id);
+    int file_dig_raw = rnx_digest_length(file_digest_id);
+    if (chunk_dig_raw < 0 || file_dig_raw < 0) {
+        fprintf(stderr, "Unsupported digest id in SRNX header "
+            "(chunk=%d, file=%d)\n", chunk_digest_id, file_digest_id);
+        munmap(addr, file_size);
+        return;
+    }
+    chunk_digest_length = chunk_dig_raw;
+
+    /* The file-level digest, if any, sits at the tail of the file and is
+     * not a chunk.  Use a separate walk limit that excludes it so we
+     * don't misinterpret its bytes as a chunk header. */
+    if ((size_t)file_dig_raw > file_size) {
+        fprintf(stderr, "File smaller than declared file digest\n");
+        munmap(addr, file_size);
+        return;
+    }
+    size_t walk_limit = file_size - (size_t)file_dig_raw;
 
     uint64_t sdir_offset_uleb = read_uleb128(&rptr);
     int64_t sdir_offset = sdir_offset_uleb ? (int64_t)sdir_offset_uleb : -1;
@@ -163,7 +183,7 @@ static void scan_file(const char *filename)
     const char *next_chunk_ptr = srnx_payload + payload_len + chunk_digest_length;
 
     /* --- Parse RHDR chunk --- */
-    if ((size_t)(next_chunk_ptr - data) + 4 < file_size
+    if ((size_t)(next_chunk_ptr - data) + 4 < walk_limit
         && memcmp(next_chunk_ptr, "RHDR", 4) == 0)
     {
         rptr = next_chunk_ptr + 4;
@@ -200,7 +220,7 @@ static void scan_file(const char *filename)
         const char *fourcc;
         uint64_t plen;
 
-        offset = find_next_chunk(data, file_size, offset,
+        offset = find_next_chunk(data, walk_limit, offset,
             &fourcc, &plen, chunk_digest_length);
         if (offset < 0) break;
 

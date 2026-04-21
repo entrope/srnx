@@ -277,6 +277,20 @@ void srnx_convert_s64_to_double(
     int scale
 );
 
+/** Verifies the file-level digest, if the SRNX file carries one.
+ *
+ * The digest is computed over all bytes from just after the SRNX chunk
+ * (including its own trailing chunk digest) through the end of the file
+ * excluding the file-level digest itself, then compared to the trailing
+ * bytes.
+ *
+ * \param[in] srnx SRNX reader object.
+ * \returns Zero on success (including when no file digest is present),
+ *   \a SRNX_BAD_DIGEST on mismatch, or another non-zero error code on
+ *   other failures.
+ */
+int srnx_verify_file_digest(struct srnx_reader *srnx);
+
 struct rinex_data;
 
 /** Loads an SRNX file into a rinex_data structure.

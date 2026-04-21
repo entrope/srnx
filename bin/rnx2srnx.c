@@ -7,15 +7,66 @@
 #include "rinex/rinex_load.h"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Digest id used for per-chunk digests; default is CRC32C (id=2). */
 static int g_chunk_digest_id = 2;
 
-/* ---- Growable write buffer ---- */
+/* Digest id used for the file-level digest; default is BLAKE3-256 (id=5). */
+static int g_file_digest_id = 5;
+
+/* ---- Memory-mapped output buffer ---- */
+
+struct mmbuf
+{
+    unsigned char *data;
+    size_t used;
+    size_t cap;
+};
+
+static void mm_require(struct mmbuf *mm, size_t need)
+{
+    if (mm->used + need > mm->cap)
+    {
+        fprintf(stderr, "Output exceeds mmap capacity "
+            "(used=%zu need=%zu cap=%zu)\n",
+            mm->used, need, mm->cap);
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void mm_append(struct mmbuf *mm, const void *src, size_t len)
+{
+    mm_require(mm, len);
+    memcpy(mm->data + mm->used, src, len);
+    mm->used += len;
+}
+
+static void mm_byte(struct mmbuf *mm, unsigned char ch)
+{
+    mm_require(mm, 1);
+    mm->data[mm->used++] = ch;
+}
+
+static void mm_uleb128(struct mmbuf *mm, uint64_t val)
+{
+    do {
+        unsigned char ch = val & 127;
+        val >>= 7;
+        if (val)
+            ch |= 128;
+        mm_byte(mm, ch);
+    } while (val);
+}
+
+/* ---- Growable scratch buffer (used for per-chunk payload assembly) ---- */
 
 struct wbuf
 {
@@ -108,47 +159,41 @@ static int twos_comp_bw(int64_t val)
     return v == 0 ? 1 : (65 - __builtin_clzll(v));
 }
 
-/* ---- Write a chunk to a FILE ---- */
+/* ---- Write a chunk to the mmap buffer ---- */
 
 /** Compute and write the trailing chunk digest for the current
- * chunk-digest algorithm.  \a header is the FOURCC + ULEB128(len) bytes
- * as written; \a payload is the chunk payload.  Returns the number of
- * digest bytes written (0 if the current digest id is null).
+ * chunk-digest algorithm.  The chunk's FOURCC + ULEB128(len) header
+ * and payload have already been appended to \a mm starting at
+ * \a chunk_start.  Returns the number of digest bytes written (0 if
+ * the current digest id is null).
  */
-static size_t write_chunk_digest(FILE *fp,
-    const void *header, size_t header_len,
-    const void *payload, size_t payload_len)
+static size_t write_chunk_digest(struct mmbuf *mm, size_t chunk_start)
 {
-    struct rnx_digest d;
-    unsigned char dig[64];
     int dig_len;
 
     dig_len = rnx_digest_length(g_chunk_digest_id);
     if (dig_len <= 0)
         return 0;
-    if (rnx_digest_init(&d, g_chunk_digest_id) < 0)
+    mm_require(mm, (size_t)dig_len);
+    if (rnx_digest(g_chunk_digest_id,
+            mm->data + chunk_start, mm->used - chunk_start,
+            mm->data + mm->used) < 0)
     {
         fprintf(stderr, "Unsupported chunk digest id=%d\n", g_chunk_digest_id);
         exit(EXIT_FAILURE);
     }
-    rnx_digest_update(&d, header, header_len);
-    rnx_digest_update(&d, payload, payload_len);
-    rnx_digest_final(&d, dig);
-    fwrite(dig, 1, (size_t)dig_len, fp);
+    mm->used += (size_t)dig_len;
     return (size_t)dig_len;
 }
 
-static void write_chunk(FILE *fp, const char fourcc[4],
+static void write_chunk(struct mmbuf *mm, const char fourcc[4],
     const void *payload, size_t payload_len)
 {
-    struct wbuf hdr;
-    wbuf_init(&hdr);
-    wbuf_append(&hdr, fourcc, 4);
-    wbuf_uleb128(&hdr, payload_len);
-    fwrite(hdr.data, 1, hdr.used, fp);
-    fwrite(payload, 1, payload_len, fp);
-    write_chunk_digest(fp, hdr.data, hdr.used, payload, payload_len);
-    wbuf_free(&hdr);
+    size_t chunk_start = mm->used;
+    mm_append(mm, fourcc, 4);
+    mm_uleb128(mm, payload_len);
+    mm_append(mm, payload, payload_len);
+    write_chunk_digest(mm, chunk_start);
 }
 
 /* ---- RLE-encode indicator array (LLI or SSI) ---- */
@@ -512,9 +557,9 @@ static void encode_packed_observations(struct wbuf *wb,
 /* ---- Write SOCD chunk ---- */
 
 /** Write a SOCD chunk for one (satellite, signal) pair.
- * Returns the file offset where the SOCD chunk starts.
+ * Returns the offset (within \a mm) where the SOCD chunk starts.
  */
-static size_t write_socd_chunk(FILE *fp, const struct rinex_data *data,
+static size_t write_socd_chunk(struct mmbuf *mm, const struct rinex_data *data,
     const struct rinex_satellite_data *sv, int sig_idx,
     const struct rinex_system_data *p_sys)
 {
@@ -607,15 +652,15 @@ static size_t write_socd_chunk(FILE *fp, const struct rinex_data *data,
     }
 
     /* Write the chunk. */
-    offset = ftell(fp);
-    write_chunk(fp, "SOCD", payload.data, payload.used);
+    offset = mm->used;
+    write_chunk(mm, "SOCD", payload.data, payload.used);
     wbuf_free(&payload);
     return offset;
 }
 
 /* ---- Write SATE chunk ---- */
 
-static size_t write_sate_chunk(FILE *fp,
+static size_t write_sate_chunk(struct mmbuf *mm,
     const struct rinex_satellite_data *sv,
     int n_obs, const size_t *socd_offsets, size_t sate_file_pos)
 {
@@ -651,8 +696,8 @@ static size_t write_sate_chunk(FILE *fp,
         prev_end = sv->when[ii].end;
     }
 
-    offset = ftell(fp);
-    write_chunk(fp, "SATE", payload.data, payload.used);
+    offset = mm->used;
+    write_chunk(mm, "SATE", payload.data, payload.used);
     wbuf_free(&payload);
     return offset;
 }
@@ -685,7 +730,7 @@ static int same_span(const struct rinex_epoch *prev,
     return cur->sec_e7 == expected_sec;
 }
 
-static size_t write_epoc_chunk(FILE *fp, const struct rinex_data *data)
+static size_t write_epoc_chunk(struct mmbuf *mm, const struct rinex_data *data)
 {
     struct wbuf payload;
     size_t offset;
@@ -699,8 +744,8 @@ static size_t write_epoc_chunk(FILE *fp, const struct rinex_data *data)
 
     if (data->epoch_used == 0)
     {
-        offset = ftell(fp);
-        write_chunk(fp, "EPOC", payload.data, payload.used);
+        offset = mm->used;
+        write_chunk(mm, "EPOC", payload.data, payload.used);
         wbuf_free(&payload);
         return offset;
     }
@@ -790,8 +835,8 @@ static size_t write_epoc_chunk(FILE *fp, const struct rinex_data *data)
         }
     }
 
-    offset = ftell(fp);
-    write_chunk(fp, "EPOC", payload.data, payload.used);
+    offset = mm->used;
+    write_chunk(mm, "EPOC", payload.data, payload.used);
     wbuf_free(&payload);
     return offset;
 }
@@ -800,49 +845,50 @@ static size_t write_epoc_chunk(FILE *fp, const struct rinex_data *data)
 
 #define SRNX_PAYLOAD_SIZE 16
 
-/** Writes the SRNX header chunk. Returns the file offset of the
- * SDIR-offset field within the payload (for later patching).
+/** Writes the SRNX header chunk. Returns the offset (within \a mm) of
+ * the SDIR-offset field for later patching.
  */
-static size_t write_srnx_header(FILE *fp)
+static size_t write_srnx_header(struct mmbuf *mm)
 {
     char payload[SRNX_PAYLOAD_SIZE];
-    struct wbuf hdr;
-    size_t sdir_field_offset;
+    struct wbuf tmp;
+    size_t chunk_start, sdir_field_offset;
+    char hdr[5];
+    int hdr_len;
 
     memset(payload, 0, sizeof payload);
 
     /* Build payload into a fixed-size buffer.
      * Fields: major=1, minor=0, chunk_digest=<g_chunk_digest_id>,
-     * file_digest=0, sdir_offset=0 (patched later), padding.
+     * file_digest=<g_file_digest_id>, sdir_offset=0 (patched later), padding.
      */
+    wbuf_init(&tmp);
+    wbuf_uleb128(&tmp, 1); /* major */
+    wbuf_uleb128(&tmp, 0); /* minor */
+    wbuf_uleb128(&tmp, (uint64_t)g_chunk_digest_id); /* chunk digest */
+    wbuf_uleb128(&tmp, (uint64_t)g_file_digest_id); /* file digest */
+    /* sdir_offset starts here; leave as zeros for patching */
+    if (tmp.used > SRNX_PAYLOAD_SIZE)
     {
-        struct wbuf tmp;
-        wbuf_init(&tmp);
-        wbuf_uleb128(&tmp, 1); /* major */
-        wbuf_uleb128(&tmp, 0); /* minor */
-        wbuf_uleb128(&tmp, (uint64_t)g_chunk_digest_id); /* chunk digest */
-        wbuf_uleb128(&tmp, 0); /* file digest */
-        /* sdir_offset starts here; leave as zeros for patching */
-        sdir_field_offset = tmp.used; /* offset within payload */
-        if (tmp.used > SRNX_PAYLOAD_SIZE)
-        {
-            fprintf(stderr, "SRNX payload overflow\n");
-            exit(EXIT_FAILURE);
-        }
-        memcpy(payload, tmp.data, tmp.used);
-        wbuf_free(&tmp);
+        fprintf(stderr, "SRNX payload overflow\n");
+        exit(EXIT_FAILURE);
     }
+    memcpy(payload, tmp.data, tmp.used);
 
-    /* Write FOURCC + length + payload + digest. */
-    wbuf_init(&hdr);
-    wbuf_append(&hdr, "SRNX", 4);
-    wbuf_uleb128(&hdr, SRNX_PAYLOAD_SIZE);
-    sdir_field_offset += hdr.used; /* now relative to file start */
-    fwrite(hdr.data, 1, hdr.used, fp);
-    fwrite(payload, 1, SRNX_PAYLOAD_SIZE, fp);
-    write_chunk_digest(fp, hdr.data, hdr.used, payload, SRNX_PAYLOAD_SIZE);
-    wbuf_free(&hdr);
+    /* Build FOURCC + ULEB128(16) header. */
+    memcpy(hdr, "SRNX", 4);
+    hdr[4] = (char)SRNX_PAYLOAD_SIZE; /* ULEB128(16) is a single byte 0x10 */
+    hdr_len = 5;
 
+    chunk_start = mm->used;
+    mm_append(mm, hdr, hdr_len);
+    /* sdir_field_offset points to where the sdir_offset ULEB128 will go:
+     * the byte immediately after major/minor/chunk_digest/file_digest. */
+    sdir_field_offset = chunk_start + hdr_len + tmp.used;
+    mm_append(mm, payload, SRNX_PAYLOAD_SIZE);
+    write_chunk_digest(mm, chunk_start);
+
+    wbuf_free(&tmp);
     return sdir_field_offset;
 }
 
@@ -854,7 +900,7 @@ struct sdir_entry
     size_t sate_offset;
 };
 
-static size_t write_sdir_chunk(FILE *fp, size_t epoc_offset,
+static size_t write_sdir_chunk(struct mmbuf *mm, size_t epoc_offset,
     const struct sdir_entry *entries, int n_entries)
 {
     struct wbuf payload;
@@ -871,15 +917,15 @@ static size_t write_sdir_chunk(FILE *fp, size_t epoc_offset,
         wbuf_uleb128(&payload, entries[ii].sate_offset);
     }
 
-    offset = ftell(fp);
-    write_chunk(fp, "SDIR", payload.data, payload.used);
+    offset = mm->used;
+    write_chunk(mm, "SDIR", payload.data, payload.used);
     wbuf_free(&payload);
     return offset;
 }
 
 /* ---- Patch SRNX header with SDIR offset ---- */
 
-static void patch_srnx_sdir(FILE *fp, size_t sdir_field_offset,
+static void patch_srnx_sdir(struct mmbuf *mm, size_t sdir_field_offset,
     size_t sdir_offset)
 {
     unsigned char buf[10];
@@ -896,8 +942,7 @@ static void patch_srnx_sdir(FILE *fp, size_t sdir_field_offset,
         buf[len++] = ch;
     } while (val);
 
-    fseek(fp, sdir_field_offset, SEEK_SET);
-    fwrite(buf, 1, len, fp);
+    memcpy(mm->data + sdir_field_offset, buf, len);
 
     /* Recompute the SRNX chunk digest over FOURCC + ULEB128(16) + payload.
      * The SRNX chunk always starts at file offset 0, with a 5-byte header
@@ -907,27 +952,39 @@ static void patch_srnx_sdir(FILE *fp, size_t sdir_field_offset,
     dig_len = rnx_digest_length(g_chunk_digest_id);
     if (dig_len > 0)
     {
-        unsigned char chunk_bytes[5 + SRNX_PAYLOAD_SIZE];
-        struct rnx_digest d;
-        unsigned char dig[64];
-
-        fflush(fp);
-        fseek(fp, 0, SEEK_SET);
-        if (fread(chunk_bytes, 1, sizeof chunk_bytes, fp) != sizeof chunk_bytes)
+        if (rnx_digest(g_chunk_digest_id,
+                mm->data, 5 + SRNX_PAYLOAD_SIZE,
+                mm->data + 5 + SRNX_PAYLOAD_SIZE) < 0)
         {
-            fprintf(stderr, "Short read while recomputing SRNX digest\n");
+            fprintf(stderr, "Unsupported chunk digest id=%d\n",
+                g_chunk_digest_id);
             exit(EXIT_FAILURE);
         }
-        if (rnx_digest_init(&d, g_chunk_digest_id) < 0)
-        {
-            fprintf(stderr, "Unsupported chunk digest id=%d\n", g_chunk_digest_id);
-            exit(EXIT_FAILURE);
-        }
-        rnx_digest_update(&d, chunk_bytes, sizeof chunk_bytes);
-        rnx_digest_final(&d, dig);
-        fseek(fp, (long)sizeof chunk_bytes, SEEK_SET);
-        fwrite(dig, 1, (size_t)dig_len, fp);
     }
+}
+
+/* ---- Append file-level digest ---- */
+
+/** Computes the file-level digest over bytes [start_offset, mm->used)
+ * and appends the digest to \a mm.  Does nothing if the file-digest id
+ * is null.
+ */
+static void append_file_digest(struct mmbuf *mm, size_t start_offset)
+{
+    int dig_len;
+
+    dig_len = rnx_digest_length(g_file_digest_id);
+    if (dig_len <= 0)
+        return;
+    mm_require(mm, (size_t)dig_len);
+    if (rnx_digest(g_file_digest_id,
+            mm->data + start_offset, mm->used - start_offset,
+            mm->data + mm->used) < 0)
+    {
+        fprintf(stderr, "Unsupported file digest id=%d\n", g_file_digest_id);
+        exit(EXIT_FAILURE);
+    }
+    mm->used += (size_t)dig_len;
 }
 
 /* ---- Main converter ---- */
@@ -935,7 +992,10 @@ static void patch_srnx_sdir(FILE *fp, size_t sdir_field_offset,
 static void rnx2srnx(const char input_name[], const char output_name[])
 {
     struct rinex_data data;
-    FILE *fp;
+    struct mmbuf mm = { NULL, 0, 0 };
+    struct stat st;
+    size_t cap;
+    int fd = -1;
     const char *err;
     size_t sdir_field_offset, epoc_offset, sdir_offset;
     struct sdir_entry *sdir_entries = NULL;
@@ -950,23 +1010,54 @@ static void rnx2srnx(const char input_name[], const char output_name[])
         return;
     }
 
-    /* Open the output file (read+write so we can re-digest the SRNX chunk). */
-    fp = fopen(output_name, "wb+");
-    if (!fp)
+    /* Pick an upper bound for the output size.  SRNX is compressed
+     * relative to RINEX, so input_size + a small margin is a safe
+     * ceiling for all realistic observation files.
+     */
+    if (stat(input_name, &st) != 0)
+    {
+        fprintf(stderr, "Unable to stat %s\n", input_name);
+        free_rinex_data(&data);
+        return;
+    }
+    cap = (size_t)st.st_size + 65536;
+    if (cap < 262144)
+        cap = 262144;
+
+    /* Open and size the output file. */
+    fd = open(output_name, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
     {
         fprintf(stderr, "Unable to create %s\n", output_name);
         free_rinex_data(&data);
         return;
     }
+    if (ftruncate(fd, (off_t)cap) != 0)
+    {
+        fprintf(stderr, "ftruncate failed on %s\n", output_name);
+        close(fd);
+        free_rinex_data(&data);
+        return;
+    }
+    mm.data = mmap(NULL, cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mm.data == MAP_FAILED)
+    {
+        fprintf(stderr, "mmap failed on %s\n", output_name);
+        close(fd);
+        free_rinex_data(&data);
+        return;
+    }
+    mm.cap = cap;
+    mm.used = 0;
 
     /* 1. Write SRNX header (with placeholder SDIR offset). */
-    sdir_field_offset = write_srnx_header(fp);
+    sdir_field_offset = write_srnx_header(&mm);
 
     /* 2. Write RHDR chunk. */
-    write_chunk(fp, "RHDR", data.file_header, data.file_header_len);
+    write_chunk(&mm, "RHDR", data.file_header, data.file_header_len);
 
     /* 3. Write EPOC chunk. */
-    epoc_offset = write_epoc_chunk(fp, &data);
+    epoc_offset = write_epoc_chunk(&mm, &data);
 
     /* 4. For each satellite, write SOCD chunks then SATE chunk. */
     for (sys_idx = 0; sys_idx < 32; ++sys_idx)
@@ -996,11 +1087,11 @@ static void rnx2srnx(const char input_name[], const char output_name[])
                 goto done;
             }
             for (jj = 0; jj < n_obs; ++jj)
-                socd_offsets[jj] = write_socd_chunk(fp, &data, p_sv, jj, p_sys);
+                socd_offsets[jj] = write_socd_chunk(&mm, &data, p_sv, jj, p_sys);
 
             /* Write SATE chunk. */
-            sate_pos = ftell(fp);
-            sate_offset = write_sate_chunk(fp, p_sv, n_obs,
+            sate_pos = mm.used;
+            sate_offset = write_sate_chunk(&mm, p_sv, n_obs,
                 socd_offsets, sate_pos);
             free(socd_offsets);
 
@@ -1023,13 +1114,34 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     }
 
     /* 5. Write SDIR chunk. */
-    sdir_offset = write_sdir_chunk(fp, epoc_offset, sdir_entries, n_sdir);
+    sdir_offset = write_sdir_chunk(&mm, epoc_offset, sdir_entries, n_sdir);
 
     /* 6. Patch SRNX header with SDIR offset. */
-    patch_srnx_sdir(fp, sdir_field_offset, sdir_offset);
+    patch_srnx_sdir(&mm, sdir_field_offset, sdir_offset);
+
+    /* 7. Compute and append the file-level digest, if enabled.
+     * The digest covers all bytes after the SRNX chunk (header + payload
+     * + the SRNX chunk's own trailing digest).
+     */
+    {
+        int chunk_dig = rnx_digest_length(g_chunk_digest_id);
+        size_t srnx_end = 5 + SRNX_PAYLOAD_SIZE
+            + (chunk_dig > 0 ? (size_t)chunk_dig : 0);
+        append_file_digest(&mm, srnx_end);
+    }
 
 done:
-    fclose(fp);
+    if (mm.data && mm.data != MAP_FAILED)
+    {
+        msync(mm.data, mm.used, MS_SYNC);
+        munmap(mm.data, mm.cap);
+    }
+    if (fd >= 0)
+    {
+        if (ftruncate(fd, (off_t)mm.used) != 0)
+            fprintf(stderr, "ftruncate-to-used failed on %s\n", output_name);
+        close(fd);
+    }
     free(sdir_entries);
     free_rinex_data(&data);
 }
@@ -1052,20 +1164,76 @@ static int is_rinex_file_name(const char name[], size_t len)
     return 0;
 }
 
+static int parse_digest_flag(const char *arg, const char *prefix, int *out)
+{
+    size_t plen = strlen(prefix);
+    const char *val;
+    char *endp;
+    long id;
+
+    if (strncmp(arg, prefix, plen) != 0)
+        return 0;
+    val = arg + plen;
+    id = strtol(val, &endp, 10);
+    if (*val == '\0' || *endp != '\0' || id < 0 || id > INT_MAX)
+    {
+        fprintf(stderr, "Invalid digest id in '%s'\n", arg);
+        exit(EXIT_FAILURE);
+    }
+    if (rnx_digest_length((int)id) < 0)
+    {
+        fprintf(stderr, "Unsupported digest id %ld\n", id);
+        exit(EXIT_FAILURE);
+    }
+    *out = (int)id;
+    return 1;
+}
+
 int main(int argc, char *argv[])
 {
-    const char *input_name;
+    const char *input_name = NULL;
+    const char *output_arg = NULL;
     char *output_name;
     size_t name_len;
+    int ii;
 
-    if (argc < 2)
+    for (ii = 1; ii < argc; ++ii)
     {
-        fprintf(stderr, "Usage: %s <input.rnx> [output.srnx]\n", argv[0]);
+        const char *arg = argv[ii];
+        if (parse_digest_flag(arg, "--chunk-digest=", &g_chunk_digest_id))
+            continue;
+        if (parse_digest_flag(arg, "--file-digest=", &g_file_digest_id))
+            continue;
+        if (arg[0] == '-' && arg[1] == '-' && arg[2] == '\0')
+        {
+            /* "--" ends option parsing. */
+            ii++;
+            break;
+        }
+        if (arg[0] == '-' && arg[1] != '\0')
+        {
+            fprintf(stderr, "Unknown option '%s'\n", arg);
+            return EXIT_FAILURE;
+        }
+        if (!input_name)
+            input_name = arg;
+        else if (!output_arg)
+            output_arg = arg;
+        else
+        {
+            fprintf(stderr, "Too many positional arguments\n");
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (!input_name)
+    {
+        fprintf(stderr, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>] "
+            "<input.rnx> [output.srnx]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    input_name = argv[1];
-    output_name = (argc > 2) ? strdup(argv[2]) : NULL;
+    output_name = output_arg ? strdup(output_arg) : NULL;
     name_len = strlen(input_name);
     if (is_rinex_file_name(input_name, name_len))
     {

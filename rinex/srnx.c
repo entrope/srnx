@@ -75,6 +75,9 @@ struct srnx_reader
     /** Enumerated identifier for chunk digests. */
     int chunk_digest;
 
+    /** Enumerated identifier for the file-level digest. */
+    int file_digest;
+
     /** Offset of the RHDR chunk. */
     int rhdr_offset;
 
@@ -251,7 +254,6 @@ static int verify_chunk_digest(
     uint64_t payload_len
 )
 {
-    struct rnx_digest dg;
     unsigned char computed[64];
     const char *rptr;
     uint64_t header_len;
@@ -269,16 +271,70 @@ static int verify_chunk_digest(
     (void)uleb128(&rptr);
     header_len = (uint64_t)(rptr - chunk_start);
 
-    if (rnx_digest_init(&dg, srnx->chunk_digest) < 0)
+    if (rnx_digest(srnx->chunk_digest, chunk_start,
+            (size_t)(header_len + payload_len), computed) < 0)
         return SRNX_CORRUPT;
-
-    rnx_digest_update(&dg, chunk_start, (size_t)(header_len + payload_len));
-    rnx_digest_final(&dg, computed);
 
     if (memcmp(computed, chunk_start + header_len + payload_len,
             (size_t)digest_len))
         return SRNX_BAD_DIGEST;
 
+    return 0;
+}
+
+/* Doc comment in srnx.h. */
+int srnx_verify_file_digest(struct srnx_reader *srnx)
+{
+    unsigned char computed[64];
+    int file_dig_len, chunk_dig_len;
+    size_t digest_in_start, digest_in_end, digest_at;
+
+    if (!srnx || !srnx->data)
+        return SRNX_BAD_STATE;
+
+    if (srnx->file_digest == 0)
+        return 0;
+
+    file_dig_len = rnx_digest_length(srnx->file_digest);
+    if (file_dig_len <= 0 || (size_t)file_dig_len > sizeof computed)
+    {
+        srnx->error_line = __LINE__;
+        return SRNX_CORRUPT;
+    }
+
+    chunk_dig_len = rnx_digest_length(srnx->chunk_digest);
+    if (chunk_dig_len < 0)
+        chunk_dig_len = 0;
+
+    /* Digest input begins at RHDR (just after the SRNX chunk + its digest)
+     * and extends through the last byte of the final chunk's trailing
+     * digest.  srnx_open sets data_size = file_size - file_digest_length
+     * - chunk_digest_length, so the final chunk's trailing digest occupies
+     * bytes [data_size, data_size + chunk_digest_length).  The file digest
+     * follows immediately after.
+     */
+    digest_in_start = (size_t)srnx->rhdr_offset;
+    digest_in_end = srnx->data_size + (size_t)chunk_dig_len;
+    digest_at = digest_in_end;
+
+    if (digest_in_end < digest_in_start)
+    {
+        srnx->error_line = __LINE__;
+        return SRNX_CORRUPT;
+    }
+
+    if (rnx_digest(srnx->file_digest, srnx->data + digest_in_start,
+            digest_in_end - digest_in_start, computed) < 0)
+    {
+        srnx->error_line = __LINE__;
+        return SRNX_CORRUPT;
+    }
+
+    if (memcmp(computed, srnx->data + digest_at, (size_t)file_dig_len))
+    {
+        srnx->error_line = __LINE__;
+        return SRNX_BAD_DIGEST;
+    }
     return 0;
 }
 
@@ -662,6 +718,7 @@ srnx_corrupt:
         goto srnx_corrupt;
     }
     file_digest = ul;
+    (*p_srnx)->file_digest = (int)file_digest;
     file_digest_length = rnx_digest_length(file_digest);
     if ((uint64_t)(rptr - (const char *)addr + file_digest_length
         + chunk_digest_length) > file_size)

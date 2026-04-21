@@ -28,6 +28,9 @@ try_compile(HAVE_AVX2
     COMPILE_DEFINITIONS -DHAVE_AVX2)
 add_compile_definitions($<$<BOOL:${HAVE_AVX2}>:HAVE_AVX2>)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(BLAKE3 REQUIRED libblake3)
+
 add_library(rinex SHARED
     rinex/crx_parse.c
     rinex/digest.c
@@ -43,6 +46,10 @@ add_library(rinex SHARED
     rinex/srnx.c
     rinex/transpose.c
     python/rinex_bridge.c)
+target_include_directories(rinex PRIVATE ${BLAKE3_INCLUDE_DIRS})
+target_link_directories(rinex PRIVATE ${BLAKE3_LIBRARY_DIRS})
+target_link_libraries(rinex PRIVATE ${BLAKE3_LIBRARIES})
+target_compile_definitions(rinex PRIVATE HAVE_BLAKE3)
 add_library(tap STATIC
     libtap/tap.c)
 
@@ -78,8 +85,24 @@ enable_testing()
 
 add_executable(test_digest test/test_digest.c)
 target_link_libraries(test_digest rinex tap)
+target_include_directories(test_digest PRIVATE ${BLAKE3_INCLUDE_DIRS})
 add_test(NAME digest COMMAND test_digest)
 set_property(TEST digest PROPERTY LABELS function)
+
+add_executable(bench_digest test/bench_digest.c)
+target_link_libraries(bench_digest rinex)
+target_include_directories(bench_digest PRIVATE ${BLAKE3_INCLUDE_DIRS})
+add_test(NAME digest-bench COMMAND bench_digest)
+set_property(TEST digest-bench PROPERTY LABELS benchmark)
+
+add_executable(test_srnx_digest test/test_srnx_digest.c)
+target_link_libraries(test_srnx_digest rinex tap)
+target_compile_definitions(test_srnx_digest PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/test/test_02.rnx")
+add_dependencies(test_srnx_digest rnx2srnx)
+add_test(NAME srnx_digest COMMAND test_srnx_digest)
+set_property(TEST srnx_digest PROPERTY LABELS function)
 
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)

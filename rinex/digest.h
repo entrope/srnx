@@ -13,25 +13,6 @@
 extern "C" {
 #endif
 
-/** Incremental digest state.
- *
- * \a state holds digest-specific context.  Callers treat it as opaque;
- * the union is sized to accommodate the largest supported digest state.
- */
-struct rnx_digest
-{
-    int id;
-    int len;
-    union {
-        uint32_t crc32c;
-        /* Reserved for libsodium hash states added in a later step.
-         * crypto_hash_sha256_state is ~104 bytes,
-         * crypto_generichash_state is ~384 bytes.
-         */
-        unsigned char reserved[512];
-    } state;
-};
-
 /** Returns the output length in bytes for digest identifier \a id.
  *
  * \returns Zero for id 0 (null digest), a positive size for supported
@@ -39,17 +20,15 @@ struct rnx_digest
  */
 int rnx_digest_length(int id);
 
-/** Initializes \a d for digest identifier \a id.
+/** Computes the digest of \a len bytes at \a buf using algorithm \a id
+ * and writes the result to \a out.
+ *
+ * \a out must have room for rnx_digest_length(\a id) bytes.  For
+ * id == 0 (null digest) no bytes are written.
  *
  * \returns 0 on success, -1 if \a id is unsupported by the build.
  */
-int rnx_digest_init(struct rnx_digest *d, int id);
-
-/** Feeds \a len bytes from \a buf into digest \a d. */
-void rnx_digest_update(struct rnx_digest *d, const void *buf, size_t len);
-
-/** Finalizes \a d and writes \a d->len bytes to \a out. */
-void rnx_digest_final(struct rnx_digest *d, unsigned char out[]);
+int rnx_digest(int id, const void *buf, size_t len, unsigned char *out);
 
 #if defined(__cplusplus)
 }

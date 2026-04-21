@@ -354,11 +354,8 @@ Recommended encoding procedure for each (satellite, observation code):
 | :--------: | :----: | :---------- |
 | 0 | 0 | Null digest |
 | 2 | 4 | CRC32C |
-| 6 | 32 | SHA-256 |
-| 7 | 64 | SHA3-512 |
-| 20 | 16 | BLAKE2b, 16-byte output |
-| 21 | 32 | BLAKE2b, 32-byte output |
-| 22 | 64 | BLAKE2b, 64-byte output |
+| 4 | 16 | BLAKE3, 16-byte output |
+| 5 | 32 | BLAKE3, 32-byte output |
 
 Other digest values are reserved for future definition.
 However, excluding the null digest, the four LSBs of the identifier are
@@ -385,34 +382,29 @@ The CRC32C digest is a 32-bit cyclic redundancy checksum using the
 generator polynomial given by G. Castagnoli et al.
 A formal definition is given in [RFC 3720](https://tools.ietf.org/html/rfc3720), section 12.1.
 
-### <a name="digest-6"></a>Digest 6: SHA-256
+### <a name="digest-4"></a>Digest 4: BLAKE3, 16-byte output
 
-The SHA-256 digest is a cryptographic message digest defined by the
-United States government.
-A formal definition is given in [FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final).
+### <a name="digest-5"></a>Digest 5: BLAKE3, 32-byte output
 
-### <a name="digest-7"></a>Digest 7: SHA3-512
+The BLAKE3 digest is a cryptographic message digest defined by the
+cryptographic research community.  It is based on the SHA-3
+permutation with a keyless Merkle–Tree structure, providing high
+throughput and parallelism.
+A reference implementation and formal definition are available at
+[github.com/BLAKE3-team/BLAKE3-specs](https://github.com/BLAKE3-team/BLAKE3-specs).
+The `libblake3` library provides a convenient implementation.
 
-The SHA-256 digest is a cryptographic message digest defined by the
-United States government.
-A formal definition is given in [FIPS 202](https://csrc.nist.gov/pubs/fips/202/final).
-
-
-### <a name="digest-20"></a>Digest 20: BLAKE2b, 16-byte output
-
-### <a name="digest-21"></a>Digest 21: BLAKE2b, 32-byte output
-
-### <a name="digest-22"></a>Digest 22: BLAKE2b, 64-byte output
-
-The BLAKE2b digest is a cryptographic message digest defined by the
-cryptographic research community with different tradeoffs than the SHA
-family of digests.
-The [libsodium](https://doc.libsodium.org/) library provides a convenient
-implementation of these variants of BLAKE2b.
-A formal definition is given in [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.txt).
+The 16-byte and 32-byte output variants are produced by truncating
+the first 16 or 32 bytes of the BLAKE3 output keying material
+(i.e., `blake3_hasher_finalize` with output length 16 or 32).
+BLAKE3 supports arbitrary output lengths via its extendable output
+function (XOF) design, so these are not simple prefix truncations of
+a fixed-length hash — they are well-defined outputs of the algorithm.
 
 ### Rationale for digest choices
 
-The selection of defined digest functions was a balance between a
-variety of lengths, robustness to random errors, and the availability
-and efficiency of off-the-shelf implementations.
+The selection of defined digest functions balances lightweight
+integrity checking (CRC32C) with cryptographic security (BLAKE3).
+BLAKE3 provides significantly higher throughput than SHA-2/SHA-3
+while maintaining strong security properties, and its XOF design
+cleanly supports both 16-byte and 32-byte output lengths.
