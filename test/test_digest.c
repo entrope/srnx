@@ -27,8 +27,10 @@ static uint32_t crc32c_of(const void *data, size_t len)
 int main(void)
 {
     struct rnx_digest d;
+    unsigned char buffer[32];
+    size_t ii;
 
-    plan(16);
+    plan(20);
 
     /* rnx_digest_length: supported ids. */
     ok(rnx_digest_length(0) == 0, "length id=0 is 0");
@@ -54,6 +56,22 @@ int main(void)
         "CRC32C of empty string is 0");
     ok(crc32c_of("123456789", 9) == 0xE3069283,
         "CRC32C of \"123456789\" is 0xE3069283");
+    for (ii = 0; ii < sizeof buffer; ii++)
+        buffer[ii] = 0;
+    ok(crc32c_of(buffer, sizeof buffer) == 0x8a9136aa,
+        "CRC32C of 32 zero bytes is 0x8a9136aa");
+    for (ii = 0; ii < sizeof buffer; ii++)
+        buffer[ii] = 0xFF;
+    ok(crc32c_of(buffer, sizeof buffer) == 0x62a8ab43,
+        "CRC32C of 32 bytes of 0xFF is 0x62a8ab43");
+    for (ii = 0; ii < sizeof buffer; ii++)
+        buffer[ii] = (unsigned char)ii;
+    ok(crc32c_of(buffer, sizeof buffer) == 0x46dd794e,
+        "CRC32C of 32 bytes incrementing 0..0x1f is 0x46dd794e");
+    for (ii = 0; ii < sizeof buffer; ii++)
+        buffer[ii] = (unsigned char)(0x1f - ii);
+    ok(crc32c_of(buffer, sizeof buffer) == 0x113fdb5c,
+        "CRC32C of 32 bytes decrementing 0x1f..0 is 0x113fdb5c");
 
     /* Split update should match a single-shot update. */
     {
