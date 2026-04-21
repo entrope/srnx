@@ -164,7 +164,8 @@ enum srnx_errno
     SRNX_UNKNOWN_CODE = -7,
     SRNX_UNKNOWN_SATELLITE = -8,
     SRNX_END_OF_DATA = -9,
-    SRNX_IMPLEMENTATION_ERROR = -10
+    SRNX_IMPLEMENTATION_ERROR = -10,
+    SRNX_BAD_DIGEST = -11
 };
 
 /* Doc comment in srnx.h. */
@@ -203,6 +204,8 @@ const char *srnx_strerror(int err)
         return "End of observation data";
     case SRNX_IMPLEMENTATION_ERROR:
         return "Implementation error";
+    case SRNX_BAD_DIGEST:
+        return "Chunk digest did not match stored value";
     }
 
     return "Unknown SRNX error code";
@@ -229,6 +232,54 @@ static int64_t sleb128(const char **d)
 {
     uint64_t ul = uleb128(d);
     return (int64_t)(ul >> 1) ^ -(int64_t)(ul & 1);
+}
+
+/** Verifies the per-chunk digest of the chunk at \a chunk_start.
+ *
+ * \a chunk_start must point to the FOURCC.  \a payload_len is the
+ * value that was encoded in the chunk header (as ULEB128 immediately
+ * following the FOURCC).  The digest bytes, if any, are expected
+ * immediately after the payload.
+ *
+ * \returns 0 if the digest matches (or the reader's digest id is 0);
+ *   \a SRNX_BAD_DIGEST on mismatch; \a SRNX_CORRUPT if the reader's
+ *   digest id is not supported by this build.
+ */
+static int verify_chunk_digest(
+    const struct srnx_reader *srnx,
+    const char *chunk_start,
+    uint64_t payload_len
+)
+{
+    struct rnx_digest dg;
+    unsigned char computed[64];
+    const char *rptr;
+    uint64_t header_len;
+    int digest_len;
+
+    if (srnx->chunk_digest == 0)
+        return 0;
+
+    digest_len = rnx_digest_length(srnx->chunk_digest);
+    if (digest_len <= 0 || (size_t)digest_len > sizeof computed)
+        return SRNX_CORRUPT;
+
+    /* Skip the FOURCC + ULEB128 payload_len bytes. */
+    rptr = chunk_start + 4;
+    (void)uleb128(&rptr);
+    header_len = (uint64_t)(rptr - chunk_start);
+
+    if (rnx_digest_init(&dg, srnx->chunk_digest) < 0)
+        return SRNX_CORRUPT;
+
+    rnx_digest_update(&dg, chunk_start, (size_t)(header_len + payload_len));
+    rnx_digest_final(&dg, computed);
+
+    if (memcmp(computed, chunk_start + header_len + payload_len,
+            (size_t)digest_len))
+        return SRNX_BAD_DIGEST;
+
+    return 0;
 }
 
 /* Doc comment in srnx.h */
@@ -620,6 +671,16 @@ srnx_corrupt:
     }
     file_size -= file_digest_length + chunk_digest_length;
 
+    /* Verify the SRNX chunk's own digest before trusting any payload
+     * field we have not yet consumed (notably the SDIR offset).
+     */
+    res = verify_chunk_digest(*p_srnx, addr, payload_len);
+    if (res)
+    {
+        (*p_srnx)->error_line = __LINE__;
+        goto late_failure;
+    }
+
     /* Read the SDIR chunk offset (or 0 if absent). */
     if ((uint64_t)(rptr - payload_start) < payload_len)
     {
@@ -650,6 +711,14 @@ srnx_corrupt:
     {
         (*p_srnx)->error_line = __LINE__;
         goto srnx_corrupt;
+    }
+
+    /* Verify the RHDR chunk digest. */
+    res = verify_chunk_digest(*p_srnx, chunk, payload_len);
+    if (res)
+    {
+        (*p_srnx)->error_line = __LINE__;
+        goto late_failure;
     }
 
     /* Parse the RINEX header. */
@@ -725,6 +794,9 @@ static int srnx_find_chunk(
         }
         if (!memcmp(chunk, fourcc, 4))
         {
+            int err = verify_chunk_digest(srnx, chunk, payload_len);
+            if (err)
+                return err;
             *p_payload = rptr;
             *p_len = payload_len;
             if (p_start)
@@ -790,6 +862,12 @@ static int srnx_find_chunk_cached(
         if ((chunk - srnx->data) + *p_len > srnx->data_size)
         {
             return SRNX_CORRUPT;
+        }
+
+        {
+            int err = verify_chunk_digest(srnx, srnx->data + *p_start, *p_len);
+            if (err)
+                return err;
         }
 
         if (p_next)
@@ -1132,6 +1210,9 @@ static int64_t srnx_find_sate(
         {
             return SRNX_CORRUPT;
         }
+        res = verify_chunk_digest(srnx, srnx->data + srnx->sdir_offset, u64);
+        if (res)
+            return res;
         payload = rptr + u64;
 
         /* Skip the EPOC and EVTF chunk offsets. */
@@ -1160,6 +1241,11 @@ static int64_t srnx_find_sate(
                 {
                     return SRNX_CORRUPT;
                 }
+
+                /* Verify the SATE chunk digest. */
+                res = verify_chunk_digest(srnx, srnx->data + u64, next);
+                if (res)
+                    return res;
 
                 /* We found our winner. */
                 return u64;
@@ -1261,12 +1347,23 @@ static int64_t srnx_find_socd(
             return SRNX_CORRUPT;
         }
         payload += 4;
-        if ((uleb128(&payload) < 8)
+        u64 = uleb128(&payload);
+        if ((u64 < 8)
             || memcmp(payload, name.name, sizeof name)
             || memcmp(payload + 4, code.name, sizeof code))
         {
             srnx->error_line = __LINE__;
             return SRNX_CORRUPT;
+        }
+
+        /* Verify the SOCD chunk digest. */
+        {
+            int err = verify_chunk_digest(srnx, srnx->data + s64, u64);
+            if (err)
+            {
+                srnx->error_line = __LINE__;
+                return err;
+            }
         }
 
         return s64;
