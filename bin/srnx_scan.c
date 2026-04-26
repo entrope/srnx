@@ -88,10 +88,13 @@ static void print_first_span(uint64_t total_epochs, const char *payload)
     uint64_t time_e11 = read_uleb128(&rptr);
 
     int yyyy;
-    if (date < 1000000) {
+    if (date < 1000000)
+    {
         int yy = (int)(date / 10000);
         yyyy = (yy >= 80) ? 1900 + yy : 2000 + yy;
-    } else {
+    }
+    else
+    {
         yyyy = (int)(date / 10000);
     }
 
@@ -112,10 +115,29 @@ static void print_first_span(uint64_t total_epochs, const char *payload)
         yyyy, mm, dd, hh, mi, ss, frac);
 }
 
-static void scan_file(const char *filename)
+typedef struct {
+    uint64_t scale_value;
+    uint64_t count;
+} scale_entry;
+
+typedef struct {
+    int         epoc_count;
+    int         sdir_count;
+    int         evtf_count;
+    int         sate_count;
+    uint64_t    socd_count;
+    uint64_t    total_epochs;
+    scale_entry scales[256];
+    int         n_scales;
+    uint64_t    delta_order_count[8];
+    uint64_t    block_header_count[256];
+} file_stats_t;
+
+static void scan_file(const char *filename, file_stats_t *stats)
 {
     int fd = open(filename, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         fprintf(stderr, "Cannot open %s: %s\n", filename, strerror(errno));
         return;
     }
@@ -126,7 +148,8 @@ static void scan_file(const char *filename)
 
     void *addr = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (addr == MAP_FAILED) {
+    if (addr == MAP_FAILED)
+    {
         fprintf(stderr, "mmap failed: %s\n", strerror(errno));
         return;
     }
@@ -137,7 +160,8 @@ static void scan_file(const char *filename)
     int chunk_digest_length = 0;
 
     /* --- Parse SRNX header chunk --- */
-    if (file_size < 5 || memcmp(data, "SRNX", 4) != 0) {
+    if (file_size < 5 || memcmp(data, "SRNX", 4) != 0)
+    {
         fprintf(stderr, "Not an SRNX file\n");
         munmap(addr, file_size);
         return;
@@ -153,7 +177,8 @@ static void scan_file(const char *filename)
 
     int chunk_dig_raw = rnx_digest_length(chunk_digest_id);
     int file_dig_raw = rnx_digest_length(file_digest_id);
-    if (chunk_dig_raw < 0 || file_dig_raw < 0) {
+    if (chunk_dig_raw < 0 || file_dig_raw < 0)
+    {
         fprintf(stderr, "Unsupported digest id in SRNX header "
             "(chunk=%d, file=%d)\n", chunk_digest_id, file_digest_id);
         munmap(addr, file_size);
@@ -164,7 +189,8 @@ static void scan_file(const char *filename)
     /* The file-level digest, if any, sits at the tail of the file and is
      * not a chunk.  Use a separate walk limit that excludes it so we
      * don't misinterpret its bytes as a chunk header. */
-    if ((size_t)file_dig_raw > file_size) {
+    if ((size_t)file_dig_raw > file_size)
+    {
         fprintf(stderr, "File smaller than declared file digest\n");
         munmap(addr, file_size);
         return;
@@ -197,26 +223,10 @@ static void scan_file(const char *filename)
     }
 
     /* --- Iterate remaining chunks --- */
-    int epoc_count = 0;
-    int sdir_count = 0;
-    int evtf_count = 0;
-    int sate_count = 0;
-    uint64_t epoc_total_epochs = 0;
-    uint64_t socd_count = 0;
-
-    /* SOCD statistics */
-    typedef struct {
-        uint64_t scale_value;
-        uint64_t count;
-    } scale_entry;
-    scale_entry scales[256];
-    int n_scales = 0;
-
-    uint64_t delta_order_count[8] = {0};
-    uint64_t block_header_count[256] = {0};
 
     int64_t offset = next_chunk_ptr - data;
-    while (1) {
+    while (1)
+    {
         const char *fourcc;
         uint64_t plen;
 
@@ -230,23 +240,16 @@ static void scan_file(const char *filename)
         int64_t chunk_end = (int64_t)(rptr - data) + (int64_t)plen
                           + chunk_digest_length;
 
-        /* Check for unrecognized FOURCC. */
-        int known = (memcmp(fourcc, "EPOC", 4) == 0
-            || memcmp(fourcc, "SDIR", 4) == 0
-            || memcmp(fourcc, "EVTF", 4) == 0
-            || memcmp(fourcc, "SATE", 4) == 0
-            || memcmp(fourcc, "SOCD", 4) == 0);
-        if (!known) {
-            printf("  WARNING: unrecognized chunk %.4s at offset %" PRId64
-                " (%" PRIu64 " bytes)\n", fourcc, offset, plen);
+        /* What is the FOURCC? */
+        if (memcmp(fourcc, "EPOC", 4) == 0)
+        {
+            stats->epoc_count++;
+            stats->total_epochs = read_uleb128(&rptr);
+            print_first_span(stats->total_epochs, rptr);
         }
-
-        if (memcmp(fourcc, "EPOC", 4) == 0) {
-            epoc_count++;
-            epoc_total_epochs = read_uleb128(&rptr);
-            print_first_span(epoc_total_epochs, rptr);
-        } else if (memcmp(fourcc, "SDIR", 4) == 0) {
-            sdir_count++;
+        else if (memcmp(fourcc, "SDIR", 4) == 0)
+        {
+            stats->sdir_count++;
             const char *payload_start = rptr;
             const char *payload_end = payload_start + plen;
 
@@ -257,7 +260,8 @@ static void scan_file(const char *filename)
             /* Count satellite entries: each is 3-char ID + ULEB128 offset. */
             const char *sp = rptr;
             int n_sat = 0;
-            while (sp + 3 <= payload_end) {
+            while (sp + 3 <= payload_end)
+            {
                 sp += 3; /* 3-char satellite ID */
                 if (sp >= payload_end) break;
                 read_uleb128(&sp); /* file offset */
@@ -265,12 +269,14 @@ static void scan_file(const char *filename)
             }
             printf("SDIR: %" PRId64 " offset, %d satellites\n",
                 offset, n_sat);
-        } else if (memcmp(fourcc, "EVTF", 4) == 0) {
-            evtf_count++;
-        } else if (memcmp(fourcc, "SATE", 4) == 0) {
-            sate_count++;
-        } else if (memcmp(fourcc, "SOCD", 4) == 0) {
-            socd_count++;
+        }
+        else if (memcmp(fourcc, "EVTF", 4) == 0)
+            stats->evtf_count++;
+        else if (memcmp(fourcc, "SATE", 4) == 0)
+            stats->sate_count++;
+        else if (memcmp(fourcc, "SOCD", 4) == 0)
+        {
+            stats->socd_count++;
 
             /* Skip observation name (8 bytes). */
             rptr += 8;
@@ -292,21 +298,24 @@ static void scan_file(const char *filename)
             int has_scale = (int)(schema & 8);
             uint64_t scale_value = has_scale ? read_uleb128(&rptr) : 1000;
 
-            delta_order_count[delta_order]++;
+            stats->delta_order_count[delta_order]++;
 
             /* Record scale factor. */
             int found = 0;
-            for (int i = 0; i < n_scales; i++) {
-                if (scales[i].scale_value == scale_value) {
-                    scales[i].count++;
+            for (int i = 0; i < stats->n_scales; i++)
+            {
+                if (stats->scales[i].scale_value == scale_value)
+                {
+                    stats->scales[i].count++;
                     found = 1;
                     break;
                 }
             }
-            if (!found && n_scales < 256) {
-                scales[n_scales].scale_value = scale_value;
-                scales[n_scales].count = 1;
-                n_scales++;
+            if (!found && stats->n_scales < 256)
+            {
+                stats->scales[stats->n_scales].scale_value = scale_value;
+                stats->scales[stats->n_scales].count = 1;
+                stats->n_scales++;
             }
 
             /* Skip initial SLEB128 state values (ZigZag, variable length). */
@@ -314,22 +323,30 @@ static void scan_file(const char *filename)
                 read_sleb128(&rptr);
 
             /* Walk blocks until packed_len consumed. */
-            while (rptr < packed_end) {
+            while (rptr < packed_end)
+            {
                 uint8_t header = *(const uint8_t *)rptr++;
-                block_header_count[header]++;
+                stats->block_header_count[header]++;
 
-                if (header < 0x80) {
+                if (header < 0x80)
+                {
                     /* Bit matrix: (k+1) rows × (m/8) bytes each.
                      * bits per value = (header & 0x1F) + 1
                      * m = 8 << (header >> 5) */
                     rptr += ((header & 0x1F) + 1) * (1 << (header >> 5));
-                } else if (header == 0xFD) {
+                }
+                else if (header == 0xFD)
+                {
                     /* Absent run: ULEB128 count-minus-1. */
                     read_uleb128(&rptr);
-                } else if (header == 0xFE) {
+                }
+                else if (header == 0xFE)
+                {
                     /* Zero run: ULEB128 count-minus-1. */
                     read_uleb128(&rptr);
-                } else if (header == 0xFF) {
+                }
+                else if (header == 0xFF)
+                {
                     /* SLEB128 run: ULEB128 count-minus-1, then values. */
                     uint64_t run_count = read_uleb128(&rptr);
                     for (uint64_t j = 0; j <= run_count; j++)
@@ -338,77 +355,146 @@ static void scan_file(const char *filename)
                 /* 0x80–0xFD: reserved, no payload to skip. */
             }
 
-            if (rptr != packed_end) {
+            if (rptr != packed_end)
+            {
                 printf("  WARNING: SOCD block walk overshot by %td bytes\n",
                     rptr - packed_end);
             }
+        }
+        else
+        {
+            printf("  WARNING: unrecognized chunk %.4s at offset %" PRId64
+                " (%" PRIu64 " bytes)\n", fourcc, offset, plen);
         }
 
         offset = chunk_end;
     }
 
-    printf("\nChunk summary:\n");
-    printf("  EPOC: %d\n", epoc_count);
-    printf("  SDIR: %d\n", sdir_count);
-    printf("  EVTF: %d\n", evtf_count);
-    printf("  SATE: %d\n", sate_count);
-    printf("  SOCD: %" PRIu64 "\n", socd_count);
+    munmap(addr, file_size);
+}
 
-    if (n_scales > 0) {
-        printf("\nScale factors (observation unit multiples):\n");
-        for (int i = 0; i < n_scales; i++) {
-            uint64_t sv = scales[i].scale_value;
-            printf("  %.6g: %" PRIu64 " SOCDs\n",
-                (double)sv / 1000.0, scales[i].count);
+static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
+{
+    agg->epoc_count   += stats->epoc_count;
+    agg->sdir_count   += stats->sdir_count;
+    agg->evtf_count   += stats->evtf_count;
+    agg->sate_count   += stats->sate_count;
+    agg->socd_count   += stats->socd_count;
+    agg->total_epochs += stats->total_epochs;
+
+    for (int i = 0; i < stats->n_scales; i++)
+    {
+        uint64_t sv = stats->scales[i].scale_value;
+        uint64_t c  = stats->scales[i].count;
+        int found = 0;
+        for (int j = 0; j < agg->n_scales; j++)
+        {
+            if (agg->scales[j].scale_value == sv)
+            {
+                agg->scales[j].count += c;
+                found = 1;
+                break;
+            }
+        }
+        if (!found && agg->n_scales < 256)
+        {
+            agg->scales[agg->n_scales].scale_value = sv;
+            agg->scales[agg->n_scales].count = c;
+            agg->n_scales++;
         }
     }
 
-    if (epoc_total_epochs > 0) {
+    for (int i = 0; i < 8; i++)
+        agg->delta_order_count[i] += stats->delta_order_count[i];
+    for (int i = 0; i < 256; i++)
+        agg->block_header_count[i] += stats->block_header_count[i];
+}
+
+static void print_block_header(int i, uint64_t count)
+{
+    if (i < 0x80)
+    {
+        int m = 8 << (i >> 5);
+        int bits = (i & 0x1F) + 1;
+        printf("  0x%02X (%d\xc3\x97%d-bit matrix): %" PRIu64 "\n",
+            i, m, bits, count);
+    }
+    else if (i == 0xFD)
+        printf("  0xFD (absent run): %" PRIu64 "\n", count);
+    else if (i == 0xFE)
+        printf("  0xFE (zero run): %" PRIu64 "\n", count);
+    else if (i == 0xFF)
+        printf("  0xFF (SLEB128 run): %" PRIu64 "\n", count);
+    else
+        printf("  0x%02X (reserved): %" PRIu64 "\n", i, count);
+}
+
+static void print_summary(const file_stats_t *agg)
+{
+    printf("Chunk totals:\n");
+    printf("  EPOC: %d\n", agg->epoc_count);
+    printf("  SDIR: %d\n", agg->sdir_count);
+    printf("  EVTF: %d\n", agg->evtf_count);
+    printf("  SATE: %d\n", agg->sate_count);
+    printf("  SOCD: %" PRIu64 "\n", agg->socd_count);
+
+    printf("\nTotal epochs: %" PRIu64 "\n", agg->total_epochs);
+
+    if (agg->n_scales > 0)
+    {
+        printf("\nScale factors (observation unit multiples):\n");
+        for (int i = 0; i < agg->n_scales; i++)
+        {
+            uint64_t sv = agg->scales[i].scale_value;
+            printf("  %.6g: %" PRIu64 " SOCDs\n",
+                (double)sv / 1000.0, agg->scales[i].count);
+        }
+    }
+
+    if (agg->total_epochs > 0)
+    {
         printf("\nDelta orders:\n");
-        for (int i = 0; i < 8; i++) {
-            if (delta_order_count[i] > 0)
+        for (int i = 0; i < 8; i++)
+        {
+            if (agg->delta_order_count[i] > 0)
+            {
                 printf("  order %d: %" PRIu64 " SOCDs\n",
-                    i, delta_order_count[i]);
+                    i, agg->delta_order_count[i]);
+            }
         }
 
         printf("\nBlock headers:\n");
-        for (int i = 0; i < 256; i++) {
-            if (block_header_count[i] > 0) {
-                if (i < 0x80) {
-                    int m = 8 << (i >> 5);
-                    int bits = (i & 0x1F) + 1;
-                    printf("  0x%02X (%d×%d-bit matrix): %" PRIu64 "\n",
-                        i, m, bits, block_header_count[i]);
-                } else if (i == 0xFD) {
-                    printf("  0xFD (absent run): %" PRIu64 "\n",
-                        block_header_count[i]);
-                } else if (i == 0xFE) {
-                    printf("  0xFE (zero run): %" PRIu64 "\n",
-                        block_header_count[i]);
-                } else if (i == 0xFF) {
-                    printf("  0xFF (SLEB128 run): %" PRIu64 "\n",
-                        block_header_count[i]);
-                } else {
-                    printf("  0x%02X (reserved): %" PRIu64 "\n",
-                        i, block_header_count[i]);
-                }
+        for (int i = 0; i < 256; i++)
+        {
+            if (agg->block_header_count[i] > 0)
+            {
+                print_block_header(i, agg->block_header_count[i]);
             }
         }
     }
-
-    munmap(addr, file_size);
 }
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: srnx_scan <file.srnx>\n");
+    file_stats_t agg, stats;
+    int files_processed = 0;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: srnx_scan <file.srnx>...\n");
         return EXIT_FAILURE;
     }
-    for (int i = 1; i < argc; i++) {
-        if (argc > 2)
-            printf("=== %s ===\n", argv[i]);
-        scan_file(argv[i]);
+
+    memset(&agg, 0, sizeof agg);
+    for (int i = 1; i < argc; i++)
+    {
+        memset(&stats, 0, sizeof stats);
+        scan_file(argv[i], &stats);
+        agg_merge(&agg, &stats);
+        files_processed++;
     }
+
+    printf("\n=== Aggregate Summary (%d files) ===\n\n", files_processed);
+    print_summary(&agg);
     return EXIT_SUCCESS;
 }
