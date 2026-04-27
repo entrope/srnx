@@ -900,8 +900,38 @@ struct sdir_entry
     size_t sate_offset;
 };
 
+/* ---- Write EVTF chunks ---- */
+
+/** Write one EVTF chunk per special event.
+ * Returns the offset of the first EVTF chunk, or 0 if there are none.
+ */
+static size_t write_evtf_chunks(struct mmbuf *mm, const struct rinex_data *data)
+{
+    size_t first_offset = 0;
+    int ii;
+
+    for (ii = 0; ii < data->event_used; ++ii)
+    {
+        struct wbuf payload;
+        size_t offset;
+
+        wbuf_init(&payload);
+        wbuf_uleb128(&payload, (uint64_t)data->event[ii].epoch_index);
+        wbuf_append(&payload, data->event[ii].text, data->event[ii].text_len);
+
+        offset = mm->used;
+        write_chunk(mm, "EVTF", payload.data, payload.used);
+        wbuf_free(&payload);
+
+        if (ii == 0)
+            first_offset = offset;
+    }
+
+    return first_offset;
+}
+
 static size_t write_sdir_chunk(struct mmbuf *mm, size_t epoc_offset,
-    const struct sdir_entry *entries, int n_entries)
+    size_t evtf_offset, const struct sdir_entry *entries, int n_entries)
 {
     struct wbuf payload;
     size_t offset;
@@ -909,7 +939,7 @@ static size_t write_sdir_chunk(struct mmbuf *mm, size_t epoc_offset,
 
     wbuf_init(&payload);
     wbuf_uleb128(&payload, epoc_offset);
-    wbuf_uleb128(&payload, 0); /* no EVTF chunks */
+    wbuf_uleb128(&payload, evtf_offset);
 
     for (ii = 0; ii < n_entries; ++ii)
     {
@@ -997,7 +1027,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     size_t cap;
     int fd = -1;
     const char *err;
-    size_t sdir_field_offset, epoc_offset, sdir_offset;
+    size_t sdir_field_offset, epoc_offset, evtf_offset, sdir_offset;
     struct sdir_entry *sdir_entries = NULL;
     int n_sdir = 0, sdir_alloc = 0;
     int sys_idx;
@@ -1059,7 +1089,10 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     /* 3. Write EPOC chunk. */
     epoc_offset = write_epoc_chunk(&mm, &data);
 
-    /* 4. For each satellite, write SOCD chunks then SATE chunk. */
+    /* 4. Write EVTF chunks (special event records), if any. */
+    evtf_offset = write_evtf_chunks(&mm, &data);
+
+    /* 5. For each satellite, write SOCD chunks then SATE chunk. */
     for (sys_idx = 0; sys_idx < 32; ++sys_idx)
     {
         struct rinex_system_data *p_sys = &data.sys[sys_idx];
@@ -1113,13 +1146,14 @@ static void rnx2srnx(const char input_name[], const char output_name[])
         }
     }
 
-    /* 5. Write SDIR chunk. */
-    sdir_offset = write_sdir_chunk(&mm, epoc_offset, sdir_entries, n_sdir);
+    /* 6. Write SDIR chunk. */
+    sdir_offset = write_sdir_chunk(&mm, epoc_offset, evtf_offset,
+        sdir_entries, n_sdir);
 
-    /* 6. Patch SRNX header with SDIR offset. */
+    /* 7. Patch SRNX header with SDIR offset. */
     patch_srnx_sdir(&mm, sdir_field_offset, sdir_offset);
 
-    /* 7. Compute and append the file-level digest, if enabled.
+    /* 8. Compute and append the file-level digest, if enabled.
      * The digest covers all bytes after the SRNX chunk (header + payload
      * + the SRNX chunk's own trailing digest).
      */

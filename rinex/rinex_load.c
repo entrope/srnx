@@ -18,6 +18,11 @@ void free_rinex_data(struct rinex_data *data)
 {
     int ii, n_sv = 0;
 
+    /* Deallocate special event records. */
+    for (ii = 0; ii < data->event_used; ++ii)
+        free(data->event[ii].text);
+    free(data->event);
+
     /* Deallocate inner pointers. */
     free((char *)data->file_header);
     free(data->epoch);
@@ -43,6 +48,9 @@ void free_rinex_data(struct rinex_data *data)
     data->obs = NULL;
     data->ssi = NULL;
     data->lli = NULL;
+    data->event = NULL;
+    data->event_used = 0;
+    data->event_alloc = 0;
 }
 
 const char *rnx_data_init_cons_v2(struct rinex_data *out)
@@ -585,9 +593,42 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
     /* Scan the records in the file. */
     while ((res = p->read(p)) > 0)
     {
-        /* TODO: Record special event epochs. */
         if (p->epoch.flag != '0' && p->epoch.flag != '1' && p->epoch.flag != '6')
+        {
+            if (p->epoch.flag >= '2' && p->epoch.flag <= '5')
+            {
+                struct rinex_event *ev;
+                char *text;
+
+                if (out->event_used >= out->event_alloc)
+                {
+                    struct rinex_event *new_ev;
+                    out->event_alloc = out->event_alloc ? out->event_alloc * 2 : 8;
+                    new_ev = realloc(out->event,
+                        out->event_alloc * sizeof *out->event);
+                    if (!new_ev)
+                    {
+                        errmsg = "unable to grow event array";
+                        goto fail_errmsg;
+                    }
+                    out->event = new_ev;
+                }
+
+                text = malloc(p->buffer_len);
+                if (!text)
+                {
+                    errmsg = "unable to allocate event text";
+                    goto fail_errmsg;
+                }
+                memcpy(text, p->buffer, p->buffer_len);
+
+                ev = &out->event[out->event_used++];
+                ev->epoch_index = out->epoch_used;
+                ev->text_len = p->buffer_len;
+                ev->text = text;
+            }
             continue;
+        }
 
         /* Copy epoch timestamp, first growing out->epoch if needed. */
         if (out->epoch_used == out->epoch_alloc)

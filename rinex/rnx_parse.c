@@ -187,8 +187,8 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
         }
         else
         {
-            p->parse_ofs = res;
             err = rnx_copy_text(p, res);
+            p->parse_ofs = res;
         }
 
         /* and we are done */

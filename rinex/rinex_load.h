@@ -98,6 +98,19 @@ struct rinex_satellite_data
     int start[1];
 };
 
+/** rinex_event holds one special event record (epoch flag 2-5). */
+struct rinex_event
+{
+    /** epoch_index is the number of observation epochs before this event. */
+    int epoch_index;
+
+    /** text_len is the number of bytes in \a text. */
+    int text_len;
+
+    /** text holds the raw event lines (epoch header + data), '\n'-terminated. */
+    char *text;
+};
+
 /** rinex_data is an in-memory, columnar representation of the data
  * from a RINEX file.
  */
@@ -157,6 +170,15 @@ struct rinex_data
 
     /** sys identifies the range of satellites used by constellations. */
     struct rinex_system_data sys[32];
+
+    /** event holds special event records encountered during loading. */
+    struct rinex_event *event;
+
+    /** event_used is the number of entries in \a event. */
+    int event_used;
+
+    /** event_alloc is the capacity of \a event. */
+    int event_alloc;
 };
 
 /** rinex_load loads an entire RINEX file into memory.
