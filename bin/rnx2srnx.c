@@ -845,6 +845,31 @@ static size_t write_epoc_chunk(struct mmbuf *mm, const struct rinex_data *data)
 
 #define SRNX_PAYLOAD_SIZE 16
 
+/** Return a pointer to the start of the RINEX header within \a hdr.
+ *
+ * CRX (Hatanaka-compressed) files prepend CRINEX-specific lines
+ * before the RINEX VERSION / TYPE line.  The SRNX RHDR chunk must
+ * contain only the RINEX portion of the header (per the spec), so
+ * callers skip any such preamble.
+ */
+static const char *rinex_header_start(const char *hdr, int len)
+{
+    const char *p;
+
+    if (len >= 80 && !memcmp(hdr + 60, "RINEX VERSION / TYPE", 20))
+        return hdr;
+
+    for (p = memchr(hdr, '\n', (size_t)len); p != NULL; )
+    {
+        ++p;
+        if (hdr + len - p >= 80 && !memcmp(p + 60, "RINEX VERSION / TYPE", 20))
+            return p;
+        p = memchr(p, '\n', (size_t)(hdr + len - p));
+    }
+
+    return hdr;
+}
+
 /** Writes the SRNX header chunk. Returns the offset (within \a mm) of
  * the SDIR-offset field for later patching.
  */
@@ -1083,8 +1108,14 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     /* 1. Write SRNX header (with placeholder SDIR offset). */
     sdir_field_offset = write_srnx_header(&mm);
 
-    /* 2. Write RHDR chunk. */
-    write_chunk(&mm, "RHDR", data.file_header, data.file_header_len);
+    /* 2. Write RHDR chunk (RINEX header only; skip any CRX preamble). */
+    {
+        const char *rhdr_start = rinex_header_start(data.file_header,
+                                                     data.file_header_len);
+        int rhdr_len = data.file_header_len
+                       - (int)(rhdr_start - data.file_header);
+        write_chunk(&mm, "RHDR", rhdr_start, (size_t)rhdr_len);
+    }
 
     /* 3. Write EPOC chunk. */
     epoc_offset = write_epoc_chunk(&mm, &data);

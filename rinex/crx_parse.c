@@ -392,6 +392,57 @@ static rinex_error_t crx_v2_read_obs(
     return RINEX_SUCCESS;
 }
 
+/** crx_v2_parse_clock parses the CRX v2 receiver clock offset line.
+ *
+ * CRX v2 uses the same N&VALUE / delta format as individual observations:
+ * an empty line means no clock offset (zero), N&VALUE is an arc init at
+ * order N, and a bare integer is a differential update.
+ */
+static void crx_v2_parse_clock(struct crx_v23_parser *crx, const char *s)
+{
+    struct rinex_parser *p_ = &crx->base.base;
+    struct obs_state *clk = &crx->clk_state;
+    int64_t val;
+    int cur_order;
+
+    if (*s == '\n' || *s == '\0' || *s == ' ')
+    {
+        clk->used = 0;
+        p_->epoch.clock_offset = 0;
+    }
+    else if (s[1] == '&')
+    {
+        clk->order = s[0] - '0';
+        crx_parse_int64(&val, s + 2);
+        clk->value = val;
+        clk->used = 1;
+        p_->epoch.clock_offset = val * 1000;
+    }
+    else
+    {
+        crx_parse_int64(&val, s);
+        cur_order = clk->used - 1;
+        if (cur_order < clk->order)
+        {
+            clk->diff[cur_order] = (int32_t)val;
+            clk->used = cur_order + 2;
+        }
+        else
+        {
+            clk->diff[clk->order - 1] = (int32_t)val;
+        }
+        switch (clk->used)
+        {
+        case 6: clk->diff[3] += clk->diff[4]; /* fall through */
+        case 5: clk->diff[2] += clk->diff[3]; /* fall through */
+        case 4: clk->diff[1] += clk->diff[2]; /* fall through */
+        case 3: clk->diff[0] += clk->diff[1]; /* fall through */
+        case 2: clk->value += clk->diff[0];   /* fall through */
+        case 1: p_->epoch.clock_offset = clk->value * 1000;
+        }
+    }
+}
+
 /** crx_read_v2 reads an observation data record from \a p_. */
 static rinex_error_t crx_read_v2(struct rinex_parser *p_)
 {

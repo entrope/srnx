@@ -129,6 +129,7 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
             p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
+        p->base.epoch.clock_offset *= 1000;
     }
     else
     {
@@ -368,8 +369,10 @@ static const char *rnx_open_v2(struct rnx_v234_parser *p, int hdr_ofs)
     p->base.n_obs[' ' & 31] = value;
     if (obs_type == 'M')
     {
+        p->base.n_obs['C' & 31] = value;
         p->base.n_obs['E' & 31] = value;
         p->base.n_obs['G' & 31] = value;
+        p->base.n_obs['J' & 31] = value;
         p->base.n_obs['R' & 31] = value;
         p->base.n_obs['S' & 31] = value;
     }

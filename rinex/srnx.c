@@ -390,9 +390,11 @@ static int srnx_parse_rhdr_v2(
     {
         srnx->sys_idx[' ' & 31] = 1;
         srnx->sys_idx['G' & 31] = 1;
+        srnx->sys_idx['C' & 31] = 1;
         srnx->sys_idx['R' & 31] = 1;
         srnx->sys_idx['S' & 31] = 1;
         srnx->sys_idx['E' & 31] = 1;
+        srnx->sys_idx['J' & 31] = 1;
     }
     else if (obs_type == ' ')
     {
@@ -1100,10 +1102,13 @@ int srnx_next_special_event(
     const char *payload;
     int res;
 
-    /* Search for the next EVTF chunk. */
+    /* Search for the next EVTF chunk.  evtf_offset tracks where to
+     * resume: negative = unknown, 0 = absent, positive = chunk start
+     * before first call, and next-chunk start on subsequent calls.
+     */
     if (*p_event)
     {
-        res = srnx_find_chunk(srnx, "EVTF", *p_event - srnx->data,
+        res = srnx_find_chunk(srnx, "EVTF", (uint64_t)srnx->evtf_offset,
             &payload, &payload_len, NULL, &whence);
     }
     else
@@ -1117,6 +1122,11 @@ int srnx_next_special_event(
         return res;
     }
 
+    /* Advance the cached offset to the start of the next chunk so that
+     * the next call searches forward from the right place.
+     */
+    srnx->evtf_offset = (int64_t)whence;
+
     /* Decode the epoch index at the start of the chunk. */
     *p_event = payload;
     *epoch_index = uleb128(p_event);
@@ -1126,9 +1136,8 @@ int srnx_next_special_event(
         return SRNX_CORRUPT;
     }
 
-    /* Report the event length (remaining payload). */
+    /* Report the event text (remaining payload after epoch_index). */
     *event_len = payload_len - (*p_event - payload);
-    *p_event = srnx->data + whence;
     return 0;
 }
 
