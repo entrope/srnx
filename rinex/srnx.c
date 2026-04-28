@@ -28,10 +28,11 @@
 # define O_CLOEXEC 0
 #endif
 
-#define MATRIX_8X  0x00
-#define MATRIX_16X 0x20
-#define MATRIX_32X 0x40
-#define MATRIX_64X 0x60
+#define MATRIX_8X   0x00
+#define MATRIX_16X  0x20
+#define MATRIX_32X  0x40
+#define MATRIX_64X  0x60
+#define MATRIX_128X 0x80
 #define BLOCK_ABSENT  0xFD
 #define BLOCK_ZERO    0xFE
 #define BLOCK_SLEB128 0xFF
@@ -1926,16 +1927,16 @@ static int decode_observations(
         }
 
         /* It looks like a transposed bit matrix.
-         * Top two bits select width: 00=16, 01=32, 10=64.
-         * Bottom six bits are k; bits per value = k+1 (1..64).
+         * Top three bits select width: 000=8, 001=16, 010=32, 011=64, 100=128.
+         * Bottom five bits are k; bits per value = k+1 (1..32).
          * Cast to unsigned char before shifting to avoid sign-extension UB. */
-        if ((unsigned char)ch >> 5 > 3)
+        if ((unsigned char)ch >> 5 > 4)   /* 0xA0-0xFC are reserved */
         {
             p_socd->parent->error_line = __LINE__;
             res = SRNX_CORRUPT;
             goto out;
         }
-        count = 8 << ((unsigned char)ch >> 5); /* number of output values: 8, 16, 32, or 64 */
+        count = 8 << ((unsigned char)ch >> 5); /* output values: 8, 16, 32, 64, or 128 */
         bits = ((unsigned char)ch & 31) + 1; /* bits per output value: 1..32 */
 
         /* Do we have enough data? */
@@ -1954,7 +1955,21 @@ static int decode_observations(
         }
 
         /* Transpose the matrix. */
-        if (count == 64)
+        if (count == 128)
+        {
+            /* Split a 128-wide matrix into four 32-wide transposes.
+             * Each row is 16 bytes; extract four 4-byte slices per row. */
+            char tmp[4 * 32];
+            int rr, qq;
+
+            for (qq = 0; qq < 4; qq++)
+            {
+                for (rr = 0; rr < bits; rr++)
+                    memcpy(tmp + rr * 4, data + rr * 16 + qq * 4, 4);
+                transpose(p_socd->obs + idx + qq * 32, tmp, bits, 32);
+            }
+        }
+        else if (count == 64)
         {
             /* Split a 64-wide matrix into two 32-wide transposes. */
             char tmp[4 * 32];

@@ -268,78 +268,184 @@ static int64_t *compute_delta_matrix(const int64_t *scaled, int count)
     return d;
 }
 
-/* ---- Delta order selection ---- */
-
-/** Estimate encoded size (bytes) of a sequence of steady-state delta values
- * using the same greedy block selection as the encoder.
+/* ---- DP-based block selection ----
+ *
+ * The greedy "lowest cost-per-value" selector is suboptimal whenever a
+ * candidate block size's max_bw exceeds the max_bw of just the leading
+ * half — most visibly at m=128 on noisy (e.g. 30 s-decimated) data, where
+ * a single high-magnitude delta forces 64 unrelated values to pay the
+ * outlier's bit-width.  We replace it with a 1-D dynamic program: each
+ * position is a node, each candidate block (plus zero-run and SLEB128
+ * fallback) is an edge, and we walk dp[count..0] choosing the edge that
+ * minimises total bytes.
  */
-static int64_t estimate_steady_state_cost(const int64_t *vals, int count)
+
+enum block_kind
 {
-    static const int cand[] = {8, 16, 32, 64};
-    int64_t cost = 0;
-    int ii = 0;
+    BK_BLOCK,   /**< m × bw transposed bit matrix */
+    BK_ZERO,    /**< zero-run (>= 16 zeros) */
+    BK_SLEB     /**< SLEB128 run (1..16 values) */
+};
 
-    while (ii < count)
+struct block_choice
+{
+    short kind;     /**< enum block_kind */
+    short bw;       /**< for BK_BLOCK: 1..32; else unused */
+    int   len;      /**< values consumed by this edge */
+};
+
+/** Compute optimal byte cost to encode \a vals[0..count-1] as SOCD blocks.
+ *
+ * If \a choices is non-NULL, it must have room for \a count entries; on
+ * return it is populated such that walking forward from index 0 by
+ * \c choices[i].len steps reproduces the optimal block sequence.
+ *
+ * Runs in O(count) time: bit-widths are computed once, and the per-window
+ * max over each candidate block size m ∈ {8,16,32,64,128} is built by
+ * doubling (mx[k+1][i] = max(mx[k][i], mx[k][i + 2^k])).
+ */
+static int64_t compute_block_dp(const int64_t *vals, int count,
+    struct block_choice *choices)
+{
+    static const int cand[] = {8, 16, 32, 64, 128};
+    /* Window-max tables; mx[k] is the max bit-width over a window of size
+     * 2^(k+3) starting at each position.  Indexed by ci = 0..4 corresponding
+     * to m = 8..128.  Uses uint8_t since bit-widths fit in 7 bits. */
+    uint8_t *bw_arr;
+    uint8_t *mx[5];
+    int64_t *dp;
+    int64_t result, cost, payload;
+    size_t bw_bytes;
+    int ii, ci, zlen_here, zlen_next, L, max_L;
+
+    if (count <= 0)
+        return 0;
+
+    /* Single allocation: bw[] + 5 mx[] windows (8-byte aligned for dp) + dp. */
+    bw_bytes = ((size_t)count * 6 + 7) & ~(size_t)7;
+    bw_arr = malloc(bw_bytes + (size_t)(count + 1) * sizeof(int64_t));
+    for (ci = 0; ci < 5; ++ci)
+        mx[ci] = bw_arr + (size_t)count * (ci + 1);
+    dp = (int64_t *)(bw_arr + bw_bytes);
+
+    /* Precompute bit-widths. */
+    for (ii = 0; ii < count; ++ii)
     {
-        int remaining = count - ii;
-        int best_m = 0, best_bw = 0;
-        double best_cost_per = 1e30;
-        int ci;
+        int bw = twos_comp_bw(vals[ii]);
+        if (bw > 255) bw = 255;
+        bw_arr[ii] = (uint8_t)bw;
+    }
 
-        /* Zero run. */
-        {
-            int zlen = 0;
-            while (ii + zlen < count && vals[ii + zlen] == 0)
-                zlen++;
-            if (zlen >= 16)
-            {
-                cost += 1 + uleb128_len(zlen - 1);
-                ii += zlen;
-                continue;
-            }
-        }
+    /* Window of size 8 (ci=0): scan 8 values per position.  This is the
+     * one O(count*8) step; subsequent windows double in O(count). */
+    for (ii = 0; ii + 8 <= count; ++ii)
+    {
+        uint8_t m = bw_arr[ii];
+        int kk;
+        for (kk = 1; kk < 8; ++kk)
+            if (bw_arr[ii + kk] > m)
+                m = bw_arr[ii + kk];
+        mx[0][ii] = m;
+    }
 
-        for (ci = 0; ci < 4; ++ci)
+    /* Doubling for ci = 1..4 (m = 16, 32, 64, 128). */
+    for (ci = 1; ci < 5; ++ci)
+    {
+        int half = cand[ci - 1]; /* size of previous window */
+        int m = cand[ci];
+        for (ii = 0; ii + m <= count; ++ii)
         {
-            int m = cand[ci], max_bw = 0, kk;
-            double cost_per;
-
-            if (remaining < m)
-                continue;
-            for (kk = 0; kk < m; ++kk)
-            {
-                int bw = twos_comp_bw(vals[ii + kk]);
-                if (bw > max_bw)
-                    max_bw = bw;
-            }
-            if (max_bw > 32)
-                continue;
-            cost_per = (1.0 + (double)max_bw * m / 8.0) / m;
-            if (cost_per < best_cost_per)
-            {
-                best_cost_per = cost_per;
-                best_m = m;
-                best_bw = max_bw;
-            }
-        }
-
-        if (best_m > 0)
-        {
-            cost += 1 + (int64_t)best_bw * best_m / 8;
-            ii += best_m;
-        }
-        else
-        {
-            int run_len = remaining < 16 ? remaining : 16;
-            int jj;
-            cost += 1 + uleb128_len(run_len - 1);
-            for (jj = 0; jj < run_len; ++jj)
-                cost += sleb128_len(vals[ii + jj]);
-            ii += run_len;
+            uint8_t a = mx[ci - 1][ii];
+            uint8_t b = mx[ci - 1][ii + half];
+            mx[ci][ii] = a > b ? a : b;
         }
     }
 
-    return cost;
+    dp[count] = 0;
+
+    /* zlen_next = length of the maximal zero run starting at ii+1,
+     * maintained as we walk right-to-left.  Avoids O(N) re-scanning at
+     * every position (which would be O(N^2) on constant signals). */
+    zlen_next = 0;
+
+    for (ii = count - 1; ii >= 0; --ii)
+    {
+        int remaining = count - ii;
+        int64_t best = INT64_MAX;
+        struct block_choice best_choice = {BK_SLEB, 0, 1};
+
+        /* Block transitions.  cand[] is ascending so we can stop once
+        * remaining < m. */
+        for (ci = 0; ci < 5; ++ci)
+        {
+            int m = cand[ci];
+            int max_bw;
+
+            if (remaining < m)
+                break;
+            max_bw = mx[ci][ii];
+            if (max_bw > 32)
+                continue;
+            cost = 1 + (int64_t)max_bw * m / 8 + dp[ii + m];
+            if (cost < best)
+            {
+                best = cost;
+                best_choice.kind = BK_BLOCK;
+                best_choice.bw = (short)max_bw;
+                best_choice.len = m;
+            }
+        }
+
+        /* Zero-run transition (only the maximal run; splitting never wins). */
+        zlen_here = (vals[ii] == 0) ? zlen_next + 1 : 0;
+        zlen_next = zlen_here;
+        if (zlen_here > 0)
+        {
+            cost = 1 + uleb128_len(zlen_here - 1) + dp[ii + zlen_here];
+            if (cost < best)
+            {
+                best = cost;
+                best_choice.kind = BK_ZERO;
+                best_choice.bw = 0;
+                best_choice.len = zlen_here;
+            }
+        }
+
+        /* SLEB128-run transition: consider every length 1..min(remaining,16). */
+        max_L = remaining < 16 ? remaining : 16;
+        payload = 0;
+        for (L = 1; L <= max_L; ++L)
+        {
+            int64_t cost;
+            payload += sleb128_len(vals[ii + L - 1]);
+            cost = 1 + uleb128_len(L - 1) + payload + dp[ii + L];
+            if (cost < best)
+            {
+                best = cost;
+                best_choice.kind = BK_SLEB;
+                best_choice.bw = 0;
+                best_choice.len = L;
+            }
+        }
+
+        dp[ii] = best;
+        if (choices)
+            choices[ii] = best_choice;
+    }
+
+    result = dp[0];
+    free(bw_arr);
+    return result;
+}
+
+/* ---- Delta order selection ---- */
+
+/** Estimate encoded size (bytes) of a sequence of steady-state delta values
+ * using the same DP-based block selection as the encoder.
+ */
+static int64_t estimate_steady_state_cost(const int64_t *vals, int count)
+{
+    return compute_block_dp(vals, count, NULL);
 }
 
 /** Select the best delta order (0..7) for a pre-computed delta matrix. */
@@ -380,7 +486,7 @@ static void write_transposed_block(struct wbuf *wb, const int64_t *vals,
 {
     int row, col, byte_idx;
     int bytes_per_row = count >> 3;
-    char matrix[64 * 8]; /* max 64 bits * 8 bytes/row */
+    char matrix[64 * 8]; /* max 32 bits * 16 bytes/row for count=128 = 512 bytes */
 
     memset(matrix, 0, bits * bytes_per_row);
 
@@ -405,81 +511,55 @@ static void write_transposed_block(struct wbuf *wb, const int64_t *vals,
 static void encode_delta_run(struct wbuf *packed,
     const int64_t *ord_vals, int run_len)
 {
-    static const int cand[] = {8, 16, 32, 64};
-    int ii, jj;
+    struct block_choice *choices;
+    int ii;
+
+    if (run_len <= 0)
+        return;
+
+    choices = malloc((size_t)run_len * sizeof *choices);
+    compute_block_dp(ord_vals, run_len, choices);
 
     ii = 0;
     while (ii < run_len)
     {
-        int remaining = run_len - ii;
-        int best_m = 0, best_bw = 0;
-        double best_cost_per = 1e30;
-        int ci;
+        struct block_choice c = choices[ii];
 
-        /* Zero run. */
+        switch (c.kind)
         {
-            int zlen = 0;
-            while (ii + zlen < run_len && ord_vals[ii + zlen] == 0)
-                zlen++;
-            if (zlen >= 16)
-            {
-                wbuf_byte(packed, 0xFE);
-                wbuf_uleb128(packed, zlen - 1);
-                ii += zlen;
-                continue;
-            }
-        }
-
-        /* Evaluate candidate block sizes. */
-        for (ci = 0; ci < 4; ++ci)
-        {
-            int m = cand[ci], max_bw = 0, kk;
-            double cost_per;
-
-            if (remaining < m)
-                continue;
-            for (kk = 0; kk < m; ++kk)
-            {
-                int bw = twos_comp_bw(ord_vals[ii + kk]);
-                if (bw > max_bw)
-                    max_bw = bw;
-            }
-            if (max_bw > 32)
-                continue;
-            cost_per = (8.0 + (double)max_bw * m) / m;
-            if (cost_per < best_cost_per)
-            {
-                best_cost_per = cost_per;
-                best_m = m;
-                best_bw = max_bw;
-            }
-        }
-
-        if (best_m > 0)
+        case BK_BLOCK:
         {
             unsigned char header;
-            if (best_m == 8)
-                header = 0x00 | (unsigned char)(best_bw - 1);
-            else if (best_m == 16)
-                header = 0x20 | (unsigned char)(best_bw - 1);
-            else if (best_m == 32)
-                header = 0x40 | (unsigned char)(best_bw - 1);
-            else
-                header = 0x60 | (unsigned char)(best_bw - 1);
+            int log2m =
+                c.len ==   8 ? 0 :
+                c.len ==  16 ? 1 :
+                c.len ==  32 ? 2 :
+                c.len ==  64 ? 3 : 4; /* c.len == 128 */
+            header = (unsigned char)(log2m << 5)
+                   | (unsigned char)(c.bw - 1);
             wbuf_byte(packed, header);
-            write_transposed_block(packed, ord_vals + ii, best_m, best_bw);
-            ii += best_m;
+            write_transposed_block(packed, ord_vals + ii, c.len, c.bw);
+            break;
         }
-        else
+        case BK_ZERO:
+            wbuf_byte(packed, 0xFE);
+            wbuf_uleb128(packed, c.len - 1);
+            break;
+        case BK_SLEB:
         {
-            int run_len2 = remaining < 16 ? remaining : 16;
+            int jj;
             wbuf_byte(packed, 0xFF);
-            wbuf_uleb128(packed, run_len2 - 1);
-            for (jj = 0; jj < run_len2; ++jj)
+            wbuf_uleb128(packed, c.len - 1);
+            for (jj = 0; jj < c.len; ++jj)
                 wbuf_sleb128(packed, ord_vals[ii + jj]);
-            ii += run_len2;
+            break;
         }
+        }
+
+        ii += c.len;
     }
+
+    free(choices);
 }
 
 /** Encode packed observation data.

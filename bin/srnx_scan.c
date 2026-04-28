@@ -328,11 +328,11 @@ static void scan_file(const char *filename, file_stats_t *stats)
                 uint8_t header = *(const uint8_t *)rptr++;
                 stats->block_header_count[header]++;
 
-                if (header < 0x80)
+                if (header >> 5 <= 4)
                 {
                     /* Bit matrix: (k+1) rows × (m/8) bytes each.
                      * bits per value = (header & 0x1F) + 1
-                     * m = 8 << (header >> 5) */
+                     * m = 8 << (header >> 5), covering 8/16/32/64/128 */
                     rptr += ((header & 0x1F) + 1) * (1 << (header >> 5));
                 }
                 else if (header == 0xFD)
@@ -352,7 +352,7 @@ static void scan_file(const char *filename, file_stats_t *stats)
                     for (uint64_t j = 0; j <= run_count; j++)
                         read_sleb128(&rptr);
                 }
-                /* 0x80–0xFD: reserved, no payload to skip. */
+                /* 0xA0–0xFC: reserved, no payload to skip. */
             }
 
             if (rptr != packed_end)
@@ -412,7 +412,7 @@ static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
 
 static void print_block_header(int i, uint64_t count)
 {
-    if (i < 0x80)
+    if (i < 0xA0)
     {
         int m = 8 << (i >> 5);
         int bits = (i & 0x1F) + 1;

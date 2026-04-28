@@ -278,7 +278,8 @@ Each block begins with one byte that identifies the block packing.
 | `001kkkkk` | 16×`(k+1)` bit matrix |
 | `010kkkkk` | 32×`(k+1)` bit matrix |
 | `011kkkkk` | 64×`(k+1)` bit matrix |
-| `100xxxxx` through `11111100` | reserved |
+| `100kkkkk` | 128×`(k+1)` bit matrix |
+| `101xxxxx` through `11111100` | reserved |
 | `11111101` | ULEB128 count-minus-1 of absent values |
 | `11111110` | ULEB128 count-minus-1 of zero values |
 | `11111111` | ULEB128 count-minus-1 of SLEB128 values |
@@ -291,7 +292,7 @@ Accordingly, the delta accumulator is not advanced when decoding an
 absent-values block; absent values are returned as `INT64_MIN` without
 altering the decoder's running state.
 
-An `m×(k+1)` bit matrix (where `m` is 8, 16, 32 or 64) is stored as `m`
+An `m×(k+1)` bit matrix (where `m` is 8, 16, 32, 64 or 128) is stored as `m`
 values, each with `k+1` bits in the file, in bitwise transposed order.
 That is, the most significant bit from each value is stored first, with
 the MSB of the first value in the MSB of the first byte and continuing
@@ -306,45 +307,34 @@ The use of this bit matrix representation was inspired by
 
 #### Encoder guidance
 
-The variable block sizes (8, 16, 32, 64) allow an encoder to adapt to local
-variation in bit-widths — a strategy referred to as BMvar.
+The variable block sizes (8, 16, 32, 64, 128) allow an encoder to adapt to local
+variation in bit-widths.
 Recommended encoding procedure for each (satellite, observation code):
 
-1. **Delta order selection.**
-   First, partition the observations into present and absent (`INT64_MIN`)
-   values.
+1. Partition the observations into present and absent (`INT64_MIN`)
+   sections.
    Absent values will be encoded with `0xFD` blocks and are excluded from
    all subsequent steps.
-   Compute delta chains of orders 0 through 5 on the present values only.
-   For each order, compute the SLEB128 byte cost of every delta value and
-   estimate the encoded size (e.g. as the sum of those costs).
-   Select the order that minimizes the estimate.
 
-2. **GCD extraction.**
-   Before delta encoding, divide all present observations by the
-   per-observable GCD and record it as the explicit scale factor (see
-   above).
-   Absent values do not participate in GCD computation.
+2. Calculate the scale factor as the greatest common denominator of the
+   values that are present.
+   (Absent values do not participate in this.)
 
-3. **Greedy block-size selection.**
-   Walk the bit-width sequence from left to right.
-   At each position, evaluate each candidate block size `m` ∈ {8, 16, 32, 64}:
-   the cost is `8 + max_bw × m` bits, where `max_bw` is the maximum
-   two's-complement bit-width in the candidate block (capped at 32).
-   Pick the block size with the lowest cost per value, `cost / m`.
+3. Select delta order using some algorithm.
+   For a given delta order, greedy block selection is suboptimal.
+   Linear programming to find the true shortest path to the end of the
+   observations is efficient.
+   (Working backwards, calculate the valid header byte that results in
+   the shortest coded form.)
 
-4. **Fallback blocks.**
+4. Encode the observations, with fallback blocks.
    Runs of absent values are encoded as absent-value (`0xFD`) blocks
    regardless of position in the sequence.
    If a region has `max_bw` > 32, or contains only a few values that
-   would not fill an 8-element block, use zero-run (`0xFE`) or
-   SLEB128-run (`0xFF`) blocks instead.
+   would not fill an 8-element block (including at the end of the
+   sequence), use zero-run (`0xFE`) or SLEB128-run (`0xFF`) blocks instead.
    A SLEB128-run is also typically used when (re-)initializing the
    delta chain.
-
-5. **Trailing values.**
-   If fewer than 16 values remain at the end of the sequence, encode
-   them as a SLEB128-run block.
 
 ## <a name="digests"></a>Digest Identifiers
 
