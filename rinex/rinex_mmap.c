@@ -70,6 +70,7 @@ void *rnx_mmap_padded(int fd, off_t offset, size_t f_len, size_t tot_len)
             munmap(addr, tot_len);
             return MAP_FAILED;
         }
+        madvise(addr, tot_len, MADV_SEQUENTIAL);
     }
 
     return addr;
@@ -149,6 +150,7 @@ static int rinex_mmap_advance(
         {
             return errno;
         }
+        madvise(stream->map, stream->total, MADV_SEQUENTIAL);
 
 success:
         stream->offset = base_offset;
