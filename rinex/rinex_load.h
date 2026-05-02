@@ -116,6 +116,12 @@ struct rinex_event
  */
 struct rinex_data
 {
+    /** error holds a formatted error message with epoch context.
+     * Populated by helper functions (e.g. rnx_load_grow_system) and
+     * by rinex_load() itself when an error occurs.
+     */
+    char error[256];
+
     /** file_header contains a copy of the file header, with '\n' after
      * each line.
      */
@@ -207,6 +213,14 @@ const char *rinex_load_file(const char *filename, struct rinex_data *out);
  * Zero if the error did not originate in srnx.c.
  */
 extern int rinex_load_error_line;
+
+/** Formats a human-readable epoch timestamp into \a buf.
+ *
+ * \param[out] buf       Destination buffer (at least 64 bytes).
+ * \param[in]  epoch     Epoch to format.
+ * \returns Pointer to \a buf.
+ */
+char *rnx_format_epoch(char buf[], const struct rinex_epoch *epoch);
 
 /** Initializes constellation metadata from the header in \a out. */
 const char *rnx_data_init_cons(struct rinex_data *out);

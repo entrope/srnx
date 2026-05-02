@@ -8,11 +8,30 @@
 #include "rinex/rnx_priv.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <limits.h>
 #include <string.h>
 #include <unistd.h>
 
 int rinex_load_error_line;
+
+/** Formats a human-readable epoch timestamp.
+ * Output format: "YYYY-MM-DD HH:MM:SS.fffffff" (27 chars + NUL).
+ */
+char *rnx_format_epoch(char buf[], const struct rinex_epoch *epoch)
+{
+    int yy = epoch->yyyy_mm_dd / 10000;
+    int mm = (epoch->yyyy_mm_dd % 10000) / 100;
+    int dd = epoch->yyyy_mm_dd % 100;
+    int hh = epoch->hh_mm / 100;
+    int mi = epoch->hh_mm % 100;
+    int sec = epoch->sec_e7 / 10000000;
+    int frac = epoch->sec_e7 % 10000000;
+
+    snprintf(buf, 64, "%04d-%02d-%02d %02d:%02d:%02d.%07d",
+        yy, mm, dd, hh, mi, sec, frac);
+    return buf;
+}
 
 void free_rinex_data(struct rinex_data *data)
 {
@@ -252,7 +271,11 @@ const char *rnx_load_grow_system(struct rinex_data *out, char sys_id, int svn)
         case 'J': n_sv = 10; break; /* QZSS */
         case 'R': n_sv = 32; break; /* GLONASS */
         case 'S': n_sv = 58; break; /* SBAS */
-        default: return "unknown satellite system";
+        default:
+            snprintf(out->error, sizeof out->error,
+                "unknown satellite system '%c' (0x%02x) for satellite %d",
+                sys_id, (unsigned char)sys_id, svn + 1);
+            return out->error;
         }
     }
     else
