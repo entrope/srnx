@@ -144,19 +144,34 @@ static int uleb128_len(uint64_t val)
     return n;
 }
 
-static int sleb128_len(int64_t val)
+/* SLEB128 byte-length from two's-complement bit-width.
+ *
+ * For any val with twos_comp_bw(val) == bw, sleb128_len(val) is constant.
+ * Derived as ceil(bw / 7), with bw == 0 mapped to 1 (unused sentinel).
+ * Covers bw 0..64; bw > 64 is clamped to 255 before use so this never
+ * goes out of bounds. */
+static const uint8_t sleb128_len_from_bw[65] =
 {
-    uint64_t uv = ((uint64_t)val << 1) ^ (uint64_t)(val >> 63);
-    return uleb128_len(uv);
-}
+    [0]   = 1,
+    [1 ... 7]   = 1,
+    [8 ... 14]  = 2,
+    [15 ... 21] = 3,
+    [22 ... 28] = 4,
+    [29 ... 35] = 5,
+    [36 ... 42] = 6,
+    [43 ... 49] = 7,
+    [50 ... 56] = 8,
+    [57 ... 63] = 9,
+    [64]        = 10,
+};
 
 /* ---- Zigzag bit-width ---- */
 
 /** Return minimum bits for two's-complement representation of \a val. */
-static int twos_comp_bw(int64_t val)
+static uint8_t twos_comp_bw(int64_t val)
 {
     uint64_t v = (val >= 0) ? (uint64_t)val : (uint64_t)(~val);
-    return v == 0 ? 1 : (65 - __builtin_clzll(v));
+    return v == 0 ? 1 : (uint8_t)(65 - __builtin_clzll(v));
 }
 
 /* ---- Write a chunk to the mmap buffer ---- */
@@ -238,20 +253,13 @@ static int64_t gcd(int64_t a, int64_t b)
 
 /* ---- Delta matrix computation ---- */
 
-/** Compute 8 * count delta values.
+/** Compute 8 * count delta values into \a d (caller-owned, 8 * count elements).
  * d[ord * count + i] = ord-th order difference at index i,
  * where order 0 is the raw scaled values (with d[ord][-1] = 0 implied).
  */
-static int64_t *compute_delta_matrix(const int64_t *scaled, int count)
+static void compute_delta_matrix(int64_t *d, const int64_t *scaled, int count)
 {
-    int64_t *d = malloc(8 * (size_t)count * sizeof *d);
     int ord, ii;
-
-    if (!d)
-    {
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
-    }
 
     for (ii = 0; ii < count; ++ii)
         d[ii] = scaled[ii];
@@ -264,8 +272,6 @@ static int64_t *compute_delta_matrix(const int64_t *scaled, int count)
         for (ii = 1; ii < count; ++ii)
             curr[ii] = prev[ii] - prev[ii - 1];
     }
-
-    return d;
 }
 
 /* ---- DP-based block selection ----
@@ -294,57 +300,115 @@ struct block_choice
     int   len;      /**< values consumed by this edge */
 };
 
-/** Compute optimal byte cost to encode \a vals[0..count-1] as SOCD blocks.
+/* ---- Reusable scratch buffers ----
  *
- * If \a choices is non-NULL, it must have room for \a count entries; on
- * return it is populated such that walking forward from index 0 by
- * \c choices[i].len steps reproduces the optimal block sequence.
- *
- * Runs in O(count) time: bit-widths are computed once, and the per-window
- * max over each candidate block size m ∈ {8,16,32,64,128} is built by
- * doubling (mx[k+1][i] = max(mx[k][i], mx[k][i + 2^k])).
+ * One scratch struct is owned by the top-level converter and threaded
+ * through to compute_block_dp / encode_delta_run / write_socd_chunk so
+ * the per-SOCD allocations (delta matrix, scaled arrays, DP tables,
+ * choices) become a single grow-on-demand realloc per signal instead
+ * of half a dozen mallocs.
  */
-static int64_t compute_block_dp(const int64_t *vals, int count,
-    struct block_choice *choices)
+struct rnx2srnx_scratch
+{
+    size_t   cap;            /**< capacity in elements */
+    int64_t *delta_matrix;   /**< 8 * cap */
+    int64_t *full_scaled;    /**< cap */
+    int64_t *present_scaled; /**< cap */
+    int64_t *dp;             /**< cap + 1 */
+    uint8_t *mx;             /**< 5 * cap : mx for dp_core window-max */
+    uint8_t *all_bw;         /**< 8 * cap : bw for all 8 delta orders */
+    uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
+    struct block_choice *choices_a; /**< cap; "best so far" */
+    struct block_choice *choices_b; /**< cap; "candidate" */
+};
+
+static void scratch_init(struct rnx2srnx_scratch *s)
+{
+    memset(s, 0, sizeof *s);
+}
+
+static void scratch_free(struct rnx2srnx_scratch *s)
+{
+    free(s->delta_matrix);
+    free(s->full_scaled);
+    free(s->present_scaled);
+    free(s->dp);
+    free(s->mx);
+    free(s->all_bw);
+    free(s->psum_arr);
+    free(s->choices_a);
+    free(s->choices_b);
+    memset(s, 0, sizeof *s);
+}
+
+static void *xrealloc(void *p, size_t bytes)
+{
+    void *q = realloc(p, bytes);
+    if (!q)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(EXIT_FAILURE);
+    }
+    return q;
+}
+
+static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
+{
+    size_t cap;
+    if (need <= s->cap)
+        return;
+    cap = s->cap ? s->cap : 2880;
+    while (cap < need)
+        cap *= 2;
+    s->delta_matrix   = xrealloc(s->delta_matrix, 8 * cap * sizeof *s->delta_matrix);
+    s->full_scaled    = xrealloc(s->full_scaled,      cap * sizeof *s->full_scaled);
+    s->present_scaled = xrealloc(s->present_scaled,   cap * sizeof *s->present_scaled);
+    s->dp             = xrealloc(s->dp,         (cap + 1) * sizeof *s->dp);
+    s->mx             = xrealloc(s->mx,           5 * cap * sizeof *s->mx);
+    s->all_bw         = xrealloc(s->all_bw,       8 * cap * sizeof *s->all_bw);
+    s->psum_arr       = xrealloc(s->psum_arr,   (cap + 1) * sizeof *s->psum_arr);
+    s->choices_a      = xrealloc(s->choices_a,        cap * sizeof *s->choices_a);
+    s->choices_b      = xrealloc(s->choices_b,        cap * sizeof *s->choices_b);
+    s->cap = cap;
+}
+
+/** Core DP: window-max tables + right-to-left walk.
+ *
+ * \a bw is a pre-filled array of \a count bit-widths.  SLEB128 byte lengths
+ * are derived from \a bw via the \c sleb128_len_from_bw lookup table.  \a vals
+ * is needed only for zero-run detection.
+ */
+static int64_t dp_core(struct rnx2srnx_scratch *scratch,
+    const int64_t *vals, const uint8_t *bw, int count, struct block_choice *choices)
 {
     static const int cand[] = {8, 16, 32, 64, 128};
-    /* Window-max tables; mx[k] is the max bit-width over a window of size
-     * 2^(k+3) starting at each position.  Indexed by ci = 0..4 corresponding
-     * to m = 8..128.  Uses uint8_t since bit-widths fit in 7 bits. */
-    uint8_t *bw_arr;
     uint8_t *mx[5];
     int64_t *dp;
-    int64_t result, cost, payload;
-    size_t bw_bytes;
+    uint32_t *psum;
+    int64_t result, cost;
     int ii, ci, zlen_here, zlen_next, L, max_L;
 
-    if (count <= 0)
-        return 0;
-
-    /* Single allocation: bw[] + 5 mx[] windows (8-byte aligned for dp) + dp. */
-    bw_bytes = ((size_t)count * 6 + 7) & ~(size_t)7;
-    bw_arr = malloc(bw_bytes + (size_t)(count + 1) * sizeof(int64_t));
+    dp = scratch->dp;
+    psum = scratch->psum_arr;
     for (ci = 0; ci < 5; ++ci)
-        mx[ci] = bw_arr + (size_t)count * (ci + 1);
-    dp = (int64_t *)(bw_arr + bw_bytes);
+        mx[ci] = scratch->mx + scratch->cap * (size_t)ci;
 
-    /* Precompute bit-widths. */
+    /* Prefix sums of SLEB128 byte lengths, derived from bit-widths.
+     * SLEB128 length is a function of bit-width alone, so we can look
+     * it up instead of storing a separate array. */
+    psum[0] = 0;
     for (ii = 0; ii < count; ++ii)
-    {
-        int bw = twos_comp_bw(vals[ii]);
-        if (bw > 255) bw = 255;
-        bw_arr[ii] = (uint8_t)bw;
-    }
+        psum[ii + 1] = psum[ii] + sleb128_len_from_bw[bw[ii]];
 
     /* Window of size 8 (ci=0): scan 8 values per position.  This is the
      * one O(count*8) step; subsequent windows double in O(count). */
     for (ii = 0; ii + 8 <= count; ++ii)
     {
-        uint8_t m = bw_arr[ii];
+        uint8_t m = bw[ii];
         int kk;
         for (kk = 1; kk < 8; ++kk)
-            if (bw_arr[ii + kk] > m)
-                m = bw_arr[ii + kk];
+            if (bw[ii + kk] > m)
+                m = bw[ii + kk];
         mx[0][ii] = m;
     }
 
@@ -374,6 +438,21 @@ static int64_t compute_block_dp(const int64_t *vals, int count,
         int64_t best = INT64_MAX;
         struct block_choice best_choice = {BK_SLEB, 0, 1};
 
+        /* Zero-run transition (only the maximal run; splitting never wins). */
+        zlen_here = (vals[ii] == 0) ? zlen_next + 1 : 0;
+        zlen_next = zlen_here;
+        if (zlen_here > 0)
+        {
+            cost = 1 + uleb128_len(zlen_here - 1) + dp[ii + zlen_here];
+            if (cost < best)
+            {
+                best = cost;
+                best_choice.kind = BK_ZERO;
+                best_choice.bw = 0;
+                best_choice.len = zlen_here;
+            }
+        }
+
         /* Block transitions.  cand[] is ascending so we can stop once
         * remaining < m. */
         for (ci = 0; ci < 5; ++ci)
@@ -396,35 +475,22 @@ static int64_t compute_block_dp(const int64_t *vals, int count,
             }
         }
 
-        /* Zero-run transition (only the maximal run; splitting never wins). */
-        zlen_here = (vals[ii] == 0) ? zlen_next + 1 : 0;
-        zlen_next = zlen_here;
-        if (zlen_here > 0)
-        {
-            cost = 1 + uleb128_len(zlen_here - 1) + dp[ii + zlen_here];
-            if (cost < best)
-            {
-                best = cost;
-                best_choice.kind = BK_ZERO;
-                best_choice.bw = 0;
-                best_choice.len = zlen_here;
-            }
-        }
-
-        /* SLEB128-run transition: consider every length 1..min(remaining,16). */
+        /* SLEB128-run transition: consider every length 1..min(remaining,16).
+         * The overhead of 2 bytes is the header byte plus single count byte.
+         * Use prefix sums so each iteration is independent (no carry chain). */
         max_L = remaining < 16 ? remaining : 16;
-        payload = 0;
-        for (L = 1; L <= max_L; ++L)
         {
-            int64_t cost;
-            payload += sleb128_len(vals[ii + L - 1]);
-            cost = 1 + uleb128_len(L - 1) + payload + dp[ii + L];
-            if (cost < best)
+            uint32_t pii = psum[ii];
+            for (L = 1; L <= max_L; ++L)
             {
-                best = cost;
-                best_choice.kind = BK_SLEB;
-                best_choice.bw = 0;
-                best_choice.len = L;
+                cost = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
+                if (cost < best)
+                {
+                    best = cost;
+                    best_choice.kind = BK_SLEB;
+                    best_choice.bw = 0;
+                    best_choice.len = L;
+                }
             }
         }
 
@@ -434,45 +500,113 @@ static int64_t compute_block_dp(const int64_t *vals, int count,
     }
 
     result = dp[0];
-    free(bw_arr);
     return result;
+}
+
+/** Precompute bit-widths for all 8 delta orders into scratch->all_bw
+ * (8 * cap entries, strided by cap).  Call after compute_delta_matrix while
+ * the delta values are hot in cache. */
+static void precompute_all_bw(struct rnx2srnx_scratch *scratch,
+    const int64_t *delta_matrix, int count)
+{
+    int ord, ii;
+    for (ord = 0; ord < 8; ++ord)
+    {
+        const int64_t *vals = delta_matrix + (size_t)ord * count;
+        uint8_t *bw = scratch->all_bw + (size_t)ord * scratch->cap;
+        for (ii = 0; ii < count; ++ii)
+        {
+            bw[ii] = (uint8_t)twos_comp_bw(vals[ii]);;
+        }
+    }
+}
+
+/** Compute optimal byte cost to encode \a vals[0..count-1] as SOCD blocks.
+ *
+ * If \a bw is non-NULL it is used as the precomputed bit-width array;
+ * otherwise bit-widths are computed from \a vals.
+ *
+ * If \a choices is non-NULL, it must have room for \a count entries; on
+ * return it is populated such that walking forward from index 0 by
+ * \c choices[i].len steps reproduces the optimal block sequence.
+ *
+ * Runs in O(count) time: bit-widths are computed once, and the per-window
+ * max over each candidate block size m ∈ {8,16,32,64,128} is built by
+ * doubling (mx[k+1][i] = max(mx[k][i], mx[k][i + 2^k])).
+ */
+static int64_t compute_block_dp(struct rnx2srnx_scratch *scratch,
+    const int64_t *vals, uint8_t *bw, int count, struct block_choice *choices)
+{
+    int ii;
+
+    if (count <= 0)
+        return 0;
+
+    scratch_reserve(scratch, (size_t)count);
+
+    if (!bw)
+    {
+        bw = scratch->mx;
+        for (ii = 0; ii < count; ++ii)
+            bw[ii] = (uint8_t)twos_comp_bw(vals[ii]);
+    }
+
+    return dp_core(scratch, vals, bw, count, choices);
 }
 
 /* ---- Delta order selection ---- */
 
-/** Estimate encoded size (bytes) of a sequence of steady-state delta values
- * using the same DP-based block selection as the encoder.
+/** Select the best delta order (0..7) for a pre-computed delta matrix.
+ *
+ * Each candidate order's choices are computed into the "candidate" buffer
+ * (scratch->choices_b); when it beats the running best we swap pointers so
+ * scratch->choices_a always holds the best order's choices.  On return,
+ * \a *out_choices points to the chosen order's choices (suitable for direct
+ * use by the encoder, modulo the gap caveat).
+ *
+ * Early-stop: break once two consecutive orders fail to improve.
  */
-static int64_t estimate_steady_state_cost(const int64_t *vals, int count)
-{
-    return compute_block_dp(vals, count, NULL);
-}
-
-/** Select the best delta order (0..7) for a pre-computed delta matrix. */
-static int select_delta_order(const int64_t *delta_matrix, int count)
+static int select_delta_order(struct rnx2srnx_scratch *scratch,
+    const int64_t *delta_matrix, int count, struct block_choice **out_choices)
 {
     int best_order = 0;
-    int64_t best_cost = estimate_steady_state_cost(delta_matrix, count);
-    int ord;
+    int64_t best_cost;
+    int ord, no_improve;
+    struct block_choice *best_buf = scratch->choices_a;
+    struct block_choice *cand_buf = scratch->choices_b;
+
+    precompute_all_bw(scratch, delta_matrix, count);
+
+    best_cost = dp_core(scratch, delta_matrix,
+        scratch->all_bw,
+        count, best_buf);
+    no_improve = 0;
 
     for (ord = 1; ord <= 7 && ord < count; ++ord)
     {
         const int64_t *ord_vals = delta_matrix + (size_t)ord * count;
-        int64_t cost = 0;
-
         /* Cost of zero-valued SLEB128 init values: 1 byte each. */
-        cost += ord;
-
-        /* Cost of block-encoded values d[ord][0..count-1]. */
-        cost += estimate_steady_state_cost(ord_vals, count);
+        int64_t cost = ord;
+        cost += dp_core(scratch, ord_vals,
+            scratch->all_bw + (size_t)ord * scratch->cap,
+            count, cand_buf);
 
         if (cost < best_cost)
         {
+            struct block_choice *tmp = best_buf;
+            best_buf = cand_buf;
+            cand_buf = tmp;
             best_cost = cost;
             best_order = ord;
+            no_improve = 0;
+        }
+        else if (++no_improve >= 2)
+        {
+            break;
         }
     }
 
+    *out_choices = best_buf;
     return best_order;
 }
 
@@ -484,21 +618,35 @@ static int select_delta_order(const int64_t *delta_matrix, int count)
 static void write_transposed_block(struct wbuf *wb, const int64_t *vals,
     int count, int bits)
 {
-    int row, col, byte_idx;
+    int byte_col, row;
     int bytes_per_row = count >> 3;
-    char matrix[64 * 8]; /* max 32 bits * 16 bytes/row for count=128 = 512 bytes */
+    char matrix[32 * 16]; /* max 32 bits * 16 bytes/row for count=128 = 512 bytes */
 
-    memset(matrix, 0, bits * bytes_per_row);
-
-    for (row = 0; row < bits; ++row)
+    /* Process 8 columns at a time (one output byte per row).
+     * Each group of 8 vals[] is loaded once and reused across all rows,
+     * eliminating the bits-fold reload of the row-major layout. */
+    for (byte_col = 0; byte_col < bytes_per_row; ++byte_col)
     {
-        int shift = bits - 1 - row;
-        for (col = 0; col < count; ++col)
+        const int64_t *v = vals + byte_col * 8;
+        uint64_t v0 = (uint64_t)v[0], v1 = (uint64_t)v[1];
+        uint64_t v2 = (uint64_t)v[2], v3 = (uint64_t)v[3];
+        uint64_t v4 = (uint64_t)v[4], v5 = (uint64_t)v[5];
+        uint64_t v6 = (uint64_t)v[6], v7 = (uint64_t)v[7];
+        char *out = matrix + byte_col;
+
+        for (row = 0; row < bits; ++row)
         {
-            uint64_t tc = (uint64_t)vals[col];
-            byte_idx = col >> 3;
-            if ((tc >> shift) & 1)
-                matrix[row * bytes_per_row + byte_idx] |= (char)(0x80 >> (col & 7));
+            int shift = bits - 1 - row;
+            char b = (char)(
+                ((v0 >> shift) & 1) << 7 |
+                ((v1 >> shift) & 1) << 6 |
+                ((v2 >> shift) & 1) << 5 |
+                ((v3 >> shift) & 1) << 4 |
+                ((v4 >> shift) & 1) << 3 |
+                ((v5 >> shift) & 1) << 2 |
+                ((v6 >> shift) & 1) << 1 |
+                ((v7 >> shift) & 1));
+            out[row * bytes_per_row] = b;
         }
     }
 
@@ -507,20 +655,11 @@ static void write_transposed_block(struct wbuf *wb, const int64_t *vals,
 
 /* ---- Encode packed observation data ---- */
 
-/** Encode a run of \a run_len present delta values from \a ord_vals into \a packed. */
-static void encode_delta_run(struct wbuf *packed,
-    const int64_t *ord_vals, int run_len)
+/** Emit blocks for \a run_len values from \a ord_vals using \a choices. */
+static void emit_blocks(struct wbuf *packed, const int64_t *ord_vals,
+    int run_len, const struct block_choice *choices)
 {
-    struct block_choice *choices;
-    int ii;
-
-    if (run_len <= 0)
-        return;
-
-    choices = malloc((size_t)run_len * sizeof *choices);
-    compute_block_dp(ord_vals, run_len, choices);
-
-    ii = 0;
+    int ii = 0;
     while (ii < run_len)
     {
         struct block_choice c = choices[ii];
@@ -558,8 +697,36 @@ static void encode_delta_run(struct wbuf *packed,
 
         ii += c.len;
     }
+}
 
-    free(choices);
+/** Encode a run of \a run_len present delta values from \a ord_vals into \a packed.
+ *
+ * If \a precomputed is non-NULL it is used as-is; otherwise the choices are
+ * computed via the DP into scratch->choices_b (overwriting any candidate
+ * buffer left by a prior selection pass — caller must not rely on it).
+ * \a bw points to the precomputed bit-widths for this run (may be NULL).
+ */
+static void encode_delta_run(struct wbuf *packed,
+    struct rnx2srnx_scratch *scratch,
+    const int64_t *ord_vals, uint8_t *bw, int run_len,
+    const struct block_choice *precomputed)
+{
+    const struct block_choice *choices;
+
+    if (run_len <= 0)
+        return;
+
+    if (precomputed)
+    {
+        choices = precomputed;
+    }
+    else
+    {
+        compute_block_dp(scratch, ord_vals, bw, run_len, scratch->choices_b);
+        choices = scratch->choices_b;
+    }
+
+    emit_blocks(packed, ord_vals, run_len, choices);
 }
 
 /** Encode packed observation data.
@@ -571,15 +738,22 @@ static void encode_delta_run(struct wbuf *packed,
  * as 0xFD blocks; the delta accumulator is not advanced for them.
  */
 static void encode_packed_observations(struct wbuf *wb,
+    struct rnx2srnx_scratch *scratch,
     const int64_t *full_obs, int total_count,
-    const int64_t *delta_matrix, int present_count, int order, int64_t obs_gcd)
+    const int64_t *delta_matrix, int present_count, int order, int64_t obs_gcd,
+    const struct block_choice *cached_choices)
 {
     struct wbuf packed;
+    const struct block_choice *run_choices;
     const int64_t *ord_vals;
-    int ii, pi;
+    uint8_t *bw_base;
+    int ii, pi, run_end, run_len;
 
     ord_vals = (delta_matrix && present_count > 0)
         ? delta_matrix + (size_t)order * present_count
+        : NULL;
+    bw_base = (delta_matrix && present_count > 0)
+        ? scratch->all_bw + (size_t)order * scratch->cap
         : NULL;
 
     wbuf_init(&packed);
@@ -617,16 +791,20 @@ static void encode_packed_observations(struct wbuf *wb,
         }
 
         /* Present run: find its extent then block-encode. */
-        {
-            int run_end = ii;
-            int run_len;
-            while (run_end < total_count && full_obs[run_end] != INT64_MIN)
-                run_end++;
-            run_len = run_end - ii;
-            encode_delta_run(&packed, ord_vals + pi, run_len);
-            pi += run_len;
-            ii = run_end;
-        }
+        run_end = ii;
+        run_choices = NULL;
+        while (run_end < total_count && full_obs[run_end] != INT64_MIN)
+            run_end++;
+        run_len = run_end - ii;
+        /* Cached choices are valid only when the present values form a
+         * single contiguous run starting at offset 0 of ord_vals — i.e.
+         * the SOCD has no absent observations.  Otherwise per-run DP
+         * boundaries differ, so recompute. */
+        if (cached_choices && pi == 0 && run_len == present_count)
+            run_choices = cached_choices;
+        encode_delta_run(&packed, scratch, ord_vals + pi, bw_base + pi, run_len, run_choices);
+        pi += run_len;
+        ii = run_end;
     }
 
     wbuf_uleb128(wb, packed.used);
@@ -639,7 +817,9 @@ static void encode_packed_observations(struct wbuf *wb,
 /** Write a SOCD chunk for one (satellite, signal) pair.
  * Returns the offset (within \a mm) where the SOCD chunk starts.
  */
-static size_t write_socd_chunk(struct mmbuf *mm, const struct rinex_data *data,
+static size_t write_socd_chunk(struct mmbuf *mm,
+    struct rnx2srnx_scratch *scratch,
+    const struct rinex_data *data,
     const struct rinex_satellite_data *sv, int sig_idx,
     const struct rinex_system_data *p_sys)
 {
@@ -690,19 +870,16 @@ static size_t write_socd_chunk(struct mmbuf *mm, const struct rinex_data *data,
      * will be emitted as 0xFD blocks interleaved with the delta blocks.
      */
     {
-        int64_t *full_scaled = malloc(obs_count * sizeof *full_scaled);
-        int64_t *present_scaled = malloc(obs_count * sizeof *present_scaled);
+        int64_t *full_scaled;
+        int64_t *present_scaled;
         int64_t *delta_matrix = NULL;
+        struct block_choice *cached_choices = NULL;
         int present_count = 0;
         int order = 0;
 
-        if (!full_scaled || !present_scaled)
-        {
-            free(full_scaled);
-            free(present_scaled);
-            fprintf(stderr, "Out of memory\n");
-            exit(EXIT_FAILURE);
-        }
+        scratch_reserve(scratch, (size_t)obs_count);
+        full_scaled    = scratch->full_scaled;
+        present_scaled = scratch->present_scaled;
 
         for (ii = 0; ii < obs_count; ++ii)
         {
@@ -719,16 +896,14 @@ static size_t write_socd_chunk(struct mmbuf *mm, const struct rinex_data *data,
 
         if (present_count > 0)
         {
-            delta_matrix = compute_delta_matrix(present_scaled, present_count);
-            order = select_delta_order(delta_matrix, present_count);
+            delta_matrix = scratch->delta_matrix;
+            compute_delta_matrix(delta_matrix, present_scaled, present_count);
+            order = select_delta_order(scratch, delta_matrix, present_count,
+                &cached_choices);
         }
-        free(present_scaled);
 
-        encode_packed_observations(&payload, full_scaled, obs_count,
-            delta_matrix, present_count, order, obs_gcd);
-
-        free(full_scaled);
-        free(delta_matrix);
+        encode_packed_observations(&payload, scratch, full_scaled, obs_count,
+            delta_matrix, present_count, order, obs_gcd, cached_choices);
     }
 
     /* Write the chunk. */
@@ -1128,6 +1303,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
 {
     struct rinex_data data;
     struct mmbuf mm = { NULL, 0, 0 };
+    struct rnx2srnx_scratch scratch;
     struct stat st;
     size_t cap;
     int fd = -1;
@@ -1136,6 +1312,8 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     struct sdir_entry *sdir_entries = NULL;
     int n_sdir = 0, sdir_alloc = 0;
     int sys_idx;
+
+    scratch_init(&scratch);
 
     /* Load the input file. */
     err = rinex_load_file(input_name, &data);
@@ -1231,7 +1409,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
                 goto done;
             }
             for (jj = 0; jj < n_obs; ++jj)
-                socd_offsets[jj] = write_socd_chunk(&mm, &data, p_sv, jj, p_sys);
+                socd_offsets[jj] = write_socd_chunk(&mm, &scratch, &data, p_sv, jj, p_sys);
 
             /* Write SATE chunk. */
             sate_pos = mm.used;
@@ -1288,6 +1466,7 @@ done:
         close(fd);
     }
     free(sdir_entries);
+    scratch_free(&scratch);
     free_rinex_data(&data);
 }
 
