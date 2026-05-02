@@ -408,20 +408,20 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
         memset(out->lli, ' ', alloc);
     }
 
-    /* Find the best fit for `req`. */
+    /* Find the first fit for `req` (first-fit avoids walking the full list
+     * and reduces cache misses from pointer-chasing into the obs array). */
     best = best_prev = -1;
-    best_size = INT_MAX;
+    best_size = 0;
     for (curr = (int)out->obs[1], prev = 0;
         curr > 0 && curr < out->obs[0];
         prev = curr, curr = (int)out->obs[curr + 1])
     {
-        if (out->obs[curr] < req)
-            continue;
-        if (out->obs[curr] < best_size)
+        if (out->obs[curr] >= req)
         {
             best = curr;
             best_prev = prev;
             best_size = (int)out->obs[curr];
+            break;
         }
     }
 
