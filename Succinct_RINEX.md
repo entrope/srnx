@@ -163,11 +163,11 @@ The ULEB128 for the initial time-of-day is hours times 1e11 plus minutes
 times 1e9 plus seconds times 1e7.
 
 When adding the interval to the previous epoch's timestamp, minutes and
-seconds reset to zero when the new sum is exactly 60, but hours do not
-wrap.
-Thus, leap seconds and day boundaries MUST be represented in a new RLE
-entry.
-Sub-second intervals during a leap second MUST NOT reset to 0 seconds.
+seconds that are at least 60 MUST carry into the next higher unit,
+except at the end of the day (to allow for representing 23:59:60 plus
+any fraction as a leap second).
+A timestamp greater than or equal to 23:59:61 is illegal.
+The first epoch in each day MUST start a new span within the EPOC block.
 
 The RLE-encoded receiver clock offsets are stored as a receiver clock
 offset, represented as SLEB128 of the original value times 1e12,
@@ -189,7 +189,7 @@ order.
 The number of signals is controlled by the `RHDR` chunk payload.
 A zero file offset means that signal was never observed.
 
-A given satellite name must be used in at most one `SATE` chunk.
+A given satellite name MUST be used in at most one `SATE` chunk.
 
 #### Satellite epoch presence
 
