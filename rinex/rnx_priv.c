@@ -269,3 +269,33 @@ int parse_uint
     *p_out = value;
     return 0;
 }
+
+/* Documentation comment in rnx_priv.h. */
+int rnx_parse_satid
+(
+    char *p_sys,
+    unsigned char *p_num,
+    const char satid[3]
+)
+{
+    unsigned char sys = (unsigned char)satid[0];
+    unsigned char d1 = (unsigned char)satid[1];
+    unsigned char d2 = (unsigned char)satid[2];
+
+    /* Valid system letters: ' ' (GPS-only v2), 'G', 'R', 'S', 'E', 'C', 'J', 'I'. */
+    if (sys != ' ' && sys != 'G' && sys != 'R' && sys != 'S'
+        && sys != 'E' && sys != 'C' && sys != 'J' && sys != 'I')
+    {
+        return EINVAL;
+    }
+
+    /* Both digit positions must be decimal digits. */
+    if (d1 < '0' || d1 > '9' || d2 < '0' || d2 > '9')
+    {
+        return EINVAL;
+    }
+
+    *p_sys = (char)sys;
+    *p_num = (d1 - '0') * 10 + (d2 - '0');
+    return 0;
+}

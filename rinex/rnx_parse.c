@@ -289,7 +289,14 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
         {
             return err;
         }
-        return rnx_read_v34_observations(p, line);
+        err = rnx_read_v34_observations(p, line);
+        if (err != RINEX_SUCCESS)
+        {
+            /* On parse error, back up to the epoch header start
+             * so the next read() attempt starts at the next epoch. */
+            p->parse_ofs = res;
+        }
+        return err;
 
     case '2': case '3': case '4': case '5':
         /* We already did most of the work. */

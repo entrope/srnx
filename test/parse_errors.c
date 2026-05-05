@@ -40,6 +40,22 @@ const unsigned char parse_errors_v2[] =
     "        36.250          13.750\n" /* EOF before end of observation data */
     NUL_PAD;
 
+/* RINEX v2 with invalid satellite ID (spaces instead of digits). */
+const unsigned char parse_errors_v2_bad_satid[] =
+    "     2.11           OBSERVATION DATA                        RINEX VERSION / TYPE\n"
+    "teqc  2019Feb25     NOAA/NOS/NGS/CORS   20200720 01:36:16UTCPGM / RUN BY / DATE\n"
+    "     1     1                                                WAVELENGTH FACT L1/2\n"
+    "     5    L1    L2    C1    P2    P1                        # / TYPES OF OBSERV\n"
+    "     1.0000                                                 INTERVAL\n"
+    "  2020     7    18     0     0    0.0000000     GPS         TIME OF FIRST OBS\n"
+    "    18                                                      LEAP SECONDS\n"
+    "                                                            END OF HEADER\n"
+    " 20  7 18  0  0  0.0000000  0  1G  \n" /* "G  " - spaces instead of digits */
+    " 128250890.43255  99935750.10844  24405331.29833  24405326.45422  24405330.63211\n"
+    " 20  7 18  0  0  1.0000000  0  1G13\n" /* valid epoch after the bad one */
+    " 128250890.43255  99935750.10844  24405331.29833  24405326.45422  24405330.63211\n"
+    NUL_PAD;
+
 /* Based on the header of at012000.20o. */
 const unsigned char parse_errors_v2_b[] =
     "     2.11           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE\n"
@@ -90,6 +106,18 @@ const unsigned char parse_errors_v3[] =
     "I01  28541439.844 5 149986288.81705      1175.101 5        35.700\n"
     "> 2020 07 07 00 00  7.0000000  2  1\n"
     "Event flag 2 indicates the antenna started moving           COMMENT\n"
+    NUL_PAD;
+
+/* RINEX v3 with invalid satellite ID (spaces instead of digits). */
+const unsigned char parse_errors_v3_bad_satid[] =
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n"
+    "G    4 C1C L1C D1C S1C                                      SYS / # / OBS TYPES\n"
+    "     0                                                      RCV CLOCK OFFS APPL\n"
+    "                                                            END OF HEADER\n"
+    "> 2020 07 07 00 00  0.0000000  0  1\n" /* "G  " - spaces instead of digits */
+    "G  \n"
+    "> 2020 07 07 00 00  1.0000000  0  1\n" /* valid epoch after the bad one */
+    "G13  28541439.844 5 149986288.817 1175.101 5        35.700\n"
     NUL_PAD;
 
 void
@@ -177,13 +205,68 @@ void test_parse_errors_v3(void)
     cmp_ok(err, "==", RINEX_EOF, "rinex v3 read() after EOF is stable");
 }
 
+/* Tests for invalid satellite IDs (e.g. "G  " with spaces instead of digits). */
+void test_parse_errors_v2_bad_satid(void)
+{
+    struct rinex_stream *v2;
+    struct rinex_parser *p;
+    const char *msg;
+    rinex_error_t err;
+
+    p = NULL;
+    v2 = rinex_buffer_stream(parse_errors_v2_bad_satid,
+        sizeof parse_errors_v2_bad_satid - sizeof NUL_PAD);
+    msg = rinex_open(&p, v2);
+    if (msg || !p)
+        BAIL_OUT();
+
+    /* 3 tests */
+    err = p->read(p);
+    cmp_ok(err, "==", RINEX_ERR_BAD_FORMAT, "rinex v2 bad satid rejected");
+    err = p->read(p);
+    ok(err == RINEX_SUCCESS, "rinex v2 epoch after bad satid succeeds");
+    err = p->read(p);
+    cmp_ok(err, "==", RINEX_EOF, "rinex v2 read() after EOF is stable");
+
+    p->destroy(p);
+    v2->destroy(v2);
+}
+
+void test_parse_errors_v3_bad_satid(void)
+{
+    struct rinex_stream *v3;
+    struct rinex_parser *p;
+    const char *msg;
+    rinex_error_t err;
+
+    p = NULL;
+    v3 = rinex_buffer_stream(parse_errors_v3_bad_satid,
+        sizeof parse_errors_v3_bad_satid - sizeof NUL_PAD);
+    msg = rinex_open(&p, v3);
+    if (msg || !p)
+        BAIL_OUT();
+
+    /* 3 tests */
+    err = p->read(p);
+    cmp_ok(err, "==", RINEX_ERR_BAD_FORMAT, "rinex v3 bad satid rejected");
+    err = p->read(p);
+    ok(err == RINEX_SUCCESS, "rinex v3 epoch after bad satid succeeds");
+    err = p->read(p);
+    cmp_ok(err, "==", RINEX_EOF, "rinex v3 read() after EOF is stable");
+
+    p->destroy(p);
+    v3->destroy(v3);
+}
+
 int main(int argc, char *argv[])
 {
-    plan(8+1+8);
+    plan(8+1+8+3+3);
 
     test_parse_errors_v2();
     test_parse_errors_v2_b();
     test_parse_errors_v3();
+    test_parse_errors_v2_bad_satid();
+    test_parse_errors_v3_bad_satid();
 
     done_testing(); (void)argc; (void)argv;
 }

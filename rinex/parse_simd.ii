@@ -43,8 +43,8 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
     {
         /* Determine the satellite identifier. */
         const char *sv_name = epoch + 32 + 3 * (ii % 12);
-        int n_obs = p->base.n_obs[sv_name[0] & 31];
-        char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
+        char sys;
+        unsigned char num;
 
         /* There are 12 satellite names per header line. */
         if (ii % 12 == 11)
@@ -52,10 +52,16 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
             epoch = strchr(epoch, '\n') + 1;
         }
 
-        /* Save satellite information. */
-        p->base.sats[ii].system = sv_name[0];
-        p->base.sats[ii].number = svn;
+        /* Validate and save satellite information. */
+        if (rnx_parse_satid(&sys, &num, sv_name))
+        {
+            p->base.error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        p->base.sats[ii].system = sys;
+        p->base.sats[ii].number = num;
         p->base.sats[ii].obs_0 = nn;
+        int n_obs = p->base.n_obs[sys & 31];
 
         /* Read each observation for this satellite. */
         for (jj = 0; jj < n_obs; ++jj, ++nn)
@@ -131,14 +137,20 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
     {
         /* Look up the satellite system's observation count. */
         const char *sv_name = obs;
-        short n_obs = p->base.n_obs[sv_name[0] & 31];
-        char svn = (sv_name[1] - '0') * 10 + sv_name[2] - '0';
+        char sys;
+        unsigned char num;
         obs += 3;
 
-        /* Save satellite information. */
-        p->base.sats[ii].system = sv_name[0];
-        p->base.sats[ii].number = svn;
+        /* Validate and save satellite information. */
+        if (rnx_parse_satid(&sys, &num, sv_name))
+        {
+            p->base.error_line = __LINE__;
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        p->base.sats[ii].system = sys;
+        p->base.sats[ii].number = num;
         p->base.sats[ii].obs_0 = nn;
+        short n_obs = p->base.n_obs[sys & 31];
 
         /* Read each observation for this satellite. */
         for (jj = 0; jj < n_obs; ++jj, ++nn)

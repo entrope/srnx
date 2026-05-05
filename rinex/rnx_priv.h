@@ -273,6 +273,24 @@ int parse_uint
     int width
 );
 
+/** Validates a 3-character satellite ID.
+ *
+ * A valid satellite ID consists of a GNSS system letter followed by
+ * two decimal digits. The valid system letters are ' ' (GPS-only RINEX v2),
+ * 'G', 'R', 'S', 'E', 'C', 'J', 'I'.
+ *
+ * \param[out] p_sys Receives the system character.
+ * \param[out] p_num Receives the satellite number (01..99).
+ * \param[in] satid Pointer to the 3-character satellite ID.
+ * \returns Zero on success, else EINVAL if the ID is invalid.
+ */
+int rnx_parse_satid
+(
+    char *p_sys,
+    unsigned char *p_num,
+    const char satid[3]
+);
+
 /* The following macro-heavy code supports runtime selection of function
  * variants that use platform-specific instructions such as SIMD.
  */
