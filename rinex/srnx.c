@@ -1954,38 +1954,9 @@ static int decode_observations(
             break;
         }
 
-        /* Transpose the matrix. */
-        if (count == 128)
-        {
-            /* Split a 128-wide matrix into four 32-wide transposes.
-             * Each row is 16 bytes; extract four 4-byte slices per row. */
-            char tmp[4 * 32];
-            int rr, qq;
-
-            for (qq = 0; qq < 4; qq++)
-            {
-                for (rr = 0; rr < bits; rr++)
-                    memcpy(tmp + rr * 4, data + rr * 16 + qq * 4, 4);
-                transpose(p_socd->obs + idx + qq * 32, tmp, bits, 32);
-            }
-        }
-        else if (count == 64)
-        {
-            /* Split a 64-wide matrix into two 32-wide transposes. */
-            char tmp[4 * 32];
-            int rr;
-
-            for (rr = 0; rr < bits; rr++)
-                memcpy(tmp + rr * 4, data + rr * 8, 4);
-            transpose(p_socd->obs + idx, tmp, bits, 32);
-            for (rr = 0; rr < bits; rr++)
-                memcpy(tmp + rr * 4, data + rr * 8 + 4, 4);
-            transpose(p_socd->obs + idx + 32, tmp, bits, 32);
-        }
-        else
-        {
-            transpose(p_socd->obs + idx, data, bits, count);
-        }
+        /* Transpose the matrix.  The block is a K-rows × (count/8)-bytes
+         * row-major bit matrix; transpose() handles all supported widths. */
+        transpose(p_socd->obs + idx, data, bits, count);
 
         /* Update bookkeeping. */
         data += (count >> 3) * bits;
