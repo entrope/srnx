@@ -225,8 +225,13 @@ padding to fill out the eight bytes.
 
 Loss-of-lock indicators (LLIs) are represented with a ULEB128 length of
 the compressed LLIs, in bytes of file content.
-The compressed LLIs are run-length encoded, with the LLI character
-(typically ' ', or '0' through '9') followed by a ULEB128 count-minus-1.
+The compressed LLIs are run-length encoded.
+The permitted LLI symbols are the eleven characters `" 0123456789"`.
+Each run is encoded as a single ULEB128 value equal to
+`(count - 1) * 11 + idx`, where `idx` is the zero-based index of the
+symbol within `" 0123456789"` (0 for space, 1 through 10 for `'0'`
+through `'9'`), and `count` is the run length.
+An encoder MUST reject any LLI symbol that is not in this alphabet.
 
 If the total number of encoded LLIs is smaller than the number of
 observations given for the signal, the remainder are spaces (' ').
@@ -234,7 +239,8 @@ observations given for the signal, the remainder are spaces (' ').
 #### Signal-strength indicators
 
 Signal-strength indicators are represented using the same RLE encoding
-as loss-of-lock indicators.
+as loss-of-lock indicators (eleven-symbol alphabet, packed ULEB128 per
+run).
 
 #### Packed observation data
 
@@ -276,10 +282,12 @@ Each block begins with one byte that identifies the block packing.
 | :----------: | :---------- |
 | `000kkkkk` | 8×`(k+1)` bit matrix |
 | `001kkkkk` | 16×`(k+1)` bit matrix |
-| `010kkkkk` | 32×`(k+1)` bit matrix |
-| `011kkkkk` | 64×`(k+1)` bit matrix |
-| `100kkkkk` | 128×`(k+1)` bit matrix |
-| `101xxxxx` through `11111100` | reserved |
+| `010kkkkk` | 24×`(k+1)` bit matrix |
+| `011kkkkk` | 32×`(k+1)` bit matrix |
+| `100kkkkk` | 40×`(k+1)` bit matrix |
+| `101kkkkk` | 48×`(k+1)` bit matrix |
+| `110kkkkk` | 112×`(k+1)` bit matrix |
+| `111xxxxx` through `11111100` | reserved |
 | `11111101` | ULEB128 count-minus-1 of absent values |
 | `11111110` | ULEB128 count-minus-1 of zero values |
 | `11111111` | ULEB128 count-minus-1 of SLEB128 values |
@@ -292,11 +300,12 @@ Accordingly, the delta accumulator is not advanced when decoding an
 absent-values block; absent values are returned as `INT64_MIN` without
 altering the decoder's running state.
 
-An `m×(k+1)` bit matrix (where `m` is 8, 16, 32, 64 or 128) is stored as `m`
-values, each with `k+1` bits in the file, in bitwise transposed order.
+An `m×(k+1)` bit matrix (where `m` is 8, 16, 24, 32, 40, 48, or 112)
+is stored as `m` values, each with `k+1` bits in the file, in bitwise
+transposed order.
 That is, the most significant bit from each value is stored first, with
 the MSB of the first value in the MSB of the first byte and continuing
-for `m/8` bytes (1, 2, 4 or 8 bytes respectively).
+for `m/8` bytes.
 The full matrix is thus `k+1` rows, each `m/8` bytes long, in big-endian
 bit and byte order, for a total of `(k+1) × m/8` bytes.
 The `k+1` bits are in two's-complement format, so the first (most
@@ -307,7 +316,7 @@ The use of this bit matrix representation was inspired by
 
 #### Encoder guidance
 
-The variable block sizes (8, 16, 32, 64, 128) allow an encoder to adapt to local
+The variable block sizes (8, 16, 24, 32, 40, 48, 112) allow an encoder to adapt to local
 variation in bit-widths.
 Recommended encoding procedure for each (satellite, observation code):
 

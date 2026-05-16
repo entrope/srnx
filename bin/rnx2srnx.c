@@ -213,10 +213,22 @@ static void write_chunk(struct mmbuf *mm, const char fourcc[4],
 
 /* ---- RLE-encode indicator array (LLI or SSI) ---- */
 
-static void rle_encode_indicators(struct wbuf *wb, const char *ind, int count)
+/* " 0123456789" — the only 11 symbols permitted in LLI/SSI streams. */
+static const char indicator_alphabet[] = " 0123456789";
+
+/* Returns the alphabet index of ch, or -1 if not in alphabet. */
+static int indicator_idx(unsigned char ch)
+{
+    if (ch == ' ') return 0;
+    if (ch >= '0' && ch <= '9') return 1 + (ch - '0');
+    return -1;
+}
+
+static void rle_encode_indicators(struct wbuf *wb, const char *ind, int count,
+    const char *filename, const char *type)
 {
     struct wbuf rle;
-    int ii, run_start;
+    int ii, run_start, idx;
     char cur;
 
     wbuf_init(&rle);
@@ -232,8 +244,15 @@ static void rle_encode_indicators(struct wbuf *wb, const char *ind, int count)
         run_start = ii;
         while (ii < count && ind[ii] == cur)
             ii++;
-        wbuf_byte(&rle, (unsigned char)cur);
-        wbuf_uleb128(&rle, ii - run_start - 1);
+        idx = indicator_idx((unsigned char)cur);
+        if (idx < 0)
+        {
+            fprintf(stderr, "%s: %s byte 0x%02X not in alphabet\n",
+                filename, type, (unsigned char)cur);
+            exit(EXIT_FAILURE);
+        }
+        /* Packed encoding: single ULEB128 = (count-1)*11 + idx */
+        wbuf_uleb128(&rle, (uint64_t)(ii - run_start - 1) * 11 + (uint64_t)idx);
     }
 
     wbuf_uleb128(wb, rle.used);
@@ -315,7 +334,7 @@ struct rnx2srnx_scratch
     int64_t *full_scaled;    /**< cap */
     int64_t *present_scaled; /**< cap */
     int64_t *dp;             /**< cap + 1 */
-    uint8_t *mx;             /**< 5 * cap : mx for dp_core window-max */
+    uint8_t *spt;            /**< 7 * cap : sparse table for dp_core window-max */
     uint8_t *all_bw;         /**< 8 * cap : bw for all 8 delta orders */
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a; /**< cap; "best so far" */
@@ -333,7 +352,7 @@ static void scratch_free(struct rnx2srnx_scratch *s)
     free(s->full_scaled);
     free(s->present_scaled);
     free(s->dp);
-    free(s->mx);
+    free(s->spt);
     free(s->all_bw);
     free(s->psum_arr);
     free(s->choices_a);
@@ -364,7 +383,7 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
     s->full_scaled    = xrealloc(s->full_scaled,      cap * sizeof *s->full_scaled);
     s->present_scaled = xrealloc(s->present_scaled,   cap * sizeof *s->present_scaled);
     s->dp             = xrealloc(s->dp,         (cap + 1) * sizeof *s->dp);
-    s->mx             = xrealloc(s->mx,           5 * cap * sizeof *s->mx);
+    s->spt             = xrealloc(s->spt,           7 * cap * sizeof *s->spt);
     s->all_bw         = xrealloc(s->all_bw,       8 * cap * sizeof *s->all_bw);
     s->psum_arr       = xrealloc(s->psum_arr,   (cap + 1) * sizeof *s->psum_arr);
     s->choices_a      = xrealloc(s->choices_a,        cap * sizeof *s->choices_a);
@@ -372,7 +391,65 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
     s->cap = cap;
 }
 
-/** Core DP: window-max tables + right-to-left walk.
+/* Block sizes for high-3-bits values 0..6. */
+static const int cand[7] = {8, 16, 24, 32, 40, 48, 112};
+
+/* Per-cand[] sparse table: spt[k * cap + ii] = max(bw[ii .. ii + cand[k])).
+ * Query is a direct load: max_bw for candidate ci starting at ii is
+ * scratch->spt[ci * scratch->cap + ii]. */
+static void build_spt(struct rnx2srnx_scratch *scratch,
+    const uint8_t *bw, int count)
+{
+    uint8_t *spt = scratch->spt;
+    size_t cap = scratch->cap;
+    int ii, jj;
+
+    /* Level 0: window = cand[0] = 8; scan 8 elements directly. */
+    for (ii = 0; ii + 8 <= count; ++ii)
+    {
+        uint8_t mx = bw[ii];
+        for (jj = 1; jj < 8; ++jj)
+        {
+            if (bw[ii + jj] > mx)
+                mx = bw[ii + jj];
+        }
+        spt[ii] = mx;
+    }
+
+    /* Levels 1..5: cand[k] = cand[k-1]+8, so spt[k][ii] = max(spt[0][ii], spt[k-1][ii+8]).
+     * Back-to-front single pass: when processing ii, ii+8 is already written for this
+     * sweep, so all five levels can be updated at each position in one pass. */
+    for (ii = count - 8; ii > 0; )
+    {
+        uint8_t a, b, *s = spt + --ii;
+
+        a = s[0]; b = s[8];  a = a > b ? a : b;  s[1 * cap] = a;
+        b = s[1 * cap + 8];  a = a > b ? a : b;  s[2 * cap] = a;
+        b = s[2 * cap + 8];  a = a > b ? a : b;  s[3 * cap] = a;
+        b = s[3 * cap + 8];  a = a > b ? a : b;  s[4 * cap] = a;
+        b = s[4 * cap + 8];  a = a > b ? a : b;  s[5 * cap] = a;
+    }
+
+    /* Level 6: cand[6] = 112 = cand[5]+cand[5]+cand[1] = 48+48+16.
+     * spt[6][ii] = max(spt[5][ii], spt[5][ii+48], spt[1][ii+96]). */
+    if (count < 112)
+        return;
+    {
+        const uint8_t *l1 = spt + 1 * cap;
+        const uint8_t *l5 = spt + 5 * cap;
+        uint8_t *l6 = spt + 6 * cap;
+        for (ii = 0; ii + 112 <= count; ++ii)
+        {
+            uint8_t a = l5[ii + 0];
+            uint8_t b = l5[ii + 48];
+            uint8_t c = l1[ii + 96];
+            uint8_t mx = a > b ? a : b;
+            l6[ii] = mx > c ? mx : c;
+        }
+    }
+}
+
+/** Core DP: sparse-table window-max + right-to-left walk.
  *
  * \a bw is a pre-filled array of \a count bit-widths.  SLEB128 byte lengths
  * are derived from \a bw via the \c sleb128_len_from_bw lookup table.  \a vals
@@ -381,8 +458,6 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
 static int64_t dp_core(struct rnx2srnx_scratch *scratch,
     const int64_t *vals, const uint8_t *bw, int count, struct block_choice *choices)
 {
-    static const int cand[] = {8, 16, 32, 64, 128};
-    uint8_t *mx[5];
     int64_t *dp;
     uint32_t *psum;
     int64_t result, cost;
@@ -390,52 +465,31 @@ static int64_t dp_core(struct rnx2srnx_scratch *scratch,
 
     dp = scratch->dp;
     psum = scratch->psum_arr;
-    for (ci = 0; ci < 5; ++ci)
-        mx[ci] = scratch->mx + scratch->cap * (size_t)ci;
+
+    /* Build sparse table for O(1) range-max queries. */
+    build_spt(scratch, bw, count);
 
     /* Prefix sums of SLEB128 byte lengths, derived from bit-widths.
      * SLEB128 length is a function of bit-width alone, so we can look
-     * it up instead of storing a separate array. */
+     * it up instead of storing a separate array.
+     */
     psum[0] = 0;
     for (ii = 0; ii < count; ++ii)
         psum[ii + 1] = psum[ii] + sleb128_len_from_bw[bw[ii]];
-
-    /* Window of size 8 (ci=0): scan 8 values per position.  This is the
-     * one O(count*8) step; subsequent windows double in O(count). */
-    for (ii = 0; ii + 8 <= count; ++ii)
-    {
-        uint8_t m = bw[ii];
-        int kk;
-        for (kk = 1; kk < 8; ++kk)
-            if (bw[ii + kk] > m)
-                m = bw[ii + kk];
-        mx[0][ii] = m;
-    }
-
-    /* Doubling for ci = 1..4 (m = 16, 32, 64, 128). */
-    for (ci = 1; ci < 5; ++ci)
-    {
-        int half = cand[ci - 1]; /* size of previous window */
-        int m = cand[ci];
-        for (ii = 0; ii + m <= count; ++ii)
-        {
-            uint8_t a = mx[ci - 1][ii];
-            uint8_t b = mx[ci - 1][ii + half];
-            mx[ci][ii] = a > b ? a : b;
-        }
-    }
 
     dp[count] = 0;
 
     /* zlen_next = length of the maximal zero run starting at ii+1,
      * maintained as we walk right-to-left.  Avoids O(N) re-scanning at
-     * every position (which would be O(N^2) on constant signals). */
+     * every position (which would be O(N^2) on constant signals).
+     */
     zlen_next = 0;
 
     for (ii = count - 1; ii >= 0; --ii)
     {
         int remaining = count - ii;
         int64_t best = INT64_MAX;
+        uint32_t pii;
         struct block_choice best_choice = {BK_SLEB, 0, 1};
 
         /* Zero-run transition (only the maximal run; splitting never wins). */
@@ -454,17 +508,16 @@ static int64_t dp_core(struct rnx2srnx_scratch *scratch,
         }
 
         /* Block transitions.  cand[] is ascending so we can stop once
-        * remaining < m. */
-        for (ci = 0; ci < 5; ++ci)
+         * remaining < m or the bit width is too large.
+         */
+        for (ci = 0; ci < 7; ++ci)
         {
             int m = cand[ci];
             int max_bw;
 
-            if (remaining < m)
+            max_bw = scratch->spt[(size_t)ci * scratch->cap + ii];
+            if (remaining < m || max_bw > 32)
                 break;
-            max_bw = mx[ci][ii];
-            if (max_bw > 32)
-                continue;
             cost = 1 + (int64_t)max_bw * m / 8 + dp[ii + m];
             if (cost < best)
             {
@@ -477,20 +530,19 @@ static int64_t dp_core(struct rnx2srnx_scratch *scratch,
 
         /* SLEB128-run transition: consider every length 1..min(remaining,16).
          * The overhead of 2 bytes is the header byte plus single count byte.
-         * Use prefix sums so each iteration is independent (no carry chain). */
+         * Use prefix sums so each iteration is independent (no carry chain).
+         */
         max_L = remaining < 16 ? remaining : 16;
+        pii = psum[ii];
+        for (L = 1; L <= max_L; ++L)
         {
-            uint32_t pii = psum[ii];
-            for (L = 1; L <= max_L; ++L)
+            cost = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
+            if (cost < best)
             {
-                cost = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
-                if (cost < best)
-                {
-                    best = cost;
-                    best_choice.kind = BK_SLEB;
-                    best_choice.bw = 0;
-                    best_choice.len = L;
-                }
+                best = cost;
+                best_choice.kind = BK_SLEB;
+                best_choice.bw = 0;
+                best_choice.len = L;
             }
         }
 
@@ -531,25 +583,16 @@ static void precompute_all_bw(struct rnx2srnx_scratch *scratch,
  * \c choices[i].len steps reproduces the optimal block sequence.
  *
  * Runs in O(count) time: bit-widths are computed once, and the per-window
- * max over each candidate block size m ∈ {8,16,32,64,128} is built by
- * doubling (mx[k+1][i] = max(mx[k][i], mx[k][i + 2^k])).
+ * max over each candidate block size m ∈ {8,16,24,32,40,48,112} is built
+ * by a power-of-2 sparse table (7 levels, O(count) build, O(1) query).
  */
 static int64_t compute_block_dp(struct rnx2srnx_scratch *scratch,
     const int64_t *vals, uint8_t *bw, int count, struct block_choice *choices)
 {
-    int ii;
-
     if (count <= 0)
         return 0;
 
     scratch_reserve(scratch, (size_t)count);
-
-    if (!bw)
-    {
-        bw = scratch->mx;
-        for (ii = 0; ii < count; ++ii)
-            bw[ii] = (uint8_t)twos_comp_bw(vals[ii]);
-    }
 
     return dp_core(scratch, vals, bw, count, choices);
 }
@@ -669,12 +712,14 @@ static void emit_blocks(struct wbuf *packed, const int64_t *ord_vals,
         case BK_BLOCK:
         {
             unsigned char header;
-            int log2m =
+            int hi3 =
                 c.len ==   8 ? 0 :
                 c.len ==  16 ? 1 :
-                c.len ==  32 ? 2 :
-                c.len ==  64 ? 3 : 4; /* c.len == 128 */
-            header = (unsigned char)(log2m << 5)
+                c.len ==  24 ? 2 :
+                c.len ==  32 ? 3 :
+                c.len ==  40 ? 4 :
+                c.len ==  48 ? 5 : 6; /* c.len == 112 */
+            header = (unsigned char)(hi3 << 5)
                    | (unsigned char)(c.bw - 1);
             wbuf_byte(packed, header);
             write_transposed_block(packed, ord_vals + ii, c.len, c.bw);
@@ -821,7 +866,8 @@ static size_t write_socd_chunk(struct mmbuf *mm,
     struct rnx2srnx_scratch *scratch,
     const struct rinex_data *data,
     const struct rinex_satellite_data *sv, int sig_idx,
-    const struct rinex_system_data *p_sys)
+    const struct rinex_system_data *p_sys,
+    const char *filename)
 {
     struct wbuf payload;
     size_t offset;
@@ -852,8 +898,8 @@ static size_t write_socd_chunk(struct mmbuf *mm,
     wbuf_uleb128(&payload, obs_count - 1);
 
     /* RLE-encode LLI and SSI. */
-    rle_encode_indicators(&payload, lli_arr, obs_count);
-    rle_encode_indicators(&payload, ssi_arr, obs_count);
+    rle_encode_indicators(&payload, lli_arr, obs_count, filename, "LLI");
+    rle_encode_indicators(&payload, ssi_arr, obs_count, filename, "SSI");
 
     /* Compute GCD of non-missing observation values (skip INT64_MIN sentinel). */
     obs_gcd = 0;
@@ -1409,7 +1455,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
                 goto done;
             }
             for (jj = 0; jj < n_obs; ++jj)
-                socd_offsets[jj] = write_socd_chunk(&mm, &scratch, &data, p_sv, jj, p_sys);
+                socd_offsets[jj] = write_socd_chunk(&mm, &scratch, &data, p_sv, jj, p_sys, input_name);
 
             /* Write SATE chunk. */
             sate_pos = mm.used;

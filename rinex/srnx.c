@@ -1625,19 +1625,21 @@ static int decompress_indicators(
     const char *end
 )
 {
-    uint64_t ii, count;
-    char ind;
+    static const char alphabet[] = " 0123456789";
+    uint64_t ii, val, count;
 
-    /* Decompress the RLE-compressed data. */
+    /* Decompress the RLE-compressed data.
+     * Each run is a single ULEB128: val = (count-1)*11 + idx, where
+     * idx indexes alphabet[] (0=' ', 1..10='0'..'9'). */
     for (ii = 0; in < end; )
     {
-        ind = *in++;
-        count = uleb128(&in) + 1;
+        val = uleb128(&in);
+        count = val / 11 + 1;
         if (ii + count > n_values)
         {
             return SRNX_CORRUPT;
         }
-        memset(out + ii, ind, count);
+        memset(out + ii, alphabet[val % 11], count);
         ii += count;
     }
     if (in > end)
@@ -1927,16 +1929,20 @@ static int decode_observations(
         }
 
         /* It looks like a transposed bit matrix.
-         * Top three bits select width: 000=8, 001=16, 010=32, 011=64, 100=128.
+         * Top three bits select width: 000=8, 001=16, 010=24, 011=32,
+         *   100=40, 101=48, 110=112.
          * Bottom five bits are k; bits per value = k+1 (1..32).
          * Cast to unsigned char before shifting to avoid sign-extension UB. */
-        if ((unsigned char)ch >> 5 > 4)   /* 0xA0-0xFC are reserved */
+        if ((unsigned char)ch >> 5 == 7)   /* 0xE0-0xFC are reserved */
         {
             p_socd->parent->error_line = __LINE__;
             res = SRNX_CORRUPT;
             goto out;
         }
-        count = 8 << ((unsigned char)ch >> 5); /* output values: 8, 16, 32, 64, or 128 */
+        {
+            static const int block_sizes[7] = {8, 16, 24, 32, 40, 48, 112};
+            count = block_sizes[(unsigned char)ch >> 5];
+        }
         bits = ((unsigned char)ch & 31) + 1; /* bits per output value: 1..32 */
 
         /* Do we have enough data? */

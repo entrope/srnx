@@ -71,8 +71,14 @@ target_link_libraries(rnxcmp rinex)
 add_executable(rnx2srnx bin/rnx2srnx.c)
 target_link_libraries(rnx2srnx rinex)
 
+add_executable(rnx2srnx_search bin/rnx2srnx_search.c)
+target_link_libraries(rnx2srnx_search rinex)
+
 add_executable(srnx_scan bin/srnx_scan.c)
 target_link_libraries(srnx_scan rinex)
+
+add_executable(srnx_split bin/srnx_split.c)
+target_link_libraries(srnx_split rinex)
 
 add_executable(srnx2rnx bin/srnx2rnx.c)
 target_link_libraries(srnx2rnx rinex)

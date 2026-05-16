@@ -328,12 +328,13 @@ static void scan_file(const char *filename, file_stats_t *stats)
                 uint8_t header = *(const uint8_t *)rptr++;
                 stats->block_header_count[header]++;
 
-                if (header >> 5 <= 4)
+                if (header >> 5 < 7)
                 {
                     /* Bit matrix: (k+1) rows × (m/8) bytes each.
                      * bits per value = (header & 0x1F) + 1
-                     * m = 8 << (header >> 5), covering 8/16/32/64/128 */
-                    rptr += ((header & 0x1F) + 1) * (1 << (header >> 5));
+                     * m ∈ {8,16,24,32,40,48,112} per high-3-bit index */
+                    static const int block_sizes[7] = {8,16,24,32,40,48,112};
+                    rptr += ((header & 0x1F) + 1) * (block_sizes[header >> 5] / 8);
                 }
                 else if (header == 0xFD)
                 {
@@ -352,7 +353,7 @@ static void scan_file(const char *filename, file_stats_t *stats)
                     for (uint64_t j = 0; j <= run_count; j++)
                         read_sleb128(&rptr);
                 }
-                /* 0xA0–0xFC: reserved, no payload to skip. */
+                /* 0xE0–0xFC: reserved, no payload to skip. */
             }
 
             if (rptr != packed_end)
@@ -412,9 +413,10 @@ static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
 
 static void print_block_header(int i, uint64_t count)
 {
-    if (i < 0xA0)
+    static const int block_sizes[7] = {8, 16, 24, 32, 40, 48, 112};
+    if (i >> 5 < 7)
     {
-        int m = 8 << (i >> 5);
+        int m = block_sizes[i >> 5];
         int bits = (i & 0x1F) + 1;
         printf("  0x%02X (%d\xc3\x97%d-bit matrix): %" PRIu64 "\n",
             i, m, bits, count);

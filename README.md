@@ -159,6 +159,32 @@ cmake -G Ninja -B +release -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ninja -C +release
 ```
 
+## Tools
+
+### rnx2srnx_search
+
+Compression-measurement clone of `rnx2srnx` used to evaluate which set
+of SRNX bit-transposed block sizes minimizes the encoded byte count for
+a corpus.  The format's block header byte affords up to seven distinct
+matrix-block sizes; this tool lets each candidate set (any ascending
+tuple of multiples of 8, up to length 7, must include 8) be measured.
+
+It parses each input file once and then, for every requested tuple,
+re-runs the block-selection DP and reports the would-be total file
+size.  No SRNX bytes are written, so non-spec sizes (e.g. 24, 48) can
+be tried freely.
+
+```bash
+rnx2srnx_search --tuple=8,16,32,64,128 \
+                --tuple=8,16,24,32,64,128 \
+                --tuples-file=tuples.txt \
+                input.20o [input2.20o ...]
+```
+
+Output is tab-separated `<file>\t<tuple>\t<bytes>` on stdout.  Adding
+`--timing` prints a `# ...` line per file on stderr with parse and
+per-tuple evaluation times.
+
 ## Generating flame graphs
 
 ```bash

@@ -16,7 +16,7 @@ extern "C" {
  * \param[out] out  Receives transposed, sign-extended values.
  * \param[in] in    Input bit matrix.
  * \param[in] bits  Number of rows in \a in.
- * \param[in] count Number of columns in \a in.  Must be one of {8, 16, 32, 64, 128}.
+ * \param[in] count Number of columns in \a in.  Must be a positive multiple of 8.
  */
 extern void transpose(int64_t *out, const char *in, int bits, int count);
 
