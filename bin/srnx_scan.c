@@ -131,6 +131,8 @@ typedef struct {
     int         n_scales;
     uint64_t    delta_order_count[8];
     uint64_t    block_header_count[256];
+    /* sleb_run_hist[n] = count of 0xFF blocks with run length n (1..128, >128). */
+    uint64_t    sleb_run_hist[130]; /* index 0 unused; index 129 = ">128" */
 } file_stats_t;
 
 static void scan_file(const char *filename, file_stats_t *stats)
@@ -350,6 +352,9 @@ static void scan_file(const char *filename, file_stats_t *stats)
                 {
                     /* SLEB128 run: ULEB128 count-minus-1, then values. */
                     uint64_t run_count = read_uleb128(&rptr);
+                    int hist_idx = (int)(run_count + 1);
+                    if (hist_idx > 128) hist_idx = 129;
+                    stats->sleb_run_hist[hist_idx]++;
                     for (uint64_t j = 0; j <= run_count; j++)
                         read_sleb128(&rptr);
                 }
@@ -409,6 +414,8 @@ static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
         agg->delta_order_count[i] += stats->delta_order_count[i];
     for (int i = 0; i < 256; i++)
         agg->block_header_count[i] += stats->block_header_count[i];
+    for (int i = 1; i <= 129; i++)
+        agg->sleb_run_hist[i] += stats->sleb_run_hist[i];
 }
 
 static void print_block_header(int i, uint64_t count)
@@ -471,6 +478,29 @@ static void print_summary(const file_stats_t *agg)
             if (agg->block_header_count[i] > 0)
             {
                 print_block_header(i, agg->block_header_count[i]);
+            }
+        }
+
+        uint64_t sleb_total = 0;
+        for (int i = 1; i <= 129; i++)
+            sleb_total += agg->sleb_run_hist[i];
+        if (sleb_total > 0)
+        {
+            printf("\nSLEB128 run lengths (0xFF blocks):\n");
+            uint64_t cumulative = 0;
+            for (int i = 1; i <= 129; i++)
+            {
+                if (agg->sleb_run_hist[i] == 0)
+                    continue;
+                cumulative += agg->sleb_run_hist[i];
+                if (i == 129)
+                    printf("  len >128: %10" PRIu64 "  (%.2f%% cumulative)\n",
+                        agg->sleb_run_hist[i],
+                        100.0 * (double)cumulative / (double)sleb_total);
+                else
+                    printf("  len %3d: %10" PRIu64 "  (%.2f%% cumulative)\n",
+                        i, agg->sleb_run_hist[i],
+                        100.0 * (double)cumulative / (double)sleb_total);
             }
         }
     }

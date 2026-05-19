@@ -195,7 +195,7 @@ perf script | stackcollapse-perf.pl > out.perf-folded && flamegraph.pl out.perf-
 ## Profiling via Instruments
 
 ```bash
-xctrace record --template 'CPU Profiler' --instrument 'Disk Usage' --instrument 'Disk I/O Latency' --launch -- ./+release/rinex_scan ...
+xctrace record --template 'CPU Profiler' --launch -- ./+release/rinex_scan ...
 ```
 
 Open the resulting *.trace folder in Instruments.app, via Finder or via

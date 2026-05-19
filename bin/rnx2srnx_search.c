@@ -23,6 +23,11 @@
 
 #include <ctype.h>
 #include <limits.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#elif defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +40,9 @@
  * + spec defaults) reproduces an unmodified rnx2srnx run's file size. */
 static int g_chunk_digest_id = 2;    /* CRC32C */
 static int g_file_digest_id  = 5;    /* BLAKE3-256 */
+
+/* Upper bound on SLEB128-run length considered by dp_core (--max-sleb-run). */
+static int g_max_sleb_run = 16;
 
 /* Runtime block-size tuple used by the DP and the byte-cost accounting.
  * MUST be sorted ascending, all multiples of 8, all in [8, MAX_BLOCK].
@@ -311,8 +319,9 @@ static int64_t dp_core(struct scratch *scratch,
 
     for (ii = count - 1; ii >= 0; --ii)
     {
-        int remaining = count - ii;
-        int64_t best = INT64_MAX;
+        int remaining = count - ii, sleb_min_L;
+        int64_t best = INT64_MAX, sleb_min;
+        uint32_t pii;
         struct block_choice best_choice = {BK_SLEB, 0, 1};
 
         /* Zero-run transition. */
@@ -355,21 +364,122 @@ static int64_t dp_core(struct scratch *scratch,
         }
         (void)last_fit;
 
-        /* SLEB128-run transition: lengths 1..min(remaining, 16). */
-        max_L = remaining < 16 ? remaining : 16;
+        /* SLEB128-run transition: consider every length 1..min(remaining,16).
+         * Costs fit in int32 (dp < 30 MB; psum delta <= 160 bytes for 16 vals).
+         * Process 16-wide SIMD chunks updating the running argmin; a scalar
+         * tail (starting at chunk_start) handles any remainder, making it
+         * straightforward to increase max_L beyond 16 later.
+         */
+        max_L = remaining < g_max_sleb_run ? remaining : g_max_sleb_run;
+        pii = psum[ii];
+        sleb_min = INT64_MAX;
+        sleb_min_L = 0;
         {
-            uint32_t pii = psum[ii];
-            for (L = 1; L <= max_L; ++L)
+            int chunk_start = 1;
+#if defined(__ARM_NEON)
+            for (; chunk_start + 15 <= max_L; chunk_start += 16)
             {
-                cost = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
-                if (cost < best)
-                {
-                    best = cost;
-                    best_choice.kind = BK_SLEB;
-                    best_choice.bw = 0;
-                    best_choice.len = L;
-                }
+                const int64_t *dpv = dp + ii + chunk_start;
+                int32x4_t dp0 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 0)), vmovn_s64(vld1q_s64(dpv+ 2)));
+                int32x4_t dp1 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 4)), vmovn_s64(vld1q_s64(dpv+ 6)));
+                int32x4_t dp2 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 8)), vmovn_s64(vld1q_s64(dpv+10)));
+                int32x4_t dp3 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+12)), vmovn_s64(vld1q_s64(dpv+14)));
+                uint32x4_t pii_v = vdupq_n_u32(pii);
+                const uint32_t *psv = psum + ii + chunk_start;
+                int32x4_t d0 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 0), pii_v));
+                int32x4_t d1 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 4), pii_v));
+                int32x4_t d2 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 8), pii_v));
+                int32x4_t d3 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+12), pii_v));
+                int32x4_t two = vdupq_n_s32(2);
+                int32x4_t c0 = vaddq_s32(vaddq_s32(d0, dp0), two);
+                int32x4_t c1 = vaddq_s32(vaddq_s32(d1, dp1), two);
+                int32x4_t c2 = vaddq_s32(vaddq_s32(d2, dp2), two);
+                int32x4_t c3 = vaddq_s32(vaddq_s32(d3, dp3), two);
+                int b = chunk_start;
+                int32x4_t i0 = (int32x4_t){b+ 0, b+ 1, b+ 2, b+ 3};
+                int32x4_t i1 = (int32x4_t){b+ 4, b+ 5, b+ 6, b+ 7};
+                int32x4_t i2 = (int32x4_t){b+ 8, b+ 9, b+10, b+11};
+                int32x4_t i3 = (int32x4_t){b+12, b+13, b+14, b+15};
+                uint32x4_t gt;
+                gt = vcgtq_s32(c0, c1); c0 = vbslq_s32(gt, c1, c0); i0 = vbslq_s32(gt, i1, i0);
+                gt = vcgtq_s32(c2, c3); c2 = vbslq_s32(gt, c3, c2); i2 = vbslq_s32(gt, i3, i2);
+                gt = vcgtq_s32(c0, c2); c0 = vbslq_s32(gt, c2, c0); i0 = vbslq_s32(gt, i2, i0);
+                int32x2_t c_lo = vget_low_s32(c0), c_hi = vget_high_s32(c0);
+                int32x2_t i_lo = vget_low_s32(i0), i_hi = vget_high_s32(i0);
+                uint32x2_t gt2 = vcgt_s32(c_lo, c_hi);
+                c_lo = vbsl_s32(gt2, c_hi, c_lo);
+                i_lo = vbsl_s32(gt2, i_hi, i_lo);
+                int32_t ca = vget_lane_s32(c_lo, 0), ia = vget_lane_s32(i_lo, 0);
+                int32_t cb = vget_lane_s32(c_lo, 1), ib = vget_lane_s32(i_lo, 1);
+                int32_t chunk_min = (ca <= cb) ? ca : cb;
+                int chunk_min_L = (ca <= cb) ? ia : ib;
+                if (chunk_min < sleb_min) { sleb_min = chunk_min; sleb_min_L = chunk_min_L; }
             }
+#elif defined(__AVX2__)
+            for (; chunk_start + 15 <= max_L; chunk_start += 16)
+            {
+                const int64_t *dpv = dp + ii + chunk_start;
+                __m128i n03 = _mm_unpacklo_epi64(
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 0)), 0x08),
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 2)), 0x08));
+                __m128i n47 = _mm_unpacklo_epi64(
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 4)), 0x08),
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 6)), 0x08));
+                __m128i n8b = _mm_unpacklo_epi64(
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 8)), 0x08),
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+10)), 0x08));
+                __m128i ncf = _mm_unpacklo_epi64(
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+12)), 0x08),
+                    _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+14)), 0x08));
+                __m256i dp0 = _mm256_set_m128i(n47, n03);
+                __m256i dp1 = _mm256_set_m128i(ncf, n8b);
+                __m256i pii_v = _mm256_set1_epi32((int)pii);
+                const uint32_t *psv = psum + ii + chunk_start;
+                __m256i d0 = _mm256_sub_epi32(_mm256_loadu_si256((__m256i*)(psv+ 0)), pii_v);
+                __m256i d1 = _mm256_sub_epi32(_mm256_loadu_si256((__m256i*)(psv+ 8)), pii_v);
+                __m256i two = _mm256_set1_epi32(2);
+                __m256i c0 = _mm256_add_epi32(_mm256_add_epi32(d0, dp0), two);
+                __m256i c1 = _mm256_add_epi32(_mm256_add_epi32(d1, dp1), two);
+                int b = chunk_start;
+                __m256i i0 = _mm256_set_epi32(b+7, b+6, b+5, b+4, b+3, b+2, b+1, b+0);
+                __m256i i1 = _mm256_set_epi32(b+15, b+14, b+13, b+12, b+11, b+10, b+9, b+8);
+                __m256i gt = _mm256_cmpgt_epi32(c0, c1);
+                __m256i cv = _mm256_blendv_epi8(c0, c1, gt);
+                __m256i iv = _mm256_blendv_epi8(i0, i1, gt);
+                __m128i cv_lo = _mm256_castsi256_si128(cv);
+                __m128i cv_hi = _mm256_extracti128_si256(cv, 1);
+                __m128i iv_lo = _mm256_castsi256_si128(iv);
+                __m128i iv_hi = _mm256_extracti128_si256(iv, 1);
+                __m128i gt2 = _mm_cmpgt_epi32(cv_lo, cv_hi);
+                cv_lo = _mm_blendv_epi8(cv_lo, cv_hi, gt2);
+                iv_lo = _mm_blendv_epi8(iv_lo, iv_hi, gt2);
+                __m128i cv_r = _mm_shuffle_epi32(cv_lo, 0x4E);
+                __m128i iv_r = _mm_shuffle_epi32(iv_lo, 0x4E);
+                __m128i gt3 = _mm_cmpgt_epi32(cv_lo, cv_r);
+                cv_lo = _mm_blendv_epi8(cv_lo, cv_r, gt3);
+                iv_lo = _mm_blendv_epi8(iv_lo, iv_r, gt3);
+                cv_r = _mm_shuffle_epi32(cv_lo, 0xB1);
+                iv_r = _mm_shuffle_epi32(iv_lo, 0xB1);
+                __m128i gt4 = _mm_cmpgt_epi32(cv_lo, cv_r);
+                cv_lo = _mm_blendv_epi8(cv_lo, cv_r, gt4);
+                iv_lo = _mm_blendv_epi8(iv_lo, iv_r, gt4);
+                int32_t chunk_min = _mm_cvtsi128_si32(cv_lo);
+                int chunk_min_L = _mm_cvtsi128_si32(iv_lo);
+                if (chunk_min < sleb_min) { sleb_min = chunk_min; sleb_min_L = chunk_min_L; }
+            }
+#endif /* __ARM_NEON || __AVX2__ */
+            for (L = chunk_start; L <= max_L; ++L)
+            {
+                int64_t c = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
+                if (c < sleb_min) { sleb_min = c; sleb_min_L = L; }
+            }
+        }
+        if (sleb_min < best)
+        {
+            best = sleb_min;
+            best_choice.kind = BK_SLEB;
+            best_choice.bw = 0;
+            best_choice.len = sleb_min_L;
         }
 
         dp[ii] = best;
@@ -1510,6 +1620,18 @@ int main(int argc, char *argv[])
             verbose_timing = 1;
             continue;
         }
+        if (!strncmp(arg, "--max-sleb-run=", 15))
+        {
+            char *end;
+            long v = strtol(arg + 15, &end, 10);
+            if (*end != '\0' || v < 1 || v > INT_MAX)
+            {
+                fprintf(stderr, "Invalid --max-sleb-run value '%s'\n", arg + 15);
+                return EXIT_FAILURE;
+            }
+            g_max_sleb_run = (int)v;
+            continue;
+        }
         if (!strcmp(arg, "--"))
         {
             first_pos_arg = ii + 1;
@@ -1529,7 +1651,7 @@ int main(int argc, char *argv[])
         fprintf(stderr,
             "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
             "          [--tuple=N1,N2,...] [--tuples-file=PATH]\n"
-            "          [--timing] <input> [<input> ...]\n",
+            "          [--max-sleb-run=<N>] [--timing] <input> [<input> ...]\n",
             argv[0]);
         return EXIT_FAILURE;
     }
