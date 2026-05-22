@@ -86,7 +86,7 @@ int rnx_find_header
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        if ((pos < in + 60) || (pos[-61] != '\n'))
+        if ((pos < in + 60) || ((pos > in + 60) && (pos[-61] != '\n')))
         {
             ofs = (pos - in) + 1;
             continue;

@@ -319,6 +319,7 @@ void rnx_free_v23(struct rinex_parser *p_)
     free(p->base.lli);
     free(p->base.ssi);
     free(p->base.obs);
+    free(p->base.sats);
     free(p);
 }
 

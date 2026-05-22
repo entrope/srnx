@@ -42,6 +42,22 @@ void free_rinex_data(struct rinex_data *data)
         free(data->event[ii].text);
     free(data->event);
 
+    /* Deallocate each satellite struct (and its when[] array). */
+    for (ii = 0; ii < 32; ++ii)
+        if (data->sys[ii].sv.end > n_sv)
+            n_sv = data->sys[ii].sv.end;
+    if (data->sv)
+    {
+        for (ii = 0; ii < n_sv; ++ii)
+        {
+            if (data->sv[ii])
+            {
+                free(data->sv[ii]->when);
+                free(data->sv[ii]);
+            }
+        }
+    }
+
     /* Deallocate inner pointers. */
     free((char *)data->file_header);
     free(data->epoch);
