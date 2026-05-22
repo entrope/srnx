@@ -194,9 +194,13 @@ A given satellite name MUST be used in at most one `SATE` chunk.
 #### Satellite epoch presence
 
 The epoch presence data within a `SATE` chunk is represented as a
-count-minus-1 of runs, followed by interleaved counts-minus-1 of how
-many epochs the satellite was absent and present, in that order.
-All of these count-minus-1 values are encoded as ULEB128s.
+ULEB128 count-minus-1 of runs, followed by that many interleaved pairs
+of (a) a ULEB128 count of how many epochs the satellite was absent
+before this run, and (b) a ULEB128 count-minus-1 of how many
+consecutive epochs the satellite was then present.
+The absent count MAY be zero (e.g., when the satellite is observed
+starting at the first epoch); the present count is at least 1 by
+construction.
 
 For example, if this consists of the values `1 2 5 4 6`, the satellite
 was observed during two (1+1) spans of epochs:
@@ -256,20 +260,14 @@ value that identifies the encoding schema: the sum of the delta order `n`
 and either 8 (if an explicit scaling value is present) or 0 (otherwise).
 
 If an explicit scale is used, it is stored as a ULEB128 indicating the
-scale times 1000.
+value of the least significant bit in milli-units (equivalently, the
+greatest common denominator of the observations in the `SOCD` chunk).
 For example, an explicit scale of 500 indicates that observation values
 are quantized to half-unit values.
 If no explicit scale is used, it is the same as 1: observation values
-are multiplied by 1000 before delta encoding.
-The maximum scale is 1e6, represented as one billion in ULEB128.
+directly represent milli-units before delta encoding.
+The maximum scale is 1e6 units, represented as one billion in ULEB128.
 The scaled values MUST all be integers.
-
-The scale factor doubles as GCD extraction: when all observations for a
-(satellite, observation code) pair — i.e., within a single `SOCD` chunk —
-share a greatest common divisor larger than 1, the encoder SHOULD divide
-each observation by that GCD and record the GCD as the explicit scale.
-This reduces the bit-widths of delta-encoded values without any loss of
-information.
 
 Following this are `n` SLEB128 values representing the initial state of
 the delta coder.
@@ -333,17 +331,16 @@ Recommended encoding procedure for each (satellite, observation code):
    For a given delta order, greedy block selection is suboptimal.
    Linear programming to find the true shortest path to the end of the
    observations is efficient.
-   (Working backwards, calculate the valid header byte that results in
-   the shortest coded form.)
+   (Working backwards, choose the permissible header byte that results
+   in the shortest coded form; this may be saved to guide the forward
+   encoding pass.)
 
-4. Encode the observations, with fallback blocks.
+4. Encode the observations.
    Runs of absent values are encoded as absent-value (`0xFD`) blocks
    regardless of position in the sequence.
    If a region has `max_bw` > 32, or contains only a few values that
    would not fill an 8-element block (including at the end of the
    sequence), use zero-run (`0xFE`) or SLEB128-run (`0xFF`) blocks instead.
-   A SLEB128-run is also typically used when (re-)initializing the
-   delta chain.
 
 ## <a name="digests"></a>Digest Identifiers
 
@@ -385,25 +382,22 @@ A formal definition is given in [RFC 3720](https://tools.ietf.org/html/rfc3720),
 
 ### <a name="digest-5"></a>Digest 5: BLAKE3, 32-byte output
 
-The BLAKE3 digest is a cryptographic message digest defined by the
+The BLAKE3 digest is a cryptographic message digest from the
 cryptographic research community.  It is based on the SHA-3
-permutation with a keyless Merkle–Tree structure, providing high
+permutation with a keyless Merkle tree structure, providing high
 throughput and parallelism.
 A reference implementation and formal definition are available at
 [github.com/BLAKE3-team/BLAKE3-specs](https://github.com/BLAKE3-team/BLAKE3-specs).
 The `libblake3` library provides a convenient implementation.
 
 The 16-byte and 32-byte output variants are produced by truncating
-the first 16 or 32 bytes of the BLAKE3 output keying material
-(i.e., `blake3_hasher_finalize` with output length 16 or 32).
-BLAKE3 supports arbitrary output lengths via its extendable output
-function (XOF) design, so these are not simple prefix truncations of
-a fixed-length hash — they are well-defined outputs of the algorithm.
+the first 16 or 32 bytes of the BLAKE3 output keying material.
+As BLAKE3 targets 128 bits of security strength, using a longer output
+should not provide any better detection of corrupted files.
 
 ### Rationale for digest choices
 
-The selection of defined digest functions balances lightweight
-integrity checking (CRC32C) with cryptographic security (BLAKE3).
-BLAKE3 provides significantly higher throughput than SHA-2/SHA-3
-while maintaining strong security properties, and its XOF design
-cleanly supports both 16-byte and 32-byte output lengths.
+CRC32C is a short but fairly robust digest that is accelerated by
+common CPUs, and is suitable as the per-chunk digest.
+BLAKE3 is a high-speed cryptographically strong digest function, and
+is suitable as the file-level digest; its length amortizes very well.
