@@ -56,7 +56,12 @@ static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
     if (!p->base.lli || !p->base.ssi || !p->base.obs
         || !crx->state || !crx->prev_state)
     {
-        p->base.error_line = __LINE__;
+        rnx_errorf(&crx->base.base, "allocation failed for %d CRX observations", new_alloc);
+        free(p->base.lli);
+        free(p->base.ssi);
+        free(p->base.obs);
+        free(crx->state);
+        free(crx->prev_state);
         return RINEX_ERR_SYSTEM;
     }
     p->obs_alloc = new_alloc;
@@ -114,7 +119,10 @@ static const char *crx_decompress_obs(
             arc_order = s[0] - '0';
             s = crx_parse_int64(&val, s + 2);
             if (!s || (arc_order > 5))
+            {
+                rnx_errorf(&crx->base.base, "bad arc initialization: %.16s", s);
                 return NULL;
+            }
 
             if (crx->state[d].used == 0)
             {
@@ -130,7 +138,10 @@ static const char *crx_decompress_obs(
         {
             s = crx_parse_int64(&val, s);
             if (!s)
+            {
+                rnx_errorf(&crx->base.base, "bad arc continuation: %.16s", s);
                 return NULL;
+            }
 
             cur_order = crx->state[d].used - 1;
             arc_order = crx->state[d].order;
@@ -246,8 +257,10 @@ static int crx_v2_build_sattbl(
 
     for (ii = 0; ii < n_new; ++ii, pos += 3)
     {
-        if (rnx_parse_satid(&sys, &svn, pos))
+        if (rnx_parse_satid(&crx->base.base, &sys, &svn, pos))
+        {
             return 1;
+        }
         sattbl[ii] = -1;
         for (jj = 0; jj < n_prev; ++jj)
         {
@@ -258,6 +271,7 @@ static int crx_v2_build_sattbl(
             }
         }
     }
+
     return 0;
 }
 
@@ -292,8 +306,6 @@ static rinex_error_t crx_v2_read_obs(
     res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
     if (res <= RINEX_EOF)
     {
-        if (res < RINEX_EOF)
-            p_->error_line = __LINE__;
         return res;
     }
     obs = p_->stream->buffer + p->parse_ofs;
@@ -357,9 +369,8 @@ static rinex_error_t crx_v2_read_obs(
          * start at position 32 after the epoch header line.
          * In the epoch_text, the full SV list is contiguous at pos 32+.
          */
-        if (rnx_parse_satid(&p_->sats[ii].system, &p_->sats[ii].number, pos))
+        if (rnx_parse_satid(p_, &p_->sats[ii].system, &p_->sats[ii].number, pos))
         {
-            p_->error_line = __LINE__;
             p->parse_ofs = res;
             return RINEX_ERR_BAD_FORMAT;
         }
@@ -369,7 +380,6 @@ static rinex_error_t crx_v2_read_obs(
         obs = crx_decompress_obs(crx, obs, nn, n_obs, is_init);
         if (!obs)
         {
-            p_->error_line = __LINE__;
             p->parse_ofs = res;
             return RINEX_ERR_BAD_FORMAT;
         }
@@ -384,7 +394,7 @@ static rinex_error_t crx_v2_read_obs(
     p_->buffer = realloc(p_->buffer, p->buffer_alloc);
     if (!p_->buffer)
     {
-        p_->error_line = __LINE__;
+        rnx_errorf(p_, "allocation failed for CRX reorder buffer of length %d", p->buffer_alloc);
         p->parse_ofs = res;
         return RINEX_ERR_SYSTEM;
     }
@@ -514,7 +524,7 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
             crx->sattab = realloc(crx->sattab, new_alloc * sizeof(int));
             if (!crx->sattab)
             {
-                p_->error_line = __LINE__;
+                rnx_errorf(p_, "allocation failed for satellite table of length %d", new_alloc);
                 return RINEX_ERR_SYSTEM;
             }
             crx->sattab_alloc = new_alloc;
@@ -524,7 +534,6 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         if (crx_v2_build_sattbl(crx, p_->buffer, old_n_sats,
             crx->sattab, p_->epoch.n_sats))
         {
-            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
 
@@ -533,7 +542,6 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
         if (res <= RINEX_EOF)
         {
-            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         crx_v2_parse_clock(crx, p_->stream->buffer + p->parse_ofs);
@@ -544,7 +552,7 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     }
     else if (line[0] != '&' || line_len < 32) /* must be a full init header */
     {
-        p_->error_line = __LINE__;
+        rnx_errorf(p_, "expected full initialization line, got %.*ds", line_len, line);
         return RINEX_ERR_BAD_FORMAT;
     }
     else if (line[28] == '0' || line[28] == '1' || line[28] == '6')
@@ -567,7 +575,6 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1);
         if (res <= RINEX_EOF)
         {
-            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         crx_v2_parse_clock(crx, p_->stream->buffer + p->parse_ofs);
@@ -584,7 +591,8 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         /* How many lines in this special event record? */
         if (parse_uint(&n_lines, line + 29, 3))
         {
-            p_->error_line = __LINE__;
+            rnx_errorf(p_, "bad line count in special event '\\x%02x%02x%02x' (%.3s)",
+                line[29], line[30], line[31], line+29);
             return RINEX_ERR_BAD_FORMAT;
         }
         /* Skip the marker line + n_lines following header records. */
@@ -626,7 +634,8 @@ static int crx_v34_parse_epoch(struct crx_v23_parser *crx)
         || parse_uint(&n_sats, line + 32, 3)
         || parse_fixed(&sec, line + 18, 11, 7))
     {
-        p->base.error_line = __LINE__;
+        rnx_errorf(&crx->base.base, "failed to parse epoch line: %.*s",
+            (line_len < 35) ? line_len : 35, line);
         return RINEX_ERR_BAD_FORMAT;
     }
 
@@ -646,7 +655,8 @@ static int crx_v34_parse_epoch(struct crx_v23_parser *crx)
         if (parse_fixed(&p->base.epoch.clock_offset, line + 41,
             line_len - 41, line_len - 44))
         {
-            p->base.error_line = __LINE__;
+            rnx_errorf(&crx->base.base, "failed to parse clock offset: %.*s",
+                line_len - 41, line + 41);
             return RINEX_ERR_BAD_FORMAT;
         }
     }
@@ -676,7 +686,7 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
 
     if (line_len < 2)
     {
-        p_->error_line = __LINE__;
+        rnx_errorf(&crx->base.base, "line too short: %.*s", line_len, line);
         p->parse_ofs = res;
         return RINEX_ERR_BAD_FORMAT;
     }
@@ -725,7 +735,6 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
         res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
         if (res <= RINEX_EOF)
         {
-            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         err = rnx_copy_text(p, res);
@@ -737,7 +746,6 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, 1 + n_sats);
     if (res <= RINEX_EOF)
     {
-        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     obs = p_->stream->buffer + p->parse_ofs;
@@ -746,7 +754,8 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     obs = memchr(obs, '\n', res - p->parse_ofs);
     if (!obs)
     {
-        p_->error_line = __LINE__;
+        rnx_errorf(p_, "missing EOL for clock offset line: %.*s",
+            res - p->parse_ofs, obs);
         p->parse_ofs = res;
         return RINEX_ERR_BAD_FORMAT;
     }
@@ -764,11 +773,11 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     nn = 0;
     for (ii = 0; ii < n_sats; ++ii)
     {
+        const char *pos = crx->epoch_text + 41 + 3 * ii;
         char sys;
         unsigned char num;
-        if (rnx_parse_satid(&sys, &num, crx->epoch_text + 41 + 3 * ii))
+        if (rnx_parse_satid(&crx->base.base, &sys, &num, pos))
         {
-            p_->error_line = __LINE__;
             p->parse_ofs = res;
             return RINEX_ERR_BAD_FORMAT;
         }
@@ -851,7 +860,6 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
         obs = crx_decompress_obs(crx, obs, nn, n_obs_sys, is_init);
         if (!obs)
         {
-            p_->error_line = __LINE__;
             p->parse_ofs = res;
             return RINEX_ERR_BAD_FORMAT;
         }

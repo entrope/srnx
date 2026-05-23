@@ -26,6 +26,10 @@ struct srnx_reader;
  */
 struct srnx_obs_reader;
 
+struct rinex_data;
+
+#define SRNX_OPEN_UNCHECKED 1
+
 /** Contains a RINEX satellite name. */
 struct srnx_satellite_name
 {
@@ -42,7 +46,7 @@ struct srnx_satellite_name
 struct srnx_obs_code
 {
     /** Signal name.
-     * 
+     *
      * The first two or three characters are the observation code.
      * For a RINEX 2.x file, the first two characters are used.
      * For a RINEX 3.x file, the first three characters are used.
@@ -52,33 +56,28 @@ struct srnx_obs_code
     char name[4];
 };
 
-/** Deallocates an object allocated by the library.
+/** Retrieves the latest error message for an SRNX reader.
  *
- * \param[in] ptr Pointer to dyanmically allocated object.
+ * \param[in] srnx SRNX reader object.
+ * \returns Text error message, or NULL if no error has been raised.
  */
-void srnx_free(void *ptr);
-
-/** Returns a text description of the error code. */
-const char *srnx_strerror(int err);
-
-/** Returns the line that generated the last error for a reader. */
-int srnx_error_line(const struct srnx_reader *srnx);
+const char *srnx_error(const struct srnx_reader *srnx);
 
 /** Opens a new SRNX reader by file name.
  *
  * \param[in,out] p_srnx Pointer to SRNX reader object.  If this is not
  *   null on entry, the old object is destroyed.
  * \param[in] filename Name of SRNX file on a local filesystem.
- * \returns Zero on success, non-zero SRNX error number on error.
+ * \returns Zero on success, non-zero on error.
  */
-int srnx_open(struct srnx_reader **p_srnx, const char filename[]);
+int srnx_open(struct srnx_reader **p_srnx, const char *filename, int flags);
 
 /** Loads the RINEX header from a SRNX file.
  *
  * \param[in] srnx SRNX reader object.
- * \param[out] p_rhdr Receives pointer to RINEX header object.
+ * \param[out] p_rhdr Receives pointer to RINEX header text.
  * \param[out] rhdr_len Receives number of bytes valid in \a *p_rhdr.
- * \returns Zero on success, non-zero SRNX error number on error.
+ * \returns Zero on success, non-zero on error.
  */
 int srnx_get_header(
     struct srnx_reader *srnx,
@@ -91,7 +90,7 @@ int srnx_get_header(
  * \param[in] srnx SRNX reader object.
  * \param[in,out] p_epoch Receives pointer to epoch structures.
  * \param[in,out] p_epochs_len Number of epochs valid in \a *epochs.
- * \returns Zero on success, non-zero SRNX error number on error.
+ * \returns Zero on success, non-zero on error.
  */
 int srnx_get_epochs(
     struct srnx_reader *srnx,
@@ -106,7 +105,7 @@ int srnx_get_epochs(
  *   Must be initialized to \a NULL to (re-)start iteration over events.
  * \param[out] event_len Number of bytes valid at \a *p_event.
  * \param[out] epoch_event Receives index of "before epoch" counter.
- * \returns Zero on success, non-zero SRNX error number on error.
+ * \returns Zero on success, non-zero on error.
  */
 int srnx_next_special_event(
     struct srnx_reader *srnx,
@@ -253,29 +252,7 @@ int srnx_read_obs_value(
  *
  * \param[in] p_socd Pointer to observation-reader object to free.
  */
-void srnx_free_obs_reader(
-    struct srnx_obs_reader *p_socd
-);
-
-/** Converts a vector of int64_t to a vector of double¸ in place.
- *
- * This function is specific to RINEX-type data: in addition to scaling
- * the values, it is only guaranteed for inputs in the range [-2**51,
- * +2**51].
- *
- * \$ ((double *)s64)[ii] = ((int64_t *)s64)[ii] * (scale / 1000.0) \$,
- * for 0 <= ii < \a count.
- * 
- * \param [in,out] s64 Pointer to array of values to convert.
- * \param[in] count Number of values to convert.
- * \param[in] scale Scaling factor times 1000.
- * \warning Undefined behavior if \a count is negative.
- */
-void srnx_convert_s64_to_double(
-    void *s64,
-    int count,
-    int scale
-);
+void srnx_free_obs_reader(struct srnx_obs_reader *p_socd);
 
 /** Verifies the file-level digest, if the SRNX file carries one.
  *
@@ -291,14 +268,13 @@ void srnx_convert_s64_to_double(
  */
 int srnx_verify_file_digest(struct srnx_reader *srnx);
 
-struct rinex_data;
-
 /** Loads an SRNX file into a rinex_data structure.
  *
  * \param[in] filename Path to the SRNX file.
  * \param[out] out Receives the loaded data.
- * \returns NULL on success, else an error description.
+ * \returns Zero on success, else a non-zero error code (populating
+ *   \a out->error).
  */
-const char *srnx_load(const char *filename, struct rinex_data *out);
+int srnx_load(const char *filename, struct rinex_data *out);
 
 #endif /* !defined(SRNX_H_a2b6e4a7_3fda_4ba2_8ed1_67b906d55b2c) */

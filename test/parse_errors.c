@@ -117,7 +117,7 @@ const unsigned char parse_errors_v3_bad_satid[] =
     "> 2020 07 07 00 00  0.0000000  0  1\n" /* "G  " - spaces instead of digits */
     "G  \n"
     "> 2020 07 07 00 00  1.0000000  0  1\n" /* valid epoch after the bad one */
-    "G13  28541439.844 5 149986288.817 1175.101 5        35.700\n"
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
     NUL_PAD;
 
 void

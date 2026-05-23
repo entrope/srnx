@@ -26,7 +26,8 @@ int rnx_digest_length(int id);
  * \a out must have room for rnx_digest_length(\a id) bytes.  For
  * id == 0 (null digest) no bytes are written.
  *
- * \returns 0 on success, -1 if \a id is unsupported by the build.
+ * \returns -1 if \a id is unsupported by the build, otherwise the
+ *   number of bytes written to \a out.
  */
 int rnx_digest(int id, const void *buf, size_t len, unsigned char *out);
 

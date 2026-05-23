@@ -30,7 +30,7 @@ rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p)
         }
         if ((size_t)new_count > SIZE_MAX / sizeof(p->base.sats[0]))
         {
-            p->base.error_line = __LINE__;
+            rnx_errorf(&p->base, "overflow to ensure %d sats", new_count);
             return RINEX_ERR_BAD_FORMAT;
         }
 
@@ -39,7 +39,7 @@ rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p)
         new_ptr = realloc(p->base.sats, new_len);
         if (!new_ptr)
         {
-            p->base.error_line = __LINE__;
+            rnx_errorf(&p->base, "allocation failed for satellite array of length %d", new_count);
             return RINEX_ERR_SYSTEM;
         }
 
@@ -73,7 +73,7 @@ int rnx_v2_parse_time(struct rnx_v234_parser *p, const char *line)
     {
         if (line[28] < '2' || line[28] == '6')
         {
-            p->base.error_line = __LINE__;
+            rnx_errorf(&p->base, "failed to parse epoch header line: %.32s", line);
             return RINEX_ERR_BAD_FORMAT;
         }
     }
@@ -99,14 +99,14 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     {
         return res;
     }
+    line = p->base.stream->buffer + p->parse_ofs;
     if ((uint64_t)res < p->parse_ofs + 33)
     {
+        rnx_errorf(p_, "epoch header line too short: %.*s", res - p->parse_ofs, line);
         p->parse_ofs = res;
-        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     line_len = res - 1 - p->parse_ofs;
-    line = p->base.stream->buffer + p->parse_ofs;
 
     /* Parse the timestamp, epoch flag and "number of satellites" field. */
     res = rnx_v2_parse_time(p, line);
@@ -125,16 +125,16 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
     {
         if (parse_fixed(&p->base.epoch.clock_offset, line+68, line_len-68, line_len-71))
         {
+            rnx_errorf(p_, "failed to parse clock offset: %.*s", line_len, line);
             p->parse_ofs += line_len + 1;
-            p_->error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         p->base.epoch.clock_offset *= 1000;
     }
     else
     {
+        rnx_errorf(p_, "clock offset has bad format: %.*s", line_len, line);
         p->parse_ofs += line_len + 1;
-        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
 
@@ -159,7 +159,6 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
             {
                 p->parse_ofs += line_len + 1;
             }
-            p_->error_line = __LINE__;
             return res;
         }
         line = p->base.stream->buffer + p->parse_ofs;
@@ -183,7 +182,6 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
                 res = RINEX_ERR_BAD_FORMAT;
             }
             p->parse_ofs += line_len + 1;
-            p_->error_line = __LINE__;
             err = res;
         }
         else
@@ -196,7 +194,8 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
         return err;
     }
 
-    p_->error_line = __LINE__;
+    rnx_errorf(p_, "logic failure in rnx_read_v2 for epoch flag '\\x%02x' (%c)",
+        p->base.epoch.flag, p->base.epoch.flag);
     assert(0 && "logic failure in rnx_read_v2");
     return RINEX_ERR_BAD_FORMAT;
 }
@@ -221,14 +220,14 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     {
         return res;
     }
+    line = p->base.stream->buffer + p->parse_ofs;
     if ((uint64_t)res < p->parse_ofs + 35)
     {
+        rnx_errorf(p_, "epoch header line too short: %.*s", res - p->parse_ofs, line);
         p->parse_ofs = res;
-        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     line_len = res - 1 - p->parse_ofs;
-    line = p->base.stream->buffer + p->parse_ofs;
 
     /* Parse the timestamp, epoch flag and "number of satellites" field. */
     if ((line[0] != '>' || line[31] < '0' || line[31] > '6')
@@ -237,8 +236,8 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
         || parse_uint(&min, line+16, 2) || parse_uint(&n_sats, line+32, 3)
         || parse_fixed(&i64, line+18, 11, 7))
     {
+        rnx_errorf(p_, "failed to parse epoch header line: %.*s", line_len, line);
         p->parse_ofs = res;
-        p_->error_line = __LINE__;
         return RINEX_ERR_BAD_FORMAT;
     }
     p->base.epoch.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
@@ -259,13 +258,13 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
         if (parse_fixed(&p->base.epoch.clock_offset, line + 41,
             line_len - 41, line_len - 44))
         {
-            p_->error_line = __LINE__;
+            rnx_errorf(p_, "failed to parse clock offset: %.*s", line_len, line);
             return RINEX_ERR_BAD_FORMAT;
         }
     }
     else
     {
-        p_->error_line = __LINE__;
+        rnx_errorf(p_, "clock offset has bad format: %.*s", line_len, line);
         return RINEX_ERR_BAD_FORMAT;
     }
 
@@ -305,8 +304,9 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
         return RINEX_SUCCESS;
     }
 
-    p_->error_line = __LINE__;
-    assert(0 && "logic failure in rnx_read_v3");
+    rnx_errorf(p_, "logic failure in rnx_read_v34 for epoch flag '\\x%02x' (%c)",
+        p->base.epoch.flag, p->base.epoch.flag);
+    assert(0 && "logic failure in rnx_read_v34");
     return RINEX_ERR_BAD_FORMAT;
 }
 

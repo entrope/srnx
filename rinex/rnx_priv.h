@@ -181,6 +181,13 @@ int rnx_get_newlines(
     int n_body
 );
 
+/** rnx_errorf formats an error message into \a p->errmsg.
+ *
+ * \param[in,out] p Parser whose error message is set.
+ * \param[in] fmt printf-style format string.
+ */
+void rnx_errorf(struct rinex_parser *p, const char *fmt, ...);
+
 /** rnx_copy_line copies text to \a p->base.buffer.
  *
  * This copies text in the range [ \a p->parse_ofs, \a eol_ofs ).
@@ -279,6 +286,7 @@ int parse_uint
  * two decimal digits. The valid system letters are ' ' (GPS-only RINEX v2),
  * 'G', 'R', 'S', 'E', 'C', 'J', 'I'.
  *
+ * \param[out] p Pointer to the parser; used only to set p->errmsg on failure;
  * \param[out] p_sys Receives the system character.
  * \param[out] p_num Receives the satellite number (01..99).
  * \param[in] satid Pointer to the 3-character satellite ID.
@@ -286,6 +294,7 @@ int parse_uint
  */
 int rnx_parse_satid
 (
+    struct rinex_parser *p,
     char *p_sys,
     unsigned char *p_num,
     const char satid[3]

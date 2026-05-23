@@ -13,8 +13,6 @@
 #include <string.h>
 #include <unistd.h>
 
-int rinex_load_error_line;
-
 /** Formats a human-readable epoch timestamp.
  * Output format: "YYYY-MM-DD HH:MM:SS.fffffff" (27 chars + NUL).
  */
@@ -765,8 +763,7 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
     }
     if (res < 0)
     {
-        snprintf(out->error, sizeof out->error,
-            "parser error %d", res);
+        strncpy(out->error, p->errmsg, sizeof out->error - 1);
         errmsg = out->error;
         goto fail_errmsg;
     }
@@ -796,7 +793,10 @@ const char *rinex_load_file(const char *filename, struct rinex_data *out)
     {
         static char msgbuf[300];
         close(fd);
-        return srnx_load(filename, out);
+        res = srnx_load(filename, out);
+        if (!res) return NULL;
+        snprintf(msgbuf, sizeof msgbuf, "%d: %s", res, out->error);
+        return msgbuf;
     }
     close(fd);
 

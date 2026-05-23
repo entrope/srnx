@@ -83,7 +83,7 @@ int main(void)
         }
 
         /* Warmup: one full pass so the code path and caches are hot. */
-        if (rnx_digest(id, input, INPUT_SIZE, out) != 0)
+        if (rnx_digest(id, input, INPUT_SIZE, out) < 0)
         {
             fprintf(stderr, "rnx_digest(%d) failed\n", id);
             free(input);
@@ -94,7 +94,7 @@ int main(void)
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (rep = 0; rep < BENCH_REPS; ++rep)
         {
-            if (rnx_digest(id, input, INPUT_SIZE, out) != 0)
+            if (rnx_digest(id, input, INPUT_SIZE, out) < 0)
             {
                 fprintf(stderr, "rnx_digest(%d) failed on rep %d\n", id, rep);
                 free(input);

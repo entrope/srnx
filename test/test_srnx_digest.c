@@ -62,7 +62,7 @@ static void test_pair(int chunk_id, int file_id)
     res = run_rnx2srnx(chunk_id, file_id, path);
     ok(res == 0, "rnx2srnx chunk=%d file=%d", chunk_id, file_id);
 
-    res = srnx_open(&rdr, path);
+    res = srnx_open(&rdr, path, 0);
     ok(res == 0, "srnx_open chunk=%d file=%d (res=%d)",
         chunk_id, file_id, res);
 
@@ -142,7 +142,7 @@ int main(void)
         /* srnx_open itself may still succeed — the per-chunk digests
          * and non-digest bytes are intact.
          */
-        res = srnx_open(&rdr, path);
+        res = srnx_open(&rdr, path, SRNX_OPEN_UNCHECKED);
         ok(res == 0, "srnx_open after file-digest flip still ok");
 
         res = srnx_verify_file_digest(rdr);

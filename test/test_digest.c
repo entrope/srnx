@@ -14,7 +14,7 @@ static uint32_t crc32c_of(const void *data, size_t len)
 {
     unsigned char out[4];
 
-    if (rnx_digest(2, data, len, out) != 0)
+    if (rnx_digest(2, data, len, out) < 0)
         BAIL_OUT("unable to compute CRC32C");
     return (uint32_t)out[0]
         | ((uint32_t)out[1] << 8)
@@ -25,7 +25,7 @@ static uint32_t crc32c_of(const void *data, size_t len)
 static void digest_of(int id, const void *data, size_t len,
     unsigned char out[])
 {
-    if (rnx_digest(id, data, len, out) != 0)
+    if (rnx_digest(id, data, len, out) < 0)
         BAIL_OUT("unable to compute digest id=%d", id);
 }
 

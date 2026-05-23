@@ -102,7 +102,8 @@ in this order:
 The per-chunk and file-level digest identifiers identify a message
 digest or checksum function.
 The per-chunk digest is described above; the file-level digest is
-calculated over the entire rest of the file.
+calculated over file from the start of the SRNX FOURCC until just before
+the file-level digest.
 (The length of the file for the file-level digest should be derived from
 an external source, such as the file system that holds the SRNX file.)
 

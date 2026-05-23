@@ -121,7 +121,7 @@ int rnx_digest(int id, const void *buf, size_t len, unsigned char *out)
         out[1] = (unsigned char)(crc >> 8);
         out[2] = (unsigned char)(crc >> 16);
         out[3] = (unsigned char)(crc >> 24);
-        return 0;
+        return 4;
     }
     case 4:
     case 5:
@@ -129,7 +129,7 @@ int rnx_digest(int id, const void *buf, size_t len, unsigned char *out)
       blake3_hasher_init(&h);
       blake3_hasher_update(&h, buf, len);
       blake3_hasher_finalize(&h, out, (size_t)rnx_digest_length(id));
-      return 0;
+      return (id == 4) ? 16 : 32;
     }
     }
 

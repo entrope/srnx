@@ -53,9 +53,8 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
         }
 
         /* Validate and save satellite information. */
-        if (rnx_parse_satid(&sys, &num, sv_name))
+        if (rnx_parse_satid(&p->base, &sys, &num, sv_name))
         {
-            p->base.error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         p->base.sats[ii].system = sys;
@@ -76,7 +75,8 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
                     p->obs_alloc * sizeof p->base.obs[0]);
                 if (!p->base.lli || !p->base.ssi || !p->base.obs)
                 {
-                    p->base.error_line = __LINE__;
+                    rnx_errorf(&p->base, "allocation failed for observation buffer of length %d",
+                        p->obs_alloc);
                     return RINEX_ERR_SYSTEM;
                 }
             }
@@ -99,7 +99,7 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
                 SIMD_PARSE_OBS;
                 if (!obs)
                 {
-                    p->base.error_line = __LINE__;
+                    rnx_errorf(&p->base, "failed to parse observations");
                     return RINEX_ERR_BAD_FORMAT;
                 }
             }
@@ -142,9 +142,8 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
         obs += 3;
 
         /* Validate and save satellite information. */
-        if (rnx_parse_satid(&sys, &num, sv_name))
+        if (rnx_parse_satid(&p->base, &sys, &num, sv_name))
         {
-            p->base.error_line = __LINE__;
             return RINEX_ERR_BAD_FORMAT;
         }
         p->base.sats[ii].system = sys;
@@ -165,7 +164,8 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
                     p->obs_alloc * sizeof p->base.obs[0]);
                 if (!p->base.lli || !p->base.ssi || !p->base.obs)
                 {
-                    p->base.error_line = __LINE__;
+                    rnx_errorf(&p->base, "allocation failed for observation buffer of length %d",
+                        p->obs_alloc);
                     return RINEX_ERR_SYSTEM;
                 }
             }
@@ -187,14 +187,15 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
 
             if (!obs)
             {
-                p->base.error_line = __LINE__;
+                rnx_errorf(&p->base, "failed to parse observations");
                 return RINEX_ERR_BAD_FORMAT;
             }
         }
 
         if (*obs != '\n')
         {
-            p->base.error_line = __LINE__;
+            rnx_errorf(&p->base, "trailing text after observations: %.*s",
+                20, obs);
             return RINEX_ERR_BAD_FORMAT;
         }
         obs++;

@@ -1432,7 +1432,7 @@ static void patch_srnx_sdir(struct mmbuf *mm, size_t sdir_field_offset,
  * and appends the digest to \a mm.  Does nothing if the file-digest id
  * is null.
  */
-static void append_file_digest(struct mmbuf *mm, size_t start_offset)
+static void append_file_digest(struct mmbuf *mm)
 {
     int dig_len;
 
@@ -1440,9 +1440,7 @@ static void append_file_digest(struct mmbuf *mm, size_t start_offset)
     if (dig_len <= 0)
         return;
     mm_require(mm, (size_t)dig_len);
-    if (rnx_digest(g_file_digest_id,
-            mm->data + start_offset, mm->used - start_offset,
-            mm->data + mm->used) < 0)
+    if (rnx_digest(g_file_digest_id, mm->data, mm->used, mm->data + mm->used) < 0)
     {
         fprintf(stderr, "Unsupported file digest id=%d\n", g_file_digest_id);
         exit(EXIT_FAILURE);
@@ -1595,16 +1593,8 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     /* 7. Patch SRNX header with SDIR offset. */
     patch_srnx_sdir(&mm, sdir_field_offset, sdir_offset);
 
-    /* 8. Compute and append the file-level digest, if enabled.
-     * The digest covers all bytes after the SRNX chunk (header + payload
-     * + the SRNX chunk's own trailing digest).
-     */
-    {
-        int chunk_dig = rnx_digest_length(g_chunk_digest_id);
-        size_t srnx_end = 5 + SRNX_PAYLOAD_SIZE
-            + (chunk_dig > 0 ? (size_t)chunk_dig : 0);
-        append_file_digest(&mm, srnx_end);
-    }
+    /* 8. Compute and append the file-level digest, if enabled. */
+    append_file_digest(&mm);
 
 done:
     if (mm.data && mm.data != MAP_FAILED)

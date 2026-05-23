@@ -129,13 +129,12 @@ struct rinex_parser
     /** buffer_len is the number of bytes of data in #buffer. */
     int buffer_len;
 
-    /** error_line indicates where a parse error occurred. */
-    int error_line;
+    /* int-size pad expected here on LP64 platforms */
 
     /** buffer contains text related to the current record.
      *
      * Before #read is called, this holds the RINEX file header as text.
-     * 
+     *
      * After #read is called and a special event is read (as indicated
      * by \a epoch.flag ), this holds the event records:
      * \a epoch.n_sats+1 lines, with '\n' as the line terminator.
@@ -196,6 +195,11 @@ struct rinex_parser
      * \param[in] p Parser to destroy.
      */
     void (*destroy)(struct rinex_parser *p);
+
+    /* errmsg explains the error encountered by the parser.
+     * It might include source code location to disambiguate.
+     */
+    char errmsg[160];
 };
 
 /** rinex_open creates a parser that reads data from \a stream.

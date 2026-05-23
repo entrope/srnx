@@ -7,10 +7,23 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+/* Documentation comment in rnx_priv.h. */
+void rnx_errorf(struct rinex_parser *p, const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(p->errmsg, sizeof p->errmsg, fmt, ap);
+    va_end(ap);
+}
 
 /* Documentation comment in rnx_priv.h. */
 void *rnx_memmem
@@ -59,7 +72,7 @@ int rnx_copy_text(
     p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
     if (!p->base.buffer)
     {
-        p->base.error_line = __LINE__;
+        rnx_errorf(&p->base, "allocation failed for buffer of length %d", p->buffer_alloc);
         return RINEX_ERR_SYSTEM;
     }
     memcpy(p->base.buffer, p->base.stream->buffer + p->parse_ofs,
@@ -152,15 +165,17 @@ int rnx_get_newlines(
      */
     if (*p_whence == 0)
     {
-        p->error_line = __LINE__;
+        rnx_errorf(p, "EOF before reading %d+%d newlines, whence=0",
+            n_header, n_body);
         return RINEX_EOF;
     }
 
     res = p->stream->advance(p->stream, BLOCK_SIZE, *p_whence);
     if (res)
     {
+        rnx_errorf(p, "failed to advance stream for %d+%d newlines, whence="PRIu64,
+            n_header, n_body, *p_whence);
         errno = res;
-        p->error_line = __LINE__;
         return RINEX_ERR_SYSTEM;
     }
     *p_whence = 0;
@@ -273,6 +288,7 @@ int parse_uint
 /* Documentation comment in rnx_priv.h. */
 int rnx_parse_satid
 (
+    struct rinex_parser *p,
     char *p_sys,
     unsigned char *p_num,
     const char satid[3]
@@ -282,16 +298,15 @@ int rnx_parse_satid
     unsigned char d1 = (unsigned char)satid[1];
     unsigned char d2 = (unsigned char)satid[2];
 
-    /* Valid system letters: ' ' (GPS-only v2), 'G', 'R', 'S', 'E', 'C', 'J', 'I'. */
-    if (sys != ' ' && sys != 'G' && sys != 'R' && sys != 'S'
+    /* Valid system letters: ' ' (GPS-only v2), 'G', 'R', 'S', 'E', 'C', 'J', 'I'.
+     * Both digit positions must be decimal digits.
+     */
+    if ((sys != ' ' && sys != 'G' && sys != 'R' && sys != 'S'
         && sys != 'E' && sys != 'C' && sys != 'J' && sys != 'I')
+        || d1 < '0' || d1 > '9' || d2 < '0' || d2 > '9')
     {
-        return EINVAL;
-    }
-
-    /* Both digit positions must be decimal digits. */
-    if (d1 < '0' || d1 > '9' || d2 < '0' || d2 > '9')
-    {
+        rnx_errorf(p, "bad satellite id '\\x%02x%02x%02x' (%.3s)",
+            satid[0], satid[1], satid[2], satid);
         return EINVAL;
     }
 

@@ -530,10 +530,9 @@ int main(int argc, char *argv[])
     }
 
     /* Load the SRNX file (populates data.event from EVTF chunks). */
-    err = srnx_load(input_name, &data);
-    if (err)
+    if (srnx_load(input_name, &data))
     {
-        fprintf(stderr, "Unable to load %s: %s\n", input_name, err);
+        fprintf(stderr, "Unable to load %s: %s\n", input_name, data.error);
         free(output_name);
         return EXIT_FAILURE;
     }

@@ -391,8 +391,6 @@ int main(int argc, char *argv[])
     if (err)
     {
         fprintf(stderr, "Unable to load %s: %s\n", file1_name, err);
-        if (rinex_load_error_line)
-            fprintf(stderr, "  (srnx.c line %d)\n", rinex_load_error_line);
         return EXIT_FAILURE;
     }
 
@@ -400,8 +398,6 @@ int main(int argc, char *argv[])
     if (err)
     {
         fprintf(stderr, "Unable to load %s: %s\n", file2_name, err);
-        if (rinex_load_error_line)
-            fprintf(stderr, "  (srnx.c line %d)\n", rinex_load_error_line);
         free_rinex_data(&data1);
         return EXIT_FAILURE;
     }

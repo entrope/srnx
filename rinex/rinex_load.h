@@ -208,12 +208,6 @@ void free_rinex_data(struct rinex_data *data);
  */
 const char *rinex_load_file(const char *filename, struct rinex_data *out);
 
-/** When rinex_load_file() fails on an SRNX file, this holds the
- * srnx.c source line number that generated the error, to aid debugging.
- * Zero if the error did not originate in srnx.c.
- */
-extern int rinex_load_error_line;
-
 /** Formats a human-readable epoch timestamp into \a buf.
  *
  * \param[out] buf       Destination buffer (at least 64 bytes).

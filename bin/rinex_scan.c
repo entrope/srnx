@@ -22,8 +22,8 @@ void process_file(struct rinex_parser *p, const char filename[])
         {
             if (res < 0)
             {
-                printf("Error parsing %s: %d (line %d)\n", filename,
-                    res, p->error_line);
+                printf("Error parsing %s: %s (%d)\n", filename,
+                    p->errmsg, res);
             }
             break;
         }
