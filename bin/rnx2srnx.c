@@ -14,6 +14,7 @@
 #include <immintrin.h>
 #endif
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,9 @@ static int g_file_digest_id = 5;
 /* Upper bound on SLEB128-run length considered by dp_core (--max-sleb-run). */
 static int g_max_sleb_run = 16;
 
+/* Output filename for cleanup on fatal error. */
+static const char *g_output_name;
+
 /* ---- Memory-mapped output buffer ---- */
 
 struct mmbuf
@@ -39,14 +43,30 @@ struct mmbuf
     size_t cap;
 };
 
+/* Report a fatal error, unlink the output file if one was opened, and exit. */
+_Noreturn static void fail_and_exit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+_Noreturn static void fail_and_exit(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    fprintf(stderr, "rnx2srnx: ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+
+    if (g_output_name)
+        unlink(g_output_name);
+    exit(EXIT_FAILURE);
+}
+
 static void mm_require(struct mmbuf *mm, size_t need)
 {
     if (mm->used + need > mm->cap)
     {
-        fprintf(stderr, "Output exceeds mmap capacity "
-            "(used=%zu need=%zu cap=%zu)\n",
+        fail_and_exit("Output exceeds mmap capacity "
+            "(used=%zu need=%zu cap=%zu)",
             mm->used, need, mm->cap);
-        exit(EXIT_FAILURE);
     }
 }
 
@@ -108,8 +128,7 @@ static void wbuf_ensure(struct wbuf *wb, size_t need)
     wb->data = realloc(wb->data, wb->alloc);
     if (!wb->data)
     {
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
+        fail_and_exit("Out of memory");
     }
 }
 
@@ -202,8 +221,7 @@ static size_t write_chunk_digest(struct mmbuf *mm, size_t chunk_start)
             mm->data + chunk_start, mm->used - chunk_start,
             mm->data + mm->used) < 0)
     {
-        fprintf(stderr, "Unsupported chunk digest id=%d\n", g_chunk_digest_id);
-        exit(EXIT_FAILURE);
+        fail_and_exit("Unsupported chunk digest id=%d", g_chunk_digest_id);
     }
     mm->used += (size_t)dig_len;
     return (size_t)dig_len;
@@ -255,9 +273,8 @@ static void rle_encode_indicators(struct wbuf *wb, const char *ind, int count,
         idx = indicator_idx((unsigned char)cur);
         if (idx < 0)
         {
-            fprintf(stderr, "%s: %s byte 0x%02X not in alphabet\n",
-                filename, type, (unsigned char)cur);
-            exit(EXIT_FAILURE);
+            fail_and_exit("%s: %s byte 0x%02X not in alphabet (%d/%d)",
+                filename, type, (unsigned char)cur, ii, count);
         }
         /* Packed encoding: single ULEB128 = (count-1)*11 + idx */
         wbuf_uleb128(&rle, (uint64_t)(ii - run_start - 1) * 11 + (uint64_t)idx);
@@ -373,8 +390,7 @@ static void *xrealloc(void *p, size_t bytes)
     void *q = realloc(p, bytes);
     if (!q)
     {
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
+        fail_and_exit("Out of memory");
     }
     return q;
 }
@@ -391,7 +407,7 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
     s->full_scaled    = xrealloc(s->full_scaled,      cap * sizeof *s->full_scaled);
     s->present_scaled = xrealloc(s->present_scaled,   cap * sizeof *s->present_scaled);
     s->dp             = xrealloc(s->dp,         (cap + 1) * sizeof *s->dp);
-    s->spt             = xrealloc(s->spt,           7 * cap * sizeof *s->spt);
+    s->spt            = xrealloc(s->spt,          7 * cap * sizeof *s->spt);
     s->all_bw         = xrealloc(s->all_bw,       8 * cap * sizeof *s->all_bw);
     s->psum_arr       = xrealloc(s->psum_arr,   (cap + 1) * sizeof *s->psum_arr);
     s->choices_a      = xrealloc(s->choices_a,        cap * sizeof *s->choices_a);
@@ -1303,8 +1319,7 @@ static size_t write_srnx_header(struct mmbuf *mm)
     /* sdir_offset starts here; leave as zeros for patching */
     if (tmp.used > SRNX_PAYLOAD_SIZE)
     {
-        fprintf(stderr, "SRNX payload overflow\n");
-        exit(EXIT_FAILURE);
+        fail_and_exit("SRNX payload overflow");
     }
     memcpy(payload, tmp.data, tmp.used);
 
@@ -1419,9 +1434,8 @@ static void patch_srnx_sdir(struct mmbuf *mm, size_t sdir_field_offset,
                 mm->data, 5 + SRNX_PAYLOAD_SIZE,
                 mm->data + 5 + SRNX_PAYLOAD_SIZE) < 0)
         {
-            fprintf(stderr, "Unsupported chunk digest id=%d\n",
+            fail_and_exit("Unsupported chunk digest id=%d",
                 g_chunk_digest_id);
-            exit(EXIT_FAILURE);
         }
     }
 }
@@ -1442,8 +1456,7 @@ static void append_file_digest(struct mmbuf *mm)
     mm_require(mm, (size_t)dig_len);
     if (rnx_digest(g_file_digest_id, mm->data, mm->used, mm->data + mm->used) < 0)
     {
-        fprintf(stderr, "Unsupported file digest id=%d\n", g_file_digest_id);
-        exit(EXIT_FAILURE);
+        fail_and_exit("Unsupported file digest id=%d", g_file_digest_id);
     }
     mm->used += (size_t)dig_len;
 }
@@ -1465,6 +1478,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     int sys_idx;
 
     scratch_init(&scratch);
+    g_output_name = output_name;
 
     /* Load the input file. */
     err = rinex_load_file(input_name, &data);
@@ -1597,6 +1611,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     append_file_digest(&mm);
 
 done:
+    g_output_name = NULL;
     if (mm.data && mm.data != MAP_FAILED)
     {
         msync(mm.data, mm.used, MS_SYNC);
