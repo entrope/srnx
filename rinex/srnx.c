@@ -310,25 +310,13 @@ static int srnx_parse_rhdr_v2(
             obs_type, obs_type);
         return SRNX_CORRUPT;
     }
-    if (obs_type == 'M')
-    {
-        srnx->sys_idx[' ' & 31] = 1;
-        srnx->sys_idx['G' & 31] = 1;
-        srnx->sys_idx['C' & 31] = 1;
-        srnx->sys_idx['R' & 31] = 1;
-        srnx->sys_idx['S' & 31] = 1;
-        srnx->sys_idx['E' & 31] = 1;
-        srnx->sys_idx['J' & 31] = 1;
-    }
-    else if (obs_type == ' ')
-    {
-        srnx->sys_idx[' ' & 31] = 1;
-        srnx->sys_idx['G' & 31] = 1;
-    }
-    else
-    {
-        srnx->sys_idx[obs_type & 31] = 1;
-    }
+    srnx->sys_idx[' ' & 31] = 1;
+    srnx->sys_idx['G' & 31] = 1;
+    srnx->sys_idx['C' & 31] = 1;
+    srnx->sys_idx['R' & 31] = 1;
+    srnx->sys_idx['S' & 31] = 1;
+    srnx->sys_idx['E' & 31] = 1;
+    srnx->sys_idx['J' & 31] = 1;
 
     /* Find the (first) # / TYPES OF OBSERV line. */
     res = rnx_find_header(rhdr, rhdr_len, n_types_of_observ, sizeof n_types_of_observ);

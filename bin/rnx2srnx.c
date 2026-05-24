@@ -251,7 +251,7 @@ static int indicator_idx(unsigned char ch)
 }
 
 static void rle_encode_indicators(struct wbuf *wb, const char *ind, int count,
-    const char *filename, const char *type)
+    const char *filename, const char *type, const char *obs_name)
 {
     struct wbuf rle;
     int ii, run_start, idx;
@@ -273,8 +273,9 @@ static void rle_encode_indicators(struct wbuf *wb, const char *ind, int count,
         idx = indicator_idx((unsigned char)cur);
         if (idx < 0)
         {
-            fail_and_exit("%s: %s byte 0x%02X not in alphabet (%d/%d)",
-                filename, type, (unsigned char)cur, ii, count);
+            fail_and_exit("%s: %s_%s %s byte 0x%02X not in alphabet (%d~%d/%d)",
+                filename, obs_name, obs_name+4, type,
+                (unsigned char)cur, run_start, ii, count);
         }
         /* Packed encoding: single ULEB128 = (count-1)*11 + idx */
         wbuf_uleb128(&rle, (uint64_t)(ii - run_start - 1) * 11 + (uint64_t)idx);
@@ -1021,8 +1022,8 @@ static size_t write_socd_chunk(struct mmbuf *mm,
     wbuf_uleb128(&payload, obs_count - 1);
 
     /* RLE-encode LLI and SSI. */
-    rle_encode_indicators(&payload, lli_arr, obs_count, filename, "LLI");
-    rle_encode_indicators(&payload, ssi_arr, obs_count, filename, "SSI");
+    rle_encode_indicators(&payload, lli_arr, obs_count, filename, "LLI", obs_name);
+    rle_encode_indicators(&payload, ssi_arr, obs_count, filename, "SSI", obs_name);
 
     /* Compute GCD of non-missing observation values (skip INT64_MIN sentinel). */
     obs_gcd = 0;

@@ -374,24 +374,17 @@ static const char *rnx_open_v2(struct rnx_v234_parser *p, int hdr_ofs)
     {
         return "Invalid number of observations";
     }
+    /* Initialize all the satellite systems unconditionally.
+     * Some files list 'G' on their first line but have observations
+     * for multiple satellite systems.
+     */
     p->base.n_obs[' ' & 31] = value;
-    if (obs_type == 'M')
-    {
-        p->base.n_obs['C' & 31] = value;
-        p->base.n_obs['E' & 31] = value;
-        p->base.n_obs['G' & 31] = value;
-        p->base.n_obs['J' & 31] = value;
-        p->base.n_obs['R' & 31] = value;
-        p->base.n_obs['S' & 31] = value;
-    }
-    else
-    {
-        p->base.n_obs[obs_type & 31] = value;
-        if (obs_type == ' ')
-        {
-            p->base.n_obs['G' & 31] = value;
-        }
-    }
+    p->base.n_obs['C' & 31] = value;
+    p->base.n_obs['E' & 31] = value;
+    p->base.n_obs['G' & 31] = value;
+    p->base.n_obs['J' & 31] = value;
+    p->base.n_obs['R' & 31] = value;
+    p->base.n_obs['S' & 31] = value;
 
     /* Initially assume 500 observations/epoch is enough space. */
     p->obs_alloc = 500;
