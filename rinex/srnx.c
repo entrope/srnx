@@ -2057,6 +2057,7 @@ int srnx_get_obs_by_index(
         res = srnx_open_obs_by_index(srnx, name, idx[ii], &p_socd);
         if (res)
         {
+            srnx_free_obs_reader(p_socd);
             return res;
         }
 
