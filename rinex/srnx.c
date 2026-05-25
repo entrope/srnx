@@ -22,10 +22,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#ifdef __x86_64__
-# include <x86intrin.h>
-#endif
-
 #if !defined(O_CLOEXEC)
 # define O_CLOEXEC 0
 #endif

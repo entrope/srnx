@@ -49,6 +49,9 @@ add_library(rinex SHARED
 target_include_directories(rinex PRIVATE ${BLAKE3_INCLUDE_DIRS})
 target_link_directories(rinex PRIVATE ${BLAKE3_LIBRARY_DIRS})
 target_link_libraries(rinex PRIVATE ${BLAKE3_LIBRARIES})
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    target_compile_options(rinex PRIVATE -msse4.2)
+endif()
 target_compile_definitions(rinex PRIVATE HAVE_BLAKE3)
 add_library(tap STATIC
     libtap/tap.c)
@@ -82,6 +85,9 @@ target_link_libraries(srnx_split rinex)
 
 add_executable(srnx2rnx bin/srnx2rnx.c)
 target_link_libraries(srnx2rnx rinex)
+
+add_executable(rnx_load bin/rnx_load.c)
+target_link_libraries(rnx_load rinex)
 
 include(InstallRequiredSystemLibraries)
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/COPYING")
