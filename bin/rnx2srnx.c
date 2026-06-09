@@ -1482,7 +1482,21 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     g_output_name = output_name;
 
     /* Load the input file. */
-    err = rinex_load_file(input_name, &data);
+    if (!strcmp(input_name, "-"))
+    {
+        struct rinex_stream *stream = rinex_stdin_stream();
+        if (!stream)
+        {
+            fprintf(stderr, "Unable to open stdin\n");
+            return;
+        }
+        err = rinex_load(stream, &data);
+        stream->destroy(stream);
+    }
+    else
+    {
+        err = rinex_load_file(input_name, &data);
+    }
     if (err)
     {
         fprintf(stderr, "Unable to load %s: %s\n", input_name, err);
@@ -1493,13 +1507,20 @@ static void rnx2srnx(const char input_name[], const char output_name[])
      * relative to RINEX, so input_size + a small margin is a safe
      * ceiling for all realistic observation files.
      */
-    if (stat(input_name, &st) != 0)
+    if (!strcmp(input_name, "-"))
+    {
+        cap = (size_t)data.obs[0] * 16 + data.file_header_len + 65536;
+    }
+    else if (stat(input_name, &st) != 0)
     {
         fprintf(stderr, "Unable to stat %s\n", input_name);
         free_rinex_data(&data);
         return;
     }
-    cap = (size_t)st.st_size + 65536;
+    else
+    {
+        cap = (size_t)st.st_size + 65536;
+    }
     if (cap < 262144)
         cap = 262144;
 
@@ -1729,6 +1750,11 @@ int main(int argc, char *argv[])
     }
 
     output_name = output_arg ? strdup(output_arg) : NULL;
+    if (!strcmp(input_name, "-") && !output_name)
+    {
+        fprintf(stderr, "Output file name required when reading from stdin\n");
+        return EXIT_FAILURE;
+    }
     name_len = strlen(input_name);
     if (is_rinex_file_name(input_name, name_len))
     {

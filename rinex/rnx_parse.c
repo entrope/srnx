@@ -589,9 +589,13 @@ const char *rinex_open
     }
 
     res = stream->advance(stream, BLOCK_SIZE, 0);
-    if (res || stream->size < 80)
+    if (res)
     {
         return strerror(res);
+    }
+    if (stream->size < 80)
+    {
+        return "Unrecognized file format";
     }
 
     /* Is it an uncompressed RINEX file? */
