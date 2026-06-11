@@ -216,9 +216,15 @@ const char *rnx_data_init_cons(struct rinex_data *out)
     static const char interval[] = "INTERVAL";
     int ofs;
 
-    /* Populate out->interval. */
+    /* Populate out->interval.  Sub-second intervals truncate to zero via
+     * strtol(), and a literal "0" is also valid RINEX (meaning the
+     * interval is not constant); either way, treat non-positive values
+     * as 1 second since out->interval is used as a divisor below.
+     */
     ofs = rnx_find_header(out->file_header, out->file_header_len, interval, sizeof interval);
     out->interval = (ofs < 0) ? 1 : strtol(out->file_header + ofs, NULL, 10);
+    if (out->interval < 1)
+        out->interval = 1;
 
     if (out->rinex_version == 2)
         return rnx_data_init_cons_v2(out);
