@@ -16,13 +16,14 @@
 #include <unistd.h>
 
 /* Documentation comment in rnx_priv.h. */
-void rnx_errorf(struct rinex_parser *p, const char *fmt, ...)
+const char *rnx_errorf(struct rinex_parser *p, const char *fmt, ...)
 {
     va_list ap;
 
     va_start(ap, fmt);
     vsnprintf(p->errmsg, sizeof p->errmsg, fmt, ap);
     va_end(ap);
+    return p->errmsg;
 }
 
 /* Documentation comment in rnx_priv.h. */

@@ -176,14 +176,15 @@ const char *srnx_error(const struct srnx_reader *srnx)
     return srnx->errmsg[0] ? srnx->errmsg : NULL;
 }
 
-/** Formats error text into \a srnx->errmsg. */
-void srnx_errorf(struct srnx_reader *srnx, const char *fmt, ...)
+/** Formats error text into \a srnx->errmsg, returning a pointer to it. */
+static const char *srnx_errorf(struct srnx_reader *srnx, const char *fmt, ...)
 {
     va_list ap;
 
     va_start(ap, fmt);
     vsnprintf(srnx->errmsg, sizeof srnx->errmsg, fmt, ap);
     va_end(ap);
+    return srnx->errmsg;
 }
 
 /** Decodes a ULEB128 from \a *d, returning it and advancing \a *d. */

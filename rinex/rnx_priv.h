@@ -185,8 +185,9 @@ int rnx_get_newlines(
  *
  * \param[in,out] p Parser whose error message is set.
  * \param[in] fmt printf-style format string.
+ * \return A pointer to \a p->errmsg.
  */
-void rnx_errorf(struct rinex_parser *p, const char *fmt, ...);
+const char *rnx_errorf(struct rinex_parser *p, const char *fmt, ...);
 
 /** rnx_copy_line copies text to \a p->base.buffer.
  *
