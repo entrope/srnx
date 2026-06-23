@@ -905,7 +905,7 @@ const char *crx_open_v23(
     err = rnx_open_v23(&crx->base, stream, ofs);
     if (err)
     {
-        /* report that error */
+        return err;
     }
     else if (crx->base.base.read == rnx_read_v2)
     {

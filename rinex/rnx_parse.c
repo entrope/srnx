@@ -372,7 +372,8 @@ static const char *rnx_open_v2(struct rnx_v234_parser *p, int hdr_ofs)
     res = parse_uint(&value, line, 6);
     if (res || (value < 1))
     {
-        return "Invalid number of observations";
+        rnx_errorf(&p->base, "Invalid number of observations: '%.*s'", 6, line);
+        return p->base.errmsg;
     }
     /* Initialize all the satellite systems unconditionally.
      * Some files list 'G' on their first line but have observations
@@ -422,7 +423,8 @@ static const char *rnx_open_v34(struct rnx_v234_parser *p)
         res = parse_uint(&n_obs, line + 3, 3);
         if (res || (n_obs < 1))
         {
-            return "Invalid number of observations";
+            rnx_errorf(&p->base, "Invalid number of observations: '%.*s'", 3, line + 3);
+            return p->base.errmsg;
         }
         p->base.n_obs[sys_id & 31] = n_obs;
 
@@ -646,6 +648,15 @@ const char *rinex_open
 
     if (err && *p_parser)
     {
+        /* If the error string lives inside the parser's errmsg buffer,
+         * save a copy before the parser is deallocated. */
+        if (err == (*p_parser)->errmsg)
+        {
+            static char saved_err[160];
+            strncpy(saved_err, err, sizeof saved_err);
+            saved_err[sizeof saved_err - 1] = '\0';
+            err = saved_err;
+        }
         (*p_parser)->destroy(*p_parser);
         *p_parser = NULL;
     }
