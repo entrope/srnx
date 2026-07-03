@@ -7,6 +7,7 @@
 #include "rinex/rinex_load.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -20,6 +21,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* Digest id used for per-chunk digests; default is CRC32C (id=2). */
@@ -1693,13 +1695,51 @@ static int parse_digest_flag(const char *arg, const char *prefix, int *out)
     return 1;
 }
 
+/** Runs `rnxcmp <input> <output>` as a subprocess to verify that \a output
+ * (the just-written SRNX file) round-trips to the same observations as
+ * \a input.  rnxcmp's stdout/stderr are inherited so its output (if any)
+ * is visible directly.
+ *
+ * \returns Zero if rnxcmp reports the files match, -1 otherwise.
+ */
+static int run_check(const char *input, const char *output)
+{
+    pid_t pid;
+    int status;
+
+    pid = fork();
+    if (pid < 0)
+    {
+        fprintf(stderr, "rnx2srnx: fork failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (pid == 0)
+    {
+        execlp("rnxcmp", "rnxcmp", input, output, (char *)NULL);
+        fprintf(stderr, "rnx2srnx: exec rnxcmp failed: %s\n", strerror(errno));
+        _exit(127);
+    }
+
+    if (waitpid(pid, &status, 0) < 0)
+    {
+        fprintf(stderr, "rnx2srnx: waitpid failed: %s\n", strerror(errno));
+        return -1;
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+
+    fprintf(stderr, "rnx2srnx: round-trip check failed\n");
+    return -1;
+}
+
 int main(int argc, char *argv[])
 {
     const char *input_name = NULL;
     const char *output_arg = NULL;
     char *output_name;
     size_t name_len;
-    int ii;
+    int ii, do_check = 0;
 
     for (ii = 1; ii < argc; ++ii)
     {
@@ -1718,6 +1758,11 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
             g_max_sleb_run = (int)v;
+            continue;
+        }
+        if (!strcmp(arg, "--check"))
+        {
+            do_check = 1;
             continue;
         }
         if (arg[0] == '-' && arg[1] == '-' && arg[2] == '\0')
@@ -1745,7 +1790,7 @@ int main(int argc, char *argv[])
     if (!input_name)
     {
         fprintf(stderr, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>] "
-            "[--max-sleb-run=<N>] <input.rnx> [output.srnx]\n", argv[0]);
+            "[--max-sleb-run=<N>] [--check] <input.rnx> [output.srnx]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -1776,6 +1821,15 @@ int main(int argc, char *argv[])
     }
 
     rnx2srnx(input_name, output_name);
+
+    if (do_check && strcmp(input_name, "-") != 0)
+    {
+        if (run_check(input_name, output_name))
+        {
+            free(output_name);
+            return EXIT_FAILURE;
+        }
+    }
 
     free(output_name);
     return EXIT_SUCCESS;
