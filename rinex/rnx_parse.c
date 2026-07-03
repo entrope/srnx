@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -593,6 +594,31 @@ const char *rinex_open
     {
         return strerror(res);
     }
+
+    /* Is it an SRNX file?  Unlike the streaming text/CRX formats, SRNX
+     * needs its entire contents resident for random access, so keep
+     * advancing until the stream stops growing.
+     */
+    if (stream->size >= 4 && !memcmp(stream->buffer, "SRNX", 4))
+    {
+        unsigned int last_size, req;
+
+        req = BLOCK_SIZE;
+        do
+        {
+            last_size = stream->size;
+            req = (req > (unsigned int)INT_MAX / 2) ? (unsigned int)INT_MAX : req * 2;
+            res = stream->advance(stream, req, 0);
+            if (res)
+            {
+                return strerror(res);
+            }
+        } while (stream->size > last_size);
+
+        err = srnx_open_parser(p_parser, stream);
+        goto check_err;
+    }
+
     if (stream->size < 80)
     {
         return "Unrecognized file format";
@@ -644,6 +670,7 @@ const char *rinex_open
         err = "Unrecognized file format";
     }
 
+check_err:
     if (err && *p_parser)
     {
         /* If the error string lives inside the parser's errmsg buffer,

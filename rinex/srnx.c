@@ -154,22 +154,6 @@ struct srnx_obs_reader
     int64_t obs[256];
 };
 
-/* Negative SRNX error numbers. */
-enum srnx_errno
-{
-    SRNX_NOT_SRNX = -1,
-    SRNX_CORRUPT = -2,
-    SRNX_BAD_MAJOR = -3,
-    SRNX_BAD_STATE = -4,
-    SRNX_NO_CHUNK = -5,
-    SRNX_UNKNOWN_SYSTEM = -6,
-    SRNX_UNKNOWN_CODE = -7,
-    SRNX_UNKNOWN_SATELLITE = -8,
-    SRNX_END_OF_DATA = -9,
-    SRNX_IMPLEMENTATION_ERROR = -10,
-    SRNX_BAD_DIGEST = -11
-};
-
 /* Doc comment in srnx.h. */
 const char *srnx_error(const struct srnx_reader *srnx)
 {
@@ -488,82 +472,23 @@ static int srnx_parse_rhdr(
     return SRNX_BAD_MAJOR;
 }
 
-/* Doc comment in srnx.h. */
-int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
+/* Doc comment in rnx_priv.h. */
+int srnx_open_buffer(
+    struct srnx_reader *srnx,
+    const char data[],
+    size_t size,
+    int flags
+)
 {
-    struct srnx_reader *srnx;
-    struct stat sbuf;
-    void *addr;
     const char *chunk, *rptr, *payload_start;
-    size_t file_size, tot_len;
+    size_t file_size;
     uint64_t ul, payload_len;
-    int fd, res, chunk_digest_length, file_digest_length;
+    int res, chunk_digest_length, file_digest_length;
 
-    /* Either clean up old srnx_reader, or allocate a new one. */
-    srnx = *p_srnx;
-    if (srnx)
-    {
-        if (srnx->data)
-        {
-            munmap((void *)srnx->data, srnx->data_mapped);
-        }
-
-        for (ul = 0; ul < 33; ++ul)
-        {
-            free(srnx->sys_info[ul].code);
-        }
-    }
-    else
-    {
-        srnx = malloc(sizeof *srnx);
-        if (!srnx)
-        {
-            return ENOMEM;
-        }
-        *p_srnx = srnx;
-    }
-    memset(srnx, 0, sizeof *srnx);
-    srnx->data = NULL;
-    srnx->sdir_offset = -1;
-    srnx->epoc_offset = -1;
-    srnx->evtf_offset = -1;
-
-    /* Open the requested file. */
-    fd = open(filename, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-    {
-        srnx_errorf(srnx, "error opening file: %s", strerror(errno));
-        return errno;
-    }
-
-    /* Find its size. */
-    res = fstat(fd, &sbuf);
-    if (res < 0)
-    {
-        srnx_errorf(srnx, "unable to fstat file: %s", strerror(errno));
-        return errno;
-    }
-    file_size = sbuf.st_size;
-
-    /* Memory-map the file. */
-    if (!rnx_page_size && rnx_mmap_init())
-    {
-        srnx_errorf(srnx, "rnx_mmap_init failed: %s", strerror(errno));
-        return errno;
-    }
-    tot_len = (file_size + RINEX_EXTRA + rnx_page_size - 1) & -rnx_page_size;
-    addr = rnx_mmap_padded(fd, 0, file_size, tot_len);
-    if (addr == MAP_FAILED)
-    {
-        res = errno;
-        srnx_errorf(srnx, "mmap failed: %s", strerror(errno));
-        close(fd);
-        return res;
-    }
-    close(fd);
+    file_size = size;
 
     /* Check that first chunk is SRNX. */
-    chunk = addr;
+    chunk = data;
     if (memcmp(chunk, "SRNX", 4))
     {
         srnx_errorf(srnx, "first chunk should be SRNX, got '\\x%02x%02x%02x%02x' (%.4s)",
@@ -575,7 +500,7 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
 
     /* Read SRNX chunk length. */
     payload_len = uleb128(&rptr);
-    if (rptr - (const char *)addr + payload_len >= file_size)
+    if (rptr - data + payload_len >= file_size)
     {
         srnx_errorf(srnx, "first chunk had unreasonable length %"PRIu64, payload_len);
         res = SRNX_CORRUPT;
@@ -624,7 +549,7 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
     }
     srnx->file_digest = ul;
     file_digest_length = rnx_digest_length(srnx->file_digest);
-    if ((uint64_t)(rptr - (const char *)addr + file_digest_length
+    if ((uint64_t)(rptr - data + file_digest_length
         + chunk_digest_length) > file_size)
     {
         srnx_errorf(srnx, "file too small for SRNX chunk + digest");
@@ -636,7 +561,7 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
     /* Verify the SRNX chunk's own digest before trusting any payload
      * field we have not yet consumed (notably the SDIR offset).
      */
-    res = verify_chunk_digest(srnx, addr);
+    res = verify_chunk_digest(srnx, data);
     if (res)
     {
         res = SRNX_CORRUPT;
@@ -666,12 +591,12 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
         res = SRNX_CORRUPT;
         goto out;
     }
-    srnx->rhdr_offset = chunk - (const char *)addr;
+    srnx->rhdr_offset = chunk - data;
     rptr = chunk + 4;
 
     /* Read RHDR chunk length. */
     payload_len = uleb128(&rptr);
-    if (rptr - (const char *)addr + payload_len + chunk_digest_length > file_size)
+    if (rptr - data + payload_len + chunk_digest_length > file_size)
     {
         srnx_errorf(srnx, "RHDR length too large");
         res = SRNX_CORRUPT;
@@ -692,10 +617,9 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
         goto out;
     }
 
-    srnx->data = addr;
+    srnx->data = data;
     srnx->data_size = file_size;
-    srnx->data_mapped = tot_len;
-    srnx->next_offset = (rptr - (const char *)addr)
+    srnx->next_offset = (rptr - data)
         + payload_len + chunk_digest_length;
 
     /* Finally, check the file digest, unless suppressed. */
@@ -705,7 +629,101 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
     }
 
 out:
-    if (res != 0)
+    return res;
+}
+
+/* Doc comment in rnx_priv.h. */
+struct srnx_reader *srnx_reset(struct srnx_reader **p_srnx)
+{
+    struct srnx_reader *srnx;
+    uint64_t ul;
+
+    /* Either clean up old srnx_reader, or allocate a new one. */
+    srnx = *p_srnx;
+    if (srnx)
+    {
+        if (srnx->data && srnx->data_mapped)
+        {
+            munmap((void *)srnx->data, srnx->data_mapped);
+        }
+
+        for (ul = 0; ul < 33; ++ul)
+        {
+            free(srnx->sys_info[ul].code);
+        }
+    }
+    else
+    {
+        srnx = malloc(sizeof *srnx);
+        if (!srnx)
+        {
+            return NULL;
+        }
+        *p_srnx = srnx;
+    }
+    memset(srnx, 0, sizeof *srnx);
+    srnx->data = NULL;
+    srnx->sdir_offset = -1;
+    srnx->epoc_offset = -1;
+    srnx->evtf_offset = -1;
+    return srnx;
+}
+
+/* Doc comment in srnx.h. */
+int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
+{
+    struct srnx_reader *srnx;
+    struct stat sbuf;
+    void *addr;
+    size_t file_size, tot_len;
+    int fd, res;
+
+    srnx = srnx_reset(p_srnx);
+    if (!srnx)
+    {
+        return ENOMEM;
+    }
+
+    /* Open the requested file. */
+    fd = open(filename, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        srnx_errorf(srnx, "error opening file: %s", strerror(errno));
+        return errno;
+    }
+
+    /* Find its size. */
+    res = fstat(fd, &sbuf);
+    if (res < 0)
+    {
+        srnx_errorf(srnx, "unable to fstat file: %s", strerror(errno));
+        return errno;
+    }
+    file_size = sbuf.st_size;
+
+    /* Memory-map the file. */
+    if (!rnx_page_size && rnx_mmap_init())
+    {
+        srnx_errorf(srnx, "rnx_mmap_init failed: %s", strerror(errno));
+        return errno;
+    }
+    tot_len = (file_size + RINEX_EXTRA + rnx_page_size - 1) & -rnx_page_size;
+    addr = rnx_mmap_padded(fd, 0, file_size, tot_len);
+    if (addr == MAP_FAILED)
+    {
+        res = errno;
+        srnx_errorf(srnx, "mmap failed: %s", strerror(errno));
+        close(fd);
+        return res;
+    }
+    close(fd);
+
+    res = srnx_open_buffer(srnx, addr, file_size, flags);
+    if (res == 0)
+    {
+        srnx->data_mapped = tot_len;
+    }
+    else
     {
         munmap(addr, tot_len);
     }
@@ -1911,14 +1929,33 @@ int srnx_read_obs_value(
     /* Do we need more observations? */
     if (p_socd->obs_idx >= p_socd->obs_valid)
     {
-        p_socd->obs_valid = 0;
-        if (p_socd->data_offset < p_socd->data_end)
+        /* A pending BLOCK_ABSENT/BLOCK_ZERO run can still produce more
+         * values with no further bytes to read (see decode_observations()'s
+         * own "while (data < end || p_socd->block_left > 0)" loop
+         * condition); block_left must be checked here too, or a block
+         * that hits the end of the packed data mid-run is reported as
+         * SRNX_END_OF_DATA one call early.
+         */
+        if (p_socd->data_offset < p_socd->data_end || p_socd->block_left > 0)
         {
             res = decode_observations(p_socd);
             if (res)
             {
                 return res;
             }
+
+            /* decode_observations() leaves obs_idx == obs_valid, on
+             * the assumption (true for srnx_get_obs_by_index(), which
+             * always drains obs[] via memcpy() before decoding more)
+             * that everything just decoded has already been consumed.
+             * For incremental single-value reads, rewind to the start
+             * of the freshly decoded batch.
+             */
+            p_socd->obs_idx = 0;
+        }
+        else
+        {
+            p_socd->obs_valid = 0;
         }
 
         if (!p_socd->obs_valid)
@@ -2116,19 +2153,15 @@ fail:
     return res;
 }
 
-/** Parses epoch presence from a SATE chunk into \a sv->when[].
- *
- * \param[in] srnx SRNX reader.
- * \param[in] name Satellite name to find.
- * \param[in] n_signals Number of signal offsets to skip in the SATE payload.
- * \param[out] sv Satellite data to populate (when[], when_used, obs_used).
- * \returns Zero on success, non-zero on error.
- */
-static int srnx_load_epoch_presence(
+/* Doc comment in rnx_priv.h. */
+int srnx_get_presence_runs(
     struct srnx_reader *srnx,
     struct srnx_satellite_name name,
     int n_signals,
-    struct rinex_satellite_data *sv
+    struct rinex_range **p_runs,
+    int *p_n_runs,
+    int *p_alloc,
+    int *p_obs_count
 )
 {
     int64_t sate_offset;
@@ -2162,15 +2195,15 @@ static int srnx_load_epoch_presence(
     /* Parse epoch presence RLE. */
     n_runs = uleb128(&rptr) + 1;
 
-    /* Allocate when[] with enough capacity. */
-    sv->when_alloc = (n_runs > 4) ? (int)n_runs : 4;
-    sv->when = calloc(sv->when_alloc, sizeof *sv->when);
-    if (!sv->when)
+    /* Allocate *p_runs with enough capacity. */
+    *p_alloc = (n_runs > 4) ? (int)n_runs : 4;
+    *p_runs = calloc(*p_alloc, sizeof **p_runs);
+    if (!*p_runs)
     {
-        srnx_errorf(srnx, "allocation failed for epoch array of length %d", sv->when_alloc);
+        srnx_errorf(srnx, "allocation failed for epoch array of length %d", *p_alloc);
         return ENOMEM;
     }
-    sv->when_used = 0;
+    *p_n_runs = 0;
 
     epoch = 0;
     obs_count = 0;
@@ -2197,29 +2230,60 @@ static int srnx_load_epoch_presence(
         }
         present = (int)present_val;
 
-        /* Grow when[] if needed. */
-        if (sv->when_used >= sv->when_alloc)
+        /* Grow *p_runs if needed. */
+        if (*p_n_runs >= *p_alloc)
         {
-            struct rinex_range *new_when;
-            sv->when_alloc *= 2;
-            new_when = realloc(sv->when, sv->when_alloc * sizeof *sv->when);
-            if (!new_when)
+            struct rinex_range *new_runs;
+            *p_alloc *= 2;
+            new_runs = realloc(*p_runs, *p_alloc * sizeof **p_runs);
+            if (!new_runs)
             {
-                srnx_errorf(srnx, "allocation failed for epoch array of length %d", sv->when_alloc);
+                srnx_errorf(srnx, "allocation failed for epoch array of length %d", *p_alloc);
                 return ENOMEM;
             }
-            sv->when = new_when;
+            *p_runs = new_runs;
         }
 
-        sv->when[sv->when_used].start = epoch;
-        sv->when[sv->when_used].end = epoch + present;
-        sv->when_used++;
+        (*p_runs)[*p_n_runs].start = epoch;
+        (*p_runs)[*p_n_runs].end = epoch + present;
+        ++*p_n_runs;
         obs_count += present;
         epoch += present;
     }
 
-    sv->obs_used = obs_count;
+    *p_obs_count = obs_count;
     return 0;
+}
+
+/** Parses epoch presence from a SATE chunk into \a sv->when[].
+ *
+ * \param[in] srnx SRNX reader.
+ * \param[in] name Satellite name to find.
+ * \param[in] n_signals Number of signal offsets to skip in the SATE payload.
+ * \param[out] sv Satellite data to populate (when[], when_used, obs_used).
+ * \returns Zero on success, non-zero on error.
+ */
+static int srnx_load_epoch_presence(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int n_signals,
+    struct rinex_satellite_data *sv
+)
+{
+    return srnx_get_presence_runs(srnx, name, n_signals,
+        &sv->when, &sv->when_used, &sv->when_alloc, &sv->obs_used);
+}
+
+/* Doc comment in rnx_priv.h. */
+void srnx_fill_n_obs(struct srnx_reader *srnx, unsigned char n_obs[32])
+{
+    int ii, s_idx;
+
+    for (ii = 0; ii < 32; ++ii)
+    {
+        s_idx = srnx->sys_idx[ii];
+        n_obs[ii] = s_idx ? (unsigned char)srnx->sys_info[s_idx].codes_len : 0;
+    }
 }
 
 /* Doc comment in srnx.h. */
@@ -2517,7 +2581,7 @@ out:
     if (srnx)
     {
         strncpy(out->error, srnx->errmsg, sizeof out->error);
-        if (srnx->data)
+        if (srnx->data && srnx->data_mapped)
             munmap((void *)srnx->data, srnx->data_mapped);
         for (kk = 0; kk < 33; ++kk)
             free(srnx->sys_info[kk].code);

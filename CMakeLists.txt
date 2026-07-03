@@ -44,6 +44,7 @@ add_library(rinex SHARED
     rinex/rnx_parse.c
     rinex/rnx_priv.c
     rinex/srnx.c
+    rinex/srnx_parse.c
     rinex/transpose.c
     python/rinex_bridge.c)
 target_include_directories(rinex PRIVATE ${BLAKE3_INCLUDE_DIRS})
@@ -116,6 +117,15 @@ target_compile_definitions(test_srnx_digest PRIVATE
 add_dependencies(test_srnx_digest rnx2srnx)
 add_test(NAME srnx_digest COMMAND test_srnx_digest)
 set_property(TEST srnx_digest PROPERTY LABELS function)
+
+add_executable(test_srnx_parser test/srnx_parser.c)
+target_link_libraries(test_srnx_parser rinex tap)
+target_compile_definitions(test_srnx_parser PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/test/test_02.rnx")
+add_dependencies(test_srnx_parser rnx2srnx)
+add_test(NAME srnx_parser COMMAND test_srnx_parser)
+set_property(TEST srnx_parser PROPERTY LABELS function)
 
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)

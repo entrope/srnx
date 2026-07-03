@@ -155,7 +155,12 @@ static int rinex_mmap_advance(
 success:
         stream->offset = base_offset;
         stream->base.buffer = stream->map + new_offset - base_offset;
-        stream->base.size = stream->total - RINEX_EXTRA + base_offset - new_offset;
+        /* stream->total is rounded up to a page multiple, which can
+         * leave more than RINEX_EXTRA bytes of slack past the real
+         * data; req_size (already clamped to the true remaining file
+         * length above) is the actual amount of real data mapped.
+         */
+        stream->base.size = req_size;
         return 0;
     }
 

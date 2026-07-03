@@ -11,6 +11,8 @@
 #include <stdlib.h>
 
 #include "rinex/rinex.h"
+#include "rinex/rinex_load.h"
+#include "rinex/srnx.h"
 
 /** RINEX_EXTRA is the extra length of stream buffers to ease vectorization. */
 #define RINEX_EXTRA 80
@@ -27,6 +29,24 @@
 #define RNX_N_BLOCK_SIZES 7
 static const int rnx_block_sizes[RNX_N_BLOCK_SIZES] = {
     8, 16, 24, 32, 40, 48, 112
+};
+
+/* Negative SRNX error numbers, returned by srnx.c's functions (declared
+ * in srnx.h) and by the internal helpers declared below.
+ */
+enum srnx_errno
+{
+    SRNX_NOT_SRNX = -1,
+    SRNX_CORRUPT = -2,
+    SRNX_BAD_MAJOR = -3,
+    SRNX_BAD_STATE = -4,
+    SRNX_NO_CHUNK = -5,
+    SRNX_UNKNOWN_SYSTEM = -6,
+    SRNX_UNKNOWN_CODE = -7,
+    SRNX_UNKNOWN_SATELLITE = -8,
+    SRNX_END_OF_DATA = -9,
+    SRNX_IMPLEMENTATION_ERROR = -10,
+    SRNX_BAD_DIGEST = -11
 };
 
 /** rnx_page_size is the value of sysconf(_SC_PAGE_SIZE). */
@@ -242,6 +262,90 @@ const char *rnx_open_v23(
 
 const char *crx_open_v23(
     struct crx_v23_parser *crx,
+    struct rinex_stream *stream
+);
+
+/** (Re-)initializes \a *p_srnx for a new open attempt: allocates a new
+ * srnx_reader if \a *p_srnx is NULL, else releases the previous reader's
+ * mapped data and observation-code tables; either way, the result is
+ * zeroed with \a sdir_offset, \a epoc_offset and \a evtf_offset set to
+ * -1.  \a struct srnx_reader is opaque outside srnx.c, so this is the
+ * only way for another translation unit (e.g. srnx_parse.c) to obtain
+ * one.
+ *
+ * \param[in,out] p_srnx Pointer to SRNX reader object to (re-)initialize.
+ * \returns The (possibly newly allocated) reader, or NULL on ENOMEM.
+ */
+struct srnx_reader *srnx_reset(struct srnx_reader **p_srnx);
+
+/** Parses the SRNX/RHDR chunk headers from an in-memory buffer into an
+ * already-reset \a srnx (see srnx_reset()).
+ *
+ * On success, \a srnx->data is set to \a data and \a srnx->data_mapped
+ * is left at 0 (the buffer is borrowed, not owned); the caller decides
+ * whether/how to release \a data.
+ *
+ * \param[in,out] srnx SRNX reader to populate; must already be reset.
+ * \param[in] data Pointer to the whole SRNX file contents in memory.
+ * \param[in] size Number of bytes at \a data.
+ * \param[in] flags SRNX_OPEN_UNCHECKED to skip the file-level digest check.
+ * \returns Zero on success, else a positive errno or negative srnx_errno.
+ */
+int srnx_open_buffer(
+    struct srnx_reader *srnx,
+    const char *data,
+    size_t size,
+    int flags
+);
+
+/** Parses the epoch-presence run-length encoding out of the SATE chunk
+ * for satellite \a name, without allocating a rinex_satellite_data.
+ *
+ * \param[in] srnx SRNX reader to use.
+ * \param[in] name Satellite name to look up.
+ * \param[in] n_signals Number of SLEB128 signal offsets to skip in the
+ *   SATE payload before the presence run-length data.
+ * \param[in,out] p_runs Receives a (re)allocated array of presence runs;
+ *   must be initialized to NULL for a fresh call.
+ * \param[in,out] p_n_runs Receives the number of valid entries in
+ *   \a *p_runs.
+ * \param[in,out] p_alloc Receives the allocated length of \a *p_runs.
+ * \param[out] p_obs_count Receives the total number of present epochs
+ *   (the sum of each run's length).
+ * \returns Zero on success, else a positive errno or negative srnx_errno.
+ */
+int srnx_get_presence_runs(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int n_signals,
+    struct rinex_range **p_runs,
+    int *p_n_runs,
+    int *p_alloc,
+    int *p_obs_count
+);
+
+/** Fills \a n_obs[32] (indexed the same way as rinex_parser.n_obs) from
+ * \a srnx's already-parsed RHDR observation-code tables.
+ *
+ * \param[in] srnx SRNX reader to use.
+ * \param[out] n_obs Receives the observation-code count per system.
+ */
+void srnx_fill_n_obs(struct srnx_reader *srnx, unsigned char n_obs[32]);
+
+/** Creates a row-oriented rinex_parser backed by an SRNX file.
+ *
+ * \a stream must already have its entire contents available in
+ * \a stream->buffer (SRNX requires random access).  As with the text
+ * and CRX parsers, the created parser borrows \a stream but does not
+ * own it: the caller of rinex_open() remains responsible for calling
+ * \a stream->destroy() once it is no longer needed.
+ *
+ * \param[in,out] p_parser Receives a pointer to the created parser.
+ * \param[in] stream Input stream with the whole SRNX file buffered.
+ * \returns NULL on success, else an explanation of the failure.
+ */
+const char *srnx_open_parser(
+    struct rinex_parser **p_parser,
     struct rinex_stream *stream
 );
 
