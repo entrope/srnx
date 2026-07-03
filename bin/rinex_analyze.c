@@ -107,8 +107,14 @@ struct file_data
     struct system_info sys_info[32];
 };
 
-int64_t min_s128[5], max_s128[5];
-uint64_t rlsb[5][64];
+int64_t min_s128[7], max_s128[7];
+uint64_t rlsb[7][64];
+
+/** order_was_min[oo] is set to 1 if delta order \a oo was ever the
+ * minimum-cost encoding for some signal; used to filter the zrange/lrsb
+ * summary in finish() to orders actually seen in practice.
+ */
+int order_was_min[8];
 
 static int l_ubase128(uint64_t val)
 {
@@ -147,20 +153,20 @@ static int l_sbase128_d(int64_t val, int level)
 
 __attribute__((noinline))
 void analyze_obs(const int64_t *obs, int n_obs, int *l0,
-    int *l1, int *l2, int *l3, int *l4, int *l5)
+    int *l1, int *l2, int *l3, int *l4, int *l5, int *l6, int *l7)
 {
-    int64_t d[6], p[5];
+    int64_t d[8], p[7];
     int tmp;
 
     d[0] = obs[0];
-    *l0 = *l1 = *l2 = *l3 = *l4 = *l5 = l_sbase128(d[0]);
+    *l0 = *l1 = *l2 = *l3 = *l4 = *l5 = *l6 = *l7 = l_sbase128(d[0]);
 
     if (n_obs < 2) return;
     p[0] = d[0], d[0] = obs[1];
     d[1] = d[0] - p[0];
     *l0 += l_sbase128(d[0]);
     tmp = l_sbase128_d(d[1], 0);
-    *l1 += tmp; *l2 += tmp; *l3 += tmp; *l4 += tmp; *l5 += tmp;
+    *l1 += tmp; *l2 += tmp; *l3 += tmp; *l4 += tmp; *l5 += tmp; *l6 += tmp; *l7 += tmp;
 
     if (n_obs < 3) return;
     p[0] = d[0], d[0] = obs[2];
@@ -169,7 +175,7 @@ void analyze_obs(const int64_t *obs, int n_obs, int *l0,
     *l0 += l_sbase128(d[0]);
     *l1 += l_sbase128_d(d[1], 0);
     tmp = l_sbase128_d(d[2], 1);
-    *l2 += tmp; *l3 += tmp; *l4 += tmp; *l5 += tmp;
+    *l2 += tmp; *l3 += tmp; *l4 += tmp; *l5 += tmp; *l6 += tmp; *l7 += tmp;
 
     if (n_obs < 4) return;
     p[0] = d[0], d[0] = obs[3];
@@ -180,7 +186,7 @@ void analyze_obs(const int64_t *obs, int n_obs, int *l0,
     *l1 += l_sbase128_d(d[1], 0);
     *l2 += l_sbase128_d(d[2], 1);
     tmp = l_sbase128_d(d[3], 2);
-    *l3 += tmp; *l4 += tmp; *l5 += tmp;
+    *l3 += tmp; *l4 += tmp; *l5 += tmp; *l6 += tmp; *l7 += tmp;
 
     if (n_obs < 5) return;
     p[0] = d[0], d[0] = obs[4];
@@ -193,16 +199,50 @@ void analyze_obs(const int64_t *obs, int n_obs, int *l0,
     *l2 += l_sbase128_d(d[2], 1);
     *l3 += l_sbase128_d(d[3], 2);
     tmp = l_sbase128_d(d[4], 3);
-    *l4 += tmp; *l5 += tmp;
+    *l4 += tmp; *l5 += tmp; *l6 += tmp; *l7 += tmp;
 
-    for (int ii = 5; ii < n_obs; ++ii)
+    if (n_obs < 6) return;
+    p[0] = d[0], d[0] = obs[5];
+    p[1] = d[1], d[1] = d[0] - p[0];
+    p[2] = d[2], d[2] = d[1] - p[1];
+    p[3] = d[3], d[3] = d[2] - p[2];
+    p[4] = d[4], d[4] = d[3] - p[3];
+    d[5] = d[4] - p[4];
+    *l0 += l_sbase128(d[0]);
+    *l1 += l_sbase128_d(d[1], 0);
+    *l2 += l_sbase128_d(d[2], 1);
+    *l3 += l_sbase128_d(d[3], 2);
+    *l4 += l_sbase128_d(d[4], 3);
+    tmp = l_sbase128_d(d[5], 4);
+    *l5 += tmp; *l6 += tmp; *l7 += tmp;
+
+    if (n_obs < 7) return;
+    p[0] = d[0], d[0] = obs[6];
+    p[1] = d[1], d[1] = d[0] - p[0];
+    p[2] = d[2], d[2] = d[1] - p[1];
+    p[3] = d[3], d[3] = d[2] - p[2];
+    p[4] = d[4], d[4] = d[3] - p[3];
+    p[5] = d[5], d[5] = d[4] - p[4];
+    d[6] = d[5] - p[5];
+    *l0 += l_sbase128(d[0]);
+    *l1 += l_sbase128_d(d[1], 0);
+    *l2 += l_sbase128_d(d[2], 1);
+    *l3 += l_sbase128_d(d[3], 2);
+    *l4 += l_sbase128_d(d[4], 3);
+    *l5 += l_sbase128_d(d[5], 4);
+    tmp = l_sbase128_d(d[6], 5);
+    *l6 += tmp; *l7 += tmp;
+
+    for (int ii = 7; ii < n_obs; ++ii)
     {
         p[0] = d[0], d[0] = obs[ii];
         p[1] = d[1], d[1] = d[0] - p[0];
         p[2] = d[2], d[2] = d[1] - p[1];
         p[3] = d[3], d[3] = d[2] - p[2];
         p[4] = d[4], d[4] = d[3] - p[3];
-        d[5] = d[4] - p[4];
+        p[5] = d[5], d[5] = d[4] - p[4];
+        p[6] = d[6], d[6] = d[5] - p[5];
+        d[7] = d[6] - p[6];
 
         *l0 += l_sbase128(d[0]);
         *l1 += l_sbase128_d(d[1], 0);
@@ -210,6 +250,8 @@ void analyze_obs(const int64_t *obs, int n_obs, int *l0,
         *l3 += l_sbase128_d(d[3], 2);
         *l4 += l_sbase128_d(d[4], 3);
         *l5 += l_sbase128_d(d[5], 4);
+        *l6 += l_sbase128_d(d[6], 5);
+        *l7 += l_sbase128_d(d[7], 6);
     }
 }
 
@@ -578,7 +620,7 @@ static void analyze_compression(const char filename[], int64_t grand_total)
         for (jj = 0; jj < n_obs; ++jj)
         {
             struct signal_obs *s_obs;
-            int l0, l1, l2, l3, l4, l5, l_lli, l_ssi, l_min;
+            int orders[8], l_lli, l_ssi, l_min;
 
             s_obs = &sv->obs[jj];
             if (!s_obs->used)
@@ -590,22 +632,25 @@ static void analyze_compression(const char filename[], int64_t grand_total)
                 printf("WARNING: SV %d obs %d had %d observations, %d expected\n",
                     ii, jj, s_obs->used, sv_obs);
             }
-            analyze_obs(s_obs->obs, s_obs->used, &l0, &l1, &l2, &l3, &l4, &l5);
+            analyze_obs(s_obs->obs, s_obs->used, &orders[0], &orders[1],
+                &orders[2], &orders[3], &orders[4], &orders[5], &orders[6],
+                &orders[7]);
             l_lli = analyze_rle(s_obs->lli, s_obs->used);
             l_ssi = analyze_rle(s_obs->ssi, s_obs->used);
 
-            l_min = l0;
-            if (l_min > l1) l_min = l1;
-            if (l_min > l2) l_min = l2;
-            if (l_min > l3) l_min = l3;
-            if (l_min > l4) l_min = l4;
-            if (l_min > l5) l_min = l5;
+            l_min = orders[0];
+            for (int oo = 1; oo < 8; ++oo)
+                if (l_min > orders[oo]) l_min = orders[oo];
+            for (int oo = 0; oo < 8; ++oo)
+                if (orders[oo] == l_min) order_was_min[oo] = 1;
 
             n_sigs += 1;
             sv_total += l_lli + l_ssi + (s_obs->used ? 1 : 0) + l_min;
 
-            if (verbose) printf("%s_%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-                sv->name, jj, l0, l1, l2, l3, l4, l5, l_lli, l_ssi, sv_total);
+            if (verbose) printf("%s_%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                sv->name, jj, orders[0], orders[1], orders[2], orders[3],
+                orders[4], orders[5], orders[6], orders[7], l_lli, l_ssi,
+                sv_total);
         }
 
         grand_total += sv_total;
@@ -630,7 +675,7 @@ void process_file(struct rinex_parser *p, const char filename[])
         init_file_data(&data);
         if (verbose)
         {
-            printf("signal,l0,l1,l2,l3,l4,l5,lli,ssi,total\n");
+            printf("signal,l0,l1,l2,l3,l4,l5,l6,l7,lli,ssi,total\n");
         }
     }
     if (verbose)
@@ -668,18 +713,28 @@ void process_file(struct rinex_parser *p, const char filename[])
 
 void finish(void)
 {
+    /* min_s128/max_s128/rlsb are indexed by delta-order minus one (they
+     * only track d[1]..d[7], not the raw l0 encoding), so only orders
+     * 1..7 that were ever the minimum for some signal are included here.
+     */
+    int active[7], n_active = 0;
+    for (int oo = 1; oo < 8; ++oo)
+        if (order_was_min[oo])
+            active[n_active++] = oo - 1;
+
     printf("\nzrange = [");
-    for (int ii = 0; ii < 5; ++ii)
+    for (int ii = 0; ii < n_active; ++ii)
     {
-        printf(" %lld %lld;", (long long)min_s128[ii], (long long)max_s128[ii]);
+        int lvl = active[ii];
+        printf(" %lld %lld;", (long long)min_s128[lvl], (long long)max_s128[lvl]);
     }
     printf(" ];\nlrsb = [");
-    for (int ii = 0; ii < 64; ++ii)
+    for (int bit = 0; bit < 64; ++bit)
     {
-        printf(" %d %llu %llu %llu %llu %llu;\n", ii,
-            (long long)rlsb[0][ii], (long long)rlsb[1][ii],
-            (long long)rlsb[2][ii], (long long)rlsb[3][ii],
-            (long long)rlsb[4][ii]);
+        printf(" %d", bit);
+        for (int ii = 0; ii < n_active; ++ii)
+            printf(" %llu", (unsigned long long)rlsb[active[ii]][bit]);
+        printf(";\n");
     }
     printf("]\n");
 }
