@@ -74,7 +74,8 @@ target_link_libraries(rnxcmp rinex)
 add_executable(rnx2srnx bin/rnx2srnx.c)
 target_link_libraries(rnx2srnx rinex)
 
-add_executable(rnx2srnx_search bin/rnx2srnx_search.c)
+add_executable(rnx2srnx_search bin/rnx2srnx.c)
+target_compile_definitions(rnx2srnx_search PRIVATE RNX2SRNX_SEARCH)
 target_link_libraries(rnx2srnx_search rinex)
 
 add_executable(srnx_scan bin/srnx_scan.c)
