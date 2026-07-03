@@ -5,6 +5,7 @@
 
 #include "rinex/digest.h"
 #include "rinex/rinex_load.h"
+#include "rinex/rnx_priv.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -362,7 +363,7 @@ struct rnx2srnx_scratch
     int64_t *full_scaled;    /**< cap */
     int64_t *present_scaled; /**< cap */
     int64_t *dp;             /**< cap + 1 */
-    uint8_t *spt;            /**< 7 * cap : sparse table for dp_core window-max */
+    uint8_t *spt;            /**< RNX_N_BLOCK_SIZES * cap : sparse table for dp_core window-max */
     uint8_t *all_bw;         /**< 8 * cap : bw for all 8 delta orders */
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a; /**< cap; "best so far" */
@@ -410,7 +411,7 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
     s->full_scaled    = xrealloc(s->full_scaled,      cap * sizeof *s->full_scaled);
     s->present_scaled = xrealloc(s->present_scaled,   cap * sizeof *s->present_scaled);
     s->dp             = xrealloc(s->dp,         (cap + 1) * sizeof *s->dp);
-    s->spt            = xrealloc(s->spt,          7 * cap * sizeof *s->spt);
+    s->spt            = xrealloc(s->spt,          RNX_N_BLOCK_SIZES * cap * sizeof *s->spt);
     s->all_bw         = xrealloc(s->all_bw,       8 * cap * sizeof *s->all_bw);
     s->psum_arr       = xrealloc(s->psum_arr,   (cap + 1) * sizeof *s->psum_arr);
     s->choices_a      = xrealloc(s->choices_a,        cap * sizeof *s->choices_a);
@@ -418,8 +419,8 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
     s->cap = cap;
 }
 
-/* Block sizes for high-3-bits values 0..6. */
-static const int cand[7] = {8, 16, 24, 32, 40, 48, 112};
+/* Block sizes for high-3-bits values 0..6; shared with the decoder and
+ * scanner via rnx_block_sizes (rnx_priv.h). */
 
 /* Per-cand[] sparse table: spt[k * cap + ii] = max(bw[ii .. ii + cand[k])).
  * Query is a direct load: max_bw for candidate ci starting at ii is
@@ -537,9 +538,9 @@ static int64_t dp_core(struct rnx2srnx_scratch *scratch,
         /* Block transitions.  cand[] is ascending so we can stop once
          * remaining < m or the bit width is too large.
          */
-        for (ci = 0; ci < 7; ++ci)
+        for (ci = 0; ci < RNX_N_BLOCK_SIZES; ++ci)
         {
-            int m = cand[ci];
+            int m = rnx_block_sizes[ci];
             int max_bw;
 
             max_bw = scratch->spt[(size_t)ci * scratch->cap + ii];
@@ -838,13 +839,10 @@ static void emit_blocks(struct wbuf *packed, const int64_t *ord_vals,
         case BK_BLOCK:
         {
             unsigned char header;
-            int hi3 =
-                c.len ==   8 ? 0 :
-                c.len ==  16 ? 1 :
-                c.len ==  24 ? 2 :
-                c.len ==  32 ? 3 :
-                c.len ==  40 ? 4 :
-                c.len ==  48 ? 5 : 6; /* c.len == 112 */
+            int hi3;
+            for (hi3 = 0; hi3 < RNX_N_BLOCK_SIZES - 1; ++hi3)
+                if (rnx_block_sizes[hi3] == c.len)
+                    break;
             header = (unsigned char)(hi3 << 5)
                    | (unsigned char)(c.bw - 1);
             wbuf_byte(packed, header);

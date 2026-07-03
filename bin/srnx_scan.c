@@ -4,6 +4,7 @@
  */
 
 #include "rinex/digest.h"
+#include "rinex/rnx_priv.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -330,13 +331,12 @@ static void scan_file(const char *filename, file_stats_t *stats)
                 uint8_t header = *(const uint8_t *)rptr++;
                 stats->block_header_count[header]++;
 
-                if (header >> 5 < 7)
+                if (header >> 5 < RNX_N_BLOCK_SIZES)
                 {
                     /* Bit matrix: (k+1) rows × (m/8) bytes each.
                      * bits per value = (header & 0x1F) + 1
-                     * m ∈ {8,16,24,32,40,48,112} per high-3-bit index */
-                    static const int block_sizes[7] = {8,16,24,32,40,48,112};
-                    rptr += ((header & 0x1F) + 1) * (block_sizes[header >> 5] / 8);
+                     * m ∈ rnx_block_sizes[] per high-3-bit index */
+                    rptr += ((header & 0x1F) + 1) * (rnx_block_sizes[header >> 5] / 8);
                 }
                 else if (header == 0xFD)
                 {
@@ -420,10 +420,9 @@ static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
 
 static void print_block_header(int i, uint64_t count)
 {
-    static const int block_sizes[7] = {8, 16, 24, 32, 40, 48, 112};
-    if (i >> 5 < 7)
+    if (i >> 5 < RNX_N_BLOCK_SIZES)
     {
-        int m = block_sizes[i >> 5];
+        int m = rnx_block_sizes[i >> 5];
         int bits = (i & 0x1F) + 1;
         printf("  0x%02X (%d\xc3\x97%d-bit matrix): %" PRIu64 "\n",
             i, m, bits, count);

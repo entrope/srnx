@@ -19,6 +19,7 @@
  */
 
 #include "rinex/digest.h"
+#include "rinex/rnx_priv.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -325,13 +326,12 @@ static void split_socd(const char *payload, uint64_t plen)
         cat_write(CAT_SOCD_HEADERS, p, 1);
         p++;
 
-        if (header >> 5 < 7)
+        if (header >> 5 < RNX_N_BLOCK_SIZES)
         {
             /* Bit matrix: (k+1) rows * (m/8) bytes.
-             * m ∈ {8,16,24,32,40,48,112} per high-3-bit index. */
-            static const int block_sizes[7] = {8,16,24,32,40,48,112};
+             * m ∈ rnx_block_sizes[] per high-3-bit index. */
             size_t body_len = (size_t)((header & 0x1F) + 1)
-                            * (size_t)(block_sizes[header >> 5] / 8);
+                            * (size_t)(rnx_block_sizes[header >> 5] / 8);
             if (p + body_len > packed_end)
             {
                 fprintf(stderr,

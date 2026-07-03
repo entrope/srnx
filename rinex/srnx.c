@@ -1857,16 +1857,13 @@ static int decode_observations(
          *   100=40, 101=48, 110=112.
          * Bottom five bits are k; bits per value = k+1 (1..32).
          * Cast to unsigned char before shifting to avoid sign-extension UB. */
-        if ((unsigned char)ch >> 5 == 7)   /* 0xE0-0xFC are reserved */
+        if ((unsigned char)ch >> 5 == RNX_N_BLOCK_SIZES)   /* 0xE0-0xFC are reserved */
         {
             srnx_errorf(p_socd->parent, "unsupported block code %d", ch);
             res = SRNX_CORRUPT;
             goto out;
         }
-        {
-            static const int block_sizes[7] = {8, 16, 24, 32, 40, 48, 112};
-            count = block_sizes[(unsigned char)ch >> 5];
-        }
+        count = rnx_block_sizes[(unsigned char)ch >> 5];
         bits = ((unsigned char)ch & 31) + 1; /* bits per output value: 1..32 */
 
         /* Do we have enough data? */

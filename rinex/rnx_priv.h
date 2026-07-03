@@ -21,6 +21,14 @@
 /** RNX_META_FLAG is used to flag special values in rinex_parser.obs[]. */
 #define RNX_META_FLAG INT64_MIN
 
+/* Bit-matrix block sizes selected by the high 3 bits of a SOCD
+ * block-header byte (indexes 0..6; index 7 selects the special
+ * codes 0xE0-0xFF).  All values are multiples of 8. */
+#define RNX_N_BLOCK_SIZES 7
+static const int rnx_block_sizes[RNX_N_BLOCK_SIZES] = {
+    8, 16, 24, 32, 40, 48, 112
+};
+
 /** rnx_page_size is the value of sysconf(_SC_PAGE_SIZE). */
 extern long rnx_page_size;
 
