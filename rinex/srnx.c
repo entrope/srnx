@@ -1984,16 +1984,13 @@ int srnx_get_obs_by_name(
     struct srnx_satellite_name name,
     int codes_len,
     struct srnx_obs_code code[],
-    int n_values[],
-    int64_t **p_obs,
-    char **p_lli,
-    char **p_ssi
+    struct srnx_load_slot slots[]
 )
 {
-    int ii, c_idx, *idx;
+    int ii, c_idx, *idx, res;
 
     /* Allocate an index for each requested name. */
-    idx = alloca(codes_len * sizeof(*idx));
+    idx = calloc((size_t)codes_len, sizeof *idx);
     if (!idx)
     {
         srnx_errorf(srnx, "allocation failed for code array of length %d", codes_len);
@@ -2006,13 +2003,15 @@ int srnx_get_obs_by_name(
         c_idx = srnx_obs_name_to_idx(srnx, name, code[ii]);
         if (c_idx < 0)
         {
+            free(idx);
             return c_idx;
         }
         idx[ii] = c_idx;
     }
 
-    return srnx_get_obs_by_index(srnx, name, codes_len, idx, n_values,
-        p_obs, p_lli, p_ssi);
+    res = srnx_get_obs_by_index(srnx, name, codes_len, idx, slots);
+    free(idx);
+    return res;
 }
 
 /* Doc comment in srnx.h. */
@@ -2041,10 +2040,7 @@ int srnx_get_obs_by_index(
     struct srnx_satellite_name name,
     int idx_len,
     int idx[],
-    int n_values[],
-    int64_t **p_obs,
-    char **p_lli,
-    char **p_ssi
+    struct srnx_load_slot slots[]
 )
 {
     struct srnx_obs_reader *p_socd;
@@ -2057,54 +2053,46 @@ int srnx_get_obs_by_index(
         /* Open the ii'th observation. */
         res = srnx_open_obs_by_index(srnx, name, idx[ii], &p_socd);
         if (res)
-        {
-            srnx_free_obs_reader(p_socd);
-            return res;
-        }
+            goto fail;
 
         /* Read the SSIs and LLIs. */
-        res = srnx_read_obs_ssi_lli(p_socd, n_values + ii, p_lli + ii, p_ssi + ii);
+        res = srnx_read_obs_ssi_lli(p_socd, &slots[ii].n_values,
+            &slots[ii].lli, &slots[ii].ssi);
         if (res)
-        {
-            srnx_free_obs_reader(p_socd);
-            return res;
-        }
+            goto fail;
 
         /* Reallocate memory for the observations. */
-        obs = realloc(p_obs[ii], n_values[ii] * (size_t)8);
+        obs = realloc(slots[ii].obs, slots[ii].n_values * (size_t)8);
         if (!obs)
         {
-            srnx_errorf(srnx, "allocation failed for obs array of length %d", n_values[ii]);
-            srnx_free_obs_reader(p_socd);
-            return ENOMEM;
+            srnx_errorf(srnx, "allocation failed for obs array of length %d", slots[ii].n_values);
+            res = ENOMEM;
+            goto fail;
         }
-        p_obs[ii] = obs;
+        slots[ii].obs = obs;
 
-        /* Read observation values into p_obs[ii]. */
-        for (jj = 0; jj < n_values[ii]; )
+        /* Read observation values into slots[ii].obs. */
+        for (jj = 0; jj < slots[ii].n_values; )
         {
             res = decode_observations(p_socd);
             if (res)
-            {
-                srnx_free_obs_reader(p_socd);
-                return res;
-            }
+                goto fail;
             if (!p_socd->obs_valid)
             {
                 srnx_errorf(srnx, "no valid observations");
-                srnx_free_obs_reader(p_socd);
-                return SRNX_CORRUPT;
+                res = SRNX_CORRUPT;
+                goto fail;
             }
 
-            if (p_socd->obs_valid < n_values[ii] - jj)
+            if (p_socd->obs_valid < slots[ii].n_values - jj)
             {
                 count = p_socd->obs_valid;
             }
             else
             {
-                count = n_values[ii] - jj;
+                count = slots[ii].n_values - jj;
             }
-            memcpy(p_obs[ii] + jj, p_socd->obs, sizeof(int64_t) * count);
+            memcpy(slots[ii].obs + jj, p_socd->obs, sizeof(int64_t) * count);
             jj += count;
         }
     }
@@ -2113,6 +2101,22 @@ int srnx_get_obs_by_index(
     srnx_free_obs_reader(p_socd);
 
     return 0;
+
+fail:
+    /* Clean up any slots already populated in this call, including the
+     * one being processed when the error occurred. */
+    srnx_free_obs_reader(p_socd);
+    for (jj = 0; jj <= ii && jj < idx_len; ++jj)
+    {
+        free(slots[jj].obs);
+        free(slots[jj].lli);
+        free(slots[jj].ssi);
+        slots[jj].obs = NULL;
+        slots[jj].lli = NULL;
+        slots[jj].ssi = NULL;
+        slots[jj].n_values = 0;
+    }
+    return res;
 }
 
 /** Parses epoch presence from a SATE chunk into \a sv->when[].
@@ -2402,27 +2406,24 @@ int srnx_load(const char *filename, struct rinex_data *out)
 
         /* Load observations for all signals. */
         {
-            int *idx, *n_values;
-            int64_t **p_obs;
-            char **p_lli, **p_ssi;
+            int *idx;
+            struct srnx_load_slot *slots;
 
-            idx = alloca(n_obs * sizeof *idx);
-            n_values = alloca(n_obs * sizeof *n_values);
-            p_obs = alloca(n_obs * sizeof *p_obs);
-            p_lli = alloca(n_obs * sizeof *p_lli);
-            p_ssi = alloca(n_obs * sizeof *p_ssi);
-
-            for (jj = 0; jj < n_obs; ++jj)
+            idx = calloc((size_t)n_obs, sizeof *idx);
+            slots = calloc((size_t)n_obs, sizeof *slots);
+            if (!idx || !slots)
             {
-                idx[jj] = jj;
-                n_values[jj] = 0;
-                p_obs[jj] = NULL;
-                p_lli[jj] = NULL;
-                p_ssi[jj] = NULL;
+                free(idx);
+                free(slots);
+                srnx_errorf(srnx, "allocation failed for signal load state of length %d", n_obs);
+                res = ENOMEM;
+                goto out;
             }
 
-            res = srnx_get_obs_by_index(srnx, name, n_obs, idx,
-                n_values, p_obs, p_lli, p_ssi);
+            for (jj = 0; jj < n_obs; ++jj)
+                idx[jj] = jj;
+
+            res = srnx_get_obs_by_index(srnx, name, n_obs, idx, slots);
             if (res)
             {
                 /* Some signals may not exist; that's OK for
@@ -2430,45 +2431,22 @@ int srnx_load(const char *filename, struct rinex_data *out)
                  */
                 if (res != SRNX_UNKNOWN_CODE)
                 {
-                    for (jj = 0; jj < n_obs; ++jj)
-                    {
-                        free(p_obs[jj]);
-                        free(p_lli[jj]);
-                        free(p_ssi[jj]);
-                    }
+                    free(idx);
+                    free(slots);
                     goto out;
                 }
 
                 /* Load signals one at a time so missing ones are skipped.
-                 * Free any buffers already allocated by the batch call
-                 * above, which returns on first error without cleanup.
+                 * srnx_get_obs_by_index() already frees any buffers it
+                 * allocated before failing.
                  */
                 for (jj = 0; jj < n_obs; ++jj)
                 {
-                    free(p_obs[jj]);
-                    free(p_lli[jj]);
-                    free(p_ssi[jj]);
-                    p_obs[jj] = NULL;
-                    p_lli[jj] = NULL;
-                    p_ssi[jj] = NULL;
-                }
-
-                for (jj = 0; jj < n_obs; ++jj)
-                {
-                    int one_idx = jj, one_nv = 0;
-                    int64_t *one_obs = NULL;
-                    char *one_lli = NULL, *one_ssi = NULL;
+                    int one_idx = jj;
 
                     res = srnx_get_obs_by_index(srnx, name, 1, &one_idx,
-                        &one_nv, &one_obs, &one_lli, &one_ssi);
-                    if (res == 0)
-                    {
-                        n_values[jj] = one_nv;
-                        p_obs[jj] = one_obs;
-                        p_lli[jj] = one_lli;
-                        p_ssi[jj] = one_ssi;
-                    }
-                    /* else signal not present, leave as NULL */
+                        &slots[jj]);
+                    /* else signal not present, leave as zeroed */
                 }
             }
 
@@ -2478,11 +2456,11 @@ int srnx_load(const char *filename, struct rinex_data *out)
             {
                 int pos, kk;
 
-                if (!p_obs[jj] || n_values[jj] <= 0)
+                if (!slots[jj].obs || slots[jj].n_values <= 0)
                 {
-                    free(p_obs[jj]);
-                    free(p_lli[jj]);
-                    free(p_ssi[jj]);
+                    free(slots[jj].obs);
+                    free(slots[jj].lli);
+                    free(slots[jj].ssi);
                     continue;
                 }
 
@@ -2491,28 +2469,30 @@ int srnx_load(const char *filename, struct rinex_data *out)
                 {
                     for (; jj < n_obs; ++jj)
                     {
-                        free(p_obs[jj]);
-                        free(p_lli[jj]);
-                        free(p_ssi[jj]);
+                        free(slots[jj].obs);
+                        free(slots[jj].lli);
+                        free(slots[jj].ssi);
                     }
+                    free(idx);
+                    free(slots);
                     srnx_errorf(srnx, "allocation failed for observation block");
                     res = ENOMEM;
                     goto out;
                 }
                 p_sv->start[jj] = pos;
 
-                for (kk = 0; kk < n_values[jj] && kk < p_sv->obs_used; ++kk)
+                for (kk = 0; kk < slots[jj].n_values && kk < p_sv->obs_used; ++kk)
                 {
-                    out->obs[pos + kk] = p_obs[jj][kk];
-                    if (p_obs[jj][kk] == INT64_MIN)
+                    out->obs[pos + kk] = slots[jj].obs[kk];
+                    if (slots[jj].obs[kk] == INT64_MIN)
                     {
                         out->lli[pos + kk] = ' ';
                         out->ssi[pos + kk] = ' ';
                     }
                     else
                     {
-                        out->lli[pos + kk] = p_lli[jj][kk];
-                        out->ssi[pos + kk] = p_ssi[jj][kk];
+                        out->lli[pos + kk] = slots[jj].lli[kk];
+                        out->ssi[pos + kk] = slots[jj].ssi[kk];
                     }
                 }
                 /* Fill any remaining slots with missing markers. */
@@ -2523,10 +2503,13 @@ int srnx_load(const char *filename, struct rinex_data *out)
                     out->ssi[pos + kk] = ' ';
                 }
 
-                free(p_obs[jj]);
-                free(p_lli[jj]);
-                free(p_ssi[jj]);
+                free(slots[jj].obs);
+                free(slots[jj].lli);
+                free(slots[jj].ssi);
             }
+
+            free(idx);
+            free(slots);
         }
     }
     res = 0;

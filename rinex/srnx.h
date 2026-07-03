@@ -28,6 +28,27 @@ struct srnx_obs_reader;
 
 struct rinex_data;
 
+/** srnx_load_slot holds per-signal load state for srnx_get_obs_by_index()
+ * and srnx_get_obs_by_name().  Caller-allocated and zero-initialized;
+ * on success each slot is populated, and the caller is responsible for
+ * freeing #obs, #lli, and #ssi.
+ */
+struct srnx_load_slot
+{
+    /** n_values is the number of observations loaded for this signal. */
+    int n_values;
+
+    /** obs holds the observation values (caller-allocated, freed by
+     * caller). */
+    int64_t *obs;
+
+    /** lli holds the loss-of-lock indicators, length #n_values. */
+    char *lli;
+
+    /** ssi holds the signal-strength indicators, length #n_values. */
+    char *ssi;
+};
+
 #define SRNX_OPEN_UNCHECKED 1
 
 /** Contains a RINEX satellite name. */
@@ -135,14 +156,10 @@ int srnx_get_satellites(
  * \param[in] codes_len Number of observation codes to load.
  * \param[in] code Names of observation codes to load.  If any observation
  *   code is not known for the given satellite, this function fails.
- * \param[int,out] n_values Receives number of observations for each
- *   code.  Caller allocates \a n_sig elements.
- * \param[in,out] p_obs Receives a pointer to the observations for each
- *   code.  \a p_obs[0] through \a p_obs[n_sig-1] are valid.
- * \param[in] p_lli If not NULL, \a p_lli[n] holds the loss-of-lock
- *   indicators for the \a n'th code, and has length \a n_values[n].
- * \param[in] p_ssi If not NULL, \a p_ssi[n] holds the signal strength
- *   indicators for the \a n'th code, and has length \a n_values[n].
+ * \param[in,out] slots Receives per-signal load state.  Caller allocates
+ *   and zero-initializes \a codes_len elements; \a slots[0] through
+ *   \a slots[codes_len-1] are valid on success.  On failure, slots already
+ *   populated in this call are freed and reset to zero.
  * \returns Zero on success, non-zero SRNX error number on error.
  */
 int srnx_get_obs_by_name(
@@ -150,18 +167,11 @@ int srnx_get_obs_by_name(
     struct srnx_satellite_name name,
     int codes_len,
     struct srnx_obs_code code[],
-    int n_values[],
-    int64_t **p_obs,
-    char **p_lli,
-    char **p_ssi
+    struct srnx_load_slot slots[]
 );
 
 /** Loads all available observation values for a given satellite,
  * selected by observation index or indices.
- *
- * \a p_obs, \a p_lli and \a p_ssi point to arrays of pointers, each
- * array having length \a idx_len, which become jagged matrices with
- * column \a ii having length \a n_values[ii].
  *
  * \param[in] srnx SRNX reader object.
  * \param[in] name Name of the satellite to load.
@@ -169,14 +179,10 @@ int srnx_get_obs_by_name(
  * \param[in] idx Indices of observation codes to load.  If any observation
  *   code is larger than the number of codes for this satellite system,
  *   this function fails.
- * \param[int,out] n_values Receives number of observations for each
- *   code.  Caller allocates \a idx_len elements.
- * \param[in,out] p_obs Receives a pointer to the observations for each
- *   code.  \a p_obs[0] through \a p_obs[idx_len-1] are valid.
- * \param[in] p_lli If not NULL, \a p_lli[n] holds the loss-of-lock
- *   indicators for the \a n'th code, and has length \a n_values[n].
- * \param[in] p_ssi If not NULL, \a p_ssi[n] holds the signal strength
- *   indicators for the \a n'th code, and has length \a n_values[n].
+ * \param[in,out] slots Receives per-signal load state.  Caller allocates
+ *   and zero-initializes \a idx_len elements; \a slots[0] through
+ *   \a slots[idx_len-1] are valid on success.  On failure, slots already
+ *   populated in this call are freed and reset to zero.
  * \returns Zero on success, non-zero SRNX error number on error.
  */
 int srnx_get_obs_by_index(
@@ -184,10 +190,7 @@ int srnx_get_obs_by_index(
     struct srnx_satellite_name name,
     int idx_len,
     int idx[],
-    int n_values[],
-    int64_t **p_obs,
-    char **p_lli,
-    char **p_ssi
+    struct srnx_load_slot slots[]
 );
 
 /** Prepares to read from a satellite's observations by name.
