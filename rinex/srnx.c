@@ -1326,7 +1326,7 @@ static int64_t srnx_find_socd(
         payload = srnx->data + s64;
         if (memcmp(payload, "SOCD", 4))
         {
-            srnx_errorf(srnx, "expected SOCD at %"PRId64" but got '\\x%02x%02x%20x%02x' (%.4s)",
+            srnx_errorf(srnx, "expected SOCD at %"PRId64" but got '\\x%02x%02x%02x%02x' (%.4s)",
                 s64, payload[0], payload[1], payload[2], payload[3], payload);
             return SRNX_CORRUPT;
         }

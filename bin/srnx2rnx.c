@@ -289,8 +289,9 @@ static void format_one_obs(
  *
  * Format: 1X,I2.2,4(1X,I2),F11.7,2X,I1,I3,12(A1,I2),F12.9
  *
- * The clock offset is stored at scale 1e9 in v2 (matching the F12.9
- * fractional digits); see rnx_parse.c v2 path.
+ * The clock offset in rinex_epoch is always stored at scale 1e12.
+ * RINEX v2 output uses F12.9 (9 fractional digits), so dividing by
+ * 1e12 and formatting with %.9f gives the correct output.
  */
 static void emit_v2_epoch_header(
     FILE *out,
