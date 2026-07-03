@@ -399,30 +399,14 @@ static void emit_v2_observations(
 static void emit_v34_observations(
     FILE *out,
     const struct rinex_data *data,
-    const struct active_sat *as
+    const struct active_sat *as,
+    char *line_buf
 )
 {
-    /* 3 chars id + n_obs * 16 chars; n_obs is bounded by the header. */
     int n_obs = as->sys->n_obs;
-    char *line = malloc(4 + (size_t)n_obs * 16);
+    char *line = line_buf;  /* already large enough */
     int code;
     size_t len;
-
-    if (!line)
-    {
-        /* Fall back to direct writes; format will still be correct,
-         * we just lose the rtrim.  Practically unreachable.
-         */
-        char field[17];
-        fwrite(as->sv->id, 1, 3, out);
-        for (code = 0; code < n_obs; ++code)
-        {
-            format_one_obs(field, data, as, code);
-            fwrite(field, 1, 16, out);
-        }
-        fputc('\n', out);
-        return;
-    }
 
     memcpy(line, as->sv->id, 3);
     len = 3;
@@ -432,7 +416,6 @@ static void emit_v34_observations(
         len += 16;
     }
     write_rtrim(out, line, len);
-    free(line);
 }
 
 /* ---- Header emission ---- */
@@ -476,6 +459,8 @@ static void convert(const struct rinex_data *data, FILE *out)
     struct active_sat *active;
     int evt_cursor = 0;
     int n_total_sv, ep_idx, ii;
+    int max_n_obs = 0;
+    char *line_buf = NULL;
 
     emit_header(data, out);
 
@@ -488,6 +473,25 @@ static void convert(const struct rinex_data *data, FILE *out)
         free(cursors);
         free(active);
         return;
+    }
+
+    if (data->rinex_version != 2)
+    {
+        for (int sys_id = 0; sys_id < 32; ++sys_id)
+            if (data->sys[sys_id].n_obs > max_n_obs)
+                max_n_obs = data->sys[sys_id].n_obs;
+
+        if (max_n_obs > 0)
+        {
+            line_buf = malloc(4 + (size_t)max_n_obs * 16);
+            if (!line_buf)
+            {
+                fprintf(stderr, "Out of memory\n");
+                free(cursors);
+                free(active);
+                return;
+            }
+        }
     }
 
     for (ep_idx = 0; ep_idx < data->epoch_used; ++ep_idx)
@@ -511,7 +515,7 @@ static void convert(const struct rinex_data *data, FILE *out)
             if (data->rinex_version == 2)
                 emit_v2_observations(out, data, &active[ii]);
             else
-                emit_v34_observations(out, data, &active[ii]);
+                emit_v34_observations(out, data, &active[ii], line_buf);
         }
     }
 
@@ -525,6 +529,7 @@ static void convert(const struct rinex_data *data, FILE *out)
 
     free(cursors);
     free(active);
+    free(line_buf);
 }
 
 /* ---- Filename helpers ---- */
