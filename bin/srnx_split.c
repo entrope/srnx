@@ -114,30 +114,6 @@ static int g_write_raw_indicators = 0;
 /* Indicator alphabet for the proposed packed RLE encoding. */
 static const char ALPHABET[] = " 0123456789";  /* 11 symbols */
 
-/* Per-byte histograms of decoded indicator bytes (LLI, SSI). */
-static uint64_t lli_byte_hist[256];
-static uint64_t ssi_byte_hist[256];
-
-/* Run-length bucket counters.  Bucket boundaries correspond to ULEB128
- * width transitions for the proposed (count-1)*11 + idx packed encoding:
- *   bucket 0: count in [1,    11]  — saves 1 byte/run (2 -> 1)
- *   bucket 1: count in [12,  128]  — saves 0 bytes    (2 -> 2)
- *   bucket 2: count in [129,1489]  — saves 1 byte/run (3 -> 2)
- *   bucket 3: count in [1490,16384]— saves 0 bytes    (3 -> 3)
- *   bucket 4: count >= 16385       — saves 1 byte/run (4 -> 3)
- */
-#define N_BUCKETS 5
-static const int bucket_saves[N_BUCKETS] = { 1, 0, 1, 0, 1 };
-static uint64_t lli_run_bucket[N_BUCKETS];
-static uint64_t ssi_run_bucket[N_BUCKETS];
-static uint64_t lli_total_runs;
-static uint64_t ssi_total_runs;
-/* Runs whose symbol is outside the 11-character alphabet. */
-static uint64_t lli_runs_out_of_alphabet;
-static uint64_t ssi_runs_out_of_alphabet;
-static uint64_t lli_bytes_out_of_alphabet;
-static uint64_t ssi_bytes_out_of_alphabet;
-
 /* Reusable decode buffer for one SOCD's raw indicator stream. */
 static char *g_decode_buf;
 static size_t g_decode_buf_cap;
@@ -160,41 +136,20 @@ static char *ensure_decode_buf(size_t needed)
     return g_decode_buf;
 }
 
-static int bucket_for_count(uint64_t count)
-{
-    if (count <=    11) return 0;
-    if (count <=   128) return 1;
-    if (count <=  1489) return 2;
-    if (count <= 16384) return 3;
-    return 4;
-}
-
-static int in_alphabet(unsigned char ch)
-{
-    return ch == ' ' || (ch >= '0' && ch <= '9');
-}
-
-/** Decode an LLI/SSI RLE block into raw bytes and update stats.
+/** Decode an LLI/SSI RLE block into raw bytes.
  * \a obs_count is the number of observations in the SOCD; output is
  * padded to that length with spaces if the RLE stream is shorter.
  * Returns the decoded buffer (owned by ensure_decode_buf).
  * Each run is a single ULEB128: val = (count-1)*11 + idx where
- * idx indexes ALPHABET[].  The parameters runs_oo / bytes_oo are kept
- * for API consistency but will always remain zero (new format is
- * alphabet-constrained by construction).
+ * idx indexes ALPHABET[].
  */
 static char *decode_indicator(const char *rle, uint64_t rle_len,
-    uint64_t obs_count,
-    uint64_t *byte_hist, uint64_t *run_bucket, uint64_t *total_runs,
-    uint64_t *runs_oo, uint64_t *bytes_oo)
+    uint64_t obs_count)
 {
     char *out = ensure_decode_buf((size_t)obs_count + 1);
     const char *p = rle;
     const char *end = rle + rle_len;
     uint64_t decoded = 0;
-
-    (void)runs_oo;
-    (void)bytes_oo;
 
     while (p < end && decoded < obs_count)
     {
@@ -203,10 +158,6 @@ static char *decode_indicator(const char *rle, uint64_t rle_len,
         uint64_t count = val / 11 + 1;
         if (decoded + count > obs_count)
             count = obs_count - decoded;
-
-        byte_hist[ch] += count;
-        (*total_runs)++;
-        run_bucket[bucket_for_count(count)]++;
 
         memset(out + decoded, ch, (size_t)count);
         decoded += count;
@@ -334,9 +285,7 @@ static void split_socd(const char *payload, uint64_t plen)
     cat_write(CAT_SOCD_META, meta_start, (size_t)(p - meta_start));
     cat_write(CAT_SOCD_LLI, p, (size_t)lli_len);
     {
-        char *raw = decode_indicator(p, lli_len, obs_count,
-            lli_byte_hist, lli_run_bucket, &lli_total_runs,
-            &lli_runs_out_of_alphabet, &lli_bytes_out_of_alphabet);
+        char *raw = decode_indicator(p, lli_len, obs_count);
         cat_write(CAT_SOCD_LLI_RAW, raw, (size_t)obs_count);
     }
     p += lli_len;
@@ -347,9 +296,7 @@ static void split_socd(const char *payload, uint64_t plen)
     cat_write(CAT_SOCD_META, ssi_len_start, (size_t)(p - ssi_len_start));
     cat_write(CAT_SOCD_SSI, p, (size_t)ssi_len);
     {
-        char *raw = decode_indicator(p, ssi_len, obs_count,
-            ssi_byte_hist, ssi_run_bucket, &ssi_total_runs,
-            &ssi_runs_out_of_alphabet, &ssi_bytes_out_of_alphabet);
+        char *raw = decode_indicator(p, ssi_len, obs_count);
         cat_write(CAT_SOCD_SSI_RAW, raw, (size_t)obs_count);
     }
     p += ssi_len;
@@ -614,70 +561,6 @@ static void print_corpus_totals(int n_files, uint64_t input_bytes)
         printf("  *** corpus mismatch: sum != input total ***\n");
 }
 
-#if OBSOLETE_LLI_SSI_STATS
-static void print_indicator_stats(const char *label,
-    const uint64_t hist[256],
-    const uint64_t run_bucket[N_BUCKETS],
-    uint64_t total_runs,
-    uint64_t runs_oo, uint64_t bytes_oo)
-{
-    uint64_t total_bytes = 0;
-    for (int i = 0; i < 256; i++) total_bytes += hist[i];
-
-    printf("\n=== %s decoded-byte histogram"
-        " (%" PRIu64 " bytes across %" PRIu64 " runs) ===\n",
-        label, total_bytes, total_runs);
-
-    /* Sort observed bytes by descending count. */
-    int order[256], n = 0;
-    for (int i = 0; i < 256; i++) if (hist[i]) order[n++] = i;
-    for (int i = 0; i < n; i++)
-        for (int j = i + 1; j < n; j++)
-            if (hist[order[j]] > hist[order[i]])
-            {
-                int t = order[i]; order[i] = order[j]; order[j] = t;
-            }
-
-    for (int i = 0; i < n; i++)
-    {
-        unsigned char ch = (unsigned char)order[i];
-        double pct = total_bytes ? 100.0 * (double)hist[ch]
-                                        / (double)total_bytes : 0.0;
-        const char *mark = in_alphabet(ch) ? "  " : "* ";
-        if (ch >= 0x20 && ch < 0x7F)
-            printf("  %s'%c' (0x%02X): %15" PRIu64 "  %6.2f%%\n",
-                mark, ch, ch, hist[ch], pct);
-        else
-            printf("  %s    (0x%02X): %15" PRIu64 "  %6.2f%%\n",
-                mark, ch, hist[ch], pct);
-    }
-    if (runs_oo)
-        printf("  * out-of-alphabet total: %" PRIu64 " runs, %" PRIu64
-            " bytes\n", runs_oo, bytes_oo);
-    else
-        printf("  (all bytes in alphabet \" 0123456789\")\n");
-
-    printf("  Run-length buckets (count -> bytes saved per run under"
-        " (count-1)*11+idx packing):\n");
-    static const char *labels[N_BUCKETS] = {
-        "    1..   11 -> 1",
-        "   12..  128 -> 0",
-        "  129.. 1489 -> 1",
-        " 1490..16384 -> 0",
-        "16385+       -> 1",
-    };
-    uint64_t saved = 0;
-    for (int i = 0; i < N_BUCKETS; i++)
-    {
-        printf("    %s : %15" PRIu64 " runs\n",
-            labels[i], run_bucket[i]);
-        saved += run_bucket[i] * (uint64_t)bucket_saves[i];
-    }
-    printf("  Estimated bytes saved by packed encoding: %" PRIu64 "\n",
-        saved);
-}
-#endif
-
 int main(int argc, char *argv[])
 {
     int arg_i = 1;
@@ -729,15 +612,6 @@ int main(int argc, char *argv[])
     close_cat_files();
 
     print_corpus_totals(n_files, input_bytes);
-
-#if OBSOLETE_LLI_SSI_STATS
-    print_indicator_stats("LLI", lli_byte_hist, lli_run_bucket,
-        lli_total_runs, lli_runs_out_of_alphabet,
-        lli_bytes_out_of_alphabet);
-    print_indicator_stats("SSI", ssi_byte_hist, ssi_run_bucket,
-        ssi_total_runs, ssi_runs_out_of_alphabet,
-        ssi_bytes_out_of_alphabet);
-#endif
 
     if (n_failed)
         fprintf(stderr, "%d file(s) failed\n", n_failed);
