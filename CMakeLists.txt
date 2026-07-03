@@ -86,9 +86,6 @@ target_link_libraries(srnx_split rinex)
 add_executable(srnx2rnx bin/srnx2rnx.c)
 target_link_libraries(srnx2rnx rinex)
 
-add_executable(rnx_load bin/rnx_load.c)
-target_link_libraries(rnx_load rinex)
-
 include(InstallRequiredSystemLibraries)
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/COPYING")
 set(CPACK_PACKAGE_VERSION_MAJOR "${rinex_VERSION_MAJOR}")
