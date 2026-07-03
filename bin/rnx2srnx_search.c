@@ -576,6 +576,15 @@ static int select_delta_order(struct scratch *scratch,
 
 /* ---- Indicator RLE byte count ---- */
 
+/* Returns the alphabet index of ch, or -1 if not in alphabet.
+ * Must match indicator_idx() in rnx2srnx.c's " 0123456789" alphabet. */
+static int indicator_idx(unsigned char ch)
+{
+    if (ch == ' ') return 0;
+    if (ch >= '0' && ch <= '9') return 1 + (ch - '0');
+    return -1;
+}
+
 static size_t rle_indicator_bytes(const char *ind, int count)
 {
     int ii;
@@ -589,10 +598,13 @@ static size_t rle_indicator_bytes(const char *ind, int count)
     {
         char cur = ind[ii];
         int run_start = ii;
+        int idx = indicator_idx((unsigned char)cur);
         while (ii < count && ind[ii] == cur)
             ii++;
-        rle_used += 1;                                   /* the indicator byte */
-        rle_used += (size_t)uleb128_len((uint64_t)(ii - run_start - 1));
+        /* Packed encoding: single ULEB128 = (count-1)*11 + idx, matching
+         * rle_encode_indicators() in rnx2srnx.c. */
+        rle_used += (size_t)uleb128_len(
+            (uint64_t)(ii - run_start - 1) * 11 + (uint64_t)idx);
     }
 
     /* The outer wbuf prepends ULEB128(rle_used) before the RLE bytes. */
