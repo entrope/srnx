@@ -45,15 +45,28 @@ static int g_file_digest_id  = 5;    /* BLAKE3-256 */
 static int g_max_sleb_run = 16;
 
 /* Runtime block-size tuple used by the DP and the byte-cost accounting.
- * MUST be sorted ascending, all multiples of 8, all in [8, MAX_BLOCK].
+ * MUST be sorted ascending, all multiples of 8, all in [8, g_max_block].
  * Caller is expected to include 8 (the DP relies on at least one small
- * size for fallback runs of len 1..7).  MAX_BLOCK is bounded by the
- * sparse-table levels precomputed below. */
+ * size for fallback runs of len 1..7). */
 #define MAX_TUPLE_LEN  7
-#define MAX_BLOCK     512   /* generous; 2^9 = 512 */
-#define MAX_LEVELS    10    /* log2(MAX_BLOCK) + 1 */
 static int g_cand[MAX_TUPLE_LEN];
 static int g_n_cand;
+
+/* Upper bound on candidate block sizes, set via --max-block=N.  Must be
+ * a power of 2, >= 8.  Bounds the sparse-table levels computed below. */
+static int g_max_block = 512;
+
+/* Number of sparse-table levels needed to cover windows up to
+ * g_max_block; computed once from g_max_block after argument parsing. */
+static int g_max_levels = 10;
+
+static int compute_max_levels(int max_block)
+{
+    int levels = 1;
+    while ((1 << levels) < max_block)
+        levels++;
+    return levels + 1;  /* +1 for safety margin */
+}
 
 /* ---- Counting-only buffer ----
  *
@@ -178,7 +191,7 @@ struct scratch
     int64_t *full_scaled;    /**< cap */
     int64_t *present_scaled; /**< cap */
     int64_t *dp;             /**< cap + 1 */
-    uint8_t *spt;            /**< MAX_LEVELS * cap : window-max sparse table */
+    uint8_t *spt;            /**< g_max_levels * cap : window-max sparse table */
     uint8_t *all_bw;         /**< 8 * cap : bw for all 8 delta orders */
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a;
@@ -224,7 +237,7 @@ static void scratch_reserve(struct scratch *s, size_t need)
     s->full_scaled    = xrealloc(s->full_scaled,      cap * sizeof *s->full_scaled);
     s->present_scaled = xrealloc(s->present_scaled,   cap * sizeof *s->present_scaled);
     s->dp             = xrealloc(s->dp,         (cap + 1) * sizeof *s->dp);
-    s->spt            = xrealloc(s->spt, MAX_LEVELS * cap * sizeof *s->spt);
+    s->spt            = xrealloc(s->spt, (size_t)g_max_levels * cap * sizeof *s->spt);
     s->all_bw         = xrealloc(s->all_bw,       8 * cap * sizeof *s->all_bw);
     s->psum_arr       = xrealloc(s->psum_arr,   (cap + 1) * sizeof *s->psum_arr);
     s->choices_a      = xrealloc(s->choices_a,        cap * sizeof *s->choices_a);
@@ -249,8 +262,8 @@ static int build_spt(struct scratch *scratch, const uint8_t *bw, int count)
     levels = 1;
     while ((1 << levels) <= max_m)
         ++levels;
-    if (levels > MAX_LEVELS)
-        levels = MAX_LEVELS;
+    if (levels > g_max_levels)
+        levels = g_max_levels;
 
     /* k = 0: single-element windows */
     memcpy(spt, bw, (size_t)count);
@@ -1430,10 +1443,10 @@ static int parse_tuple(const char *s, int out[MAX_TUPLE_LEN], int *out_n)
             return -1;
         }
         v = strtol(p, &endp, 10);
-        if (endp == p || v <= 0 || (v % 8) != 0 || v > MAX_BLOCK)
+        if (endp == p || v <= 0 || (v % 8) != 0 || v > 65536)
         {
-            fprintf(stderr, "Bad tuple value at '%s' (must be 8*N, 8..%d)\n",
-                p, MAX_BLOCK);
+            fprintf(stderr, "Bad tuple value at '%s' (must be 8*N, 8..65536)\n",
+                p);
             return -1;
         }
         out[n++] = (int)v;
@@ -1632,6 +1645,25 @@ int main(int argc, char *argv[])
             g_max_sleb_run = (int)v;
             continue;
         }
+        if (!strncmp(arg, "--max-block=", 12))
+        {
+            char *end;
+            long v = strtol(arg + 12, &end, 10);
+            if (*end != '\0' || v < 8 || v > 65536)
+            {
+                fprintf(stderr, "Invalid --max-block value '%s' (must be 8..65536)\n",
+                        arg + 12);
+                return EXIT_FAILURE;
+            }
+            /* Must be a power of 2 for sparse table alignment. */
+            if ((v & (v - 1)) != 0)
+            {
+                fprintf(stderr, "--max-block must be a power of 2\n");
+                return EXIT_FAILURE;
+            }
+            g_max_block = (int)v;
+            continue;
+        }
         if (!strcmp(arg, "--"))
         {
             first_pos_arg = ii + 1;
@@ -1651,7 +1683,7 @@ int main(int argc, char *argv[])
         fprintf(stderr,
             "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
             "          [--tuple=N1,N2,...] [--tuples-file=PATH]\n"
-            "          [--max-sleb-run=<N>] [--timing] <input> [<input> ...]\n",
+            "          [--max-sleb-run=<N>] [--max-block=<N>] [--timing] <input> ...\n",
             argv[0]);
         return EXIT_FAILURE;
     }
@@ -1661,6 +1693,24 @@ int main(int argc, char *argv[])
             "No tuples specified; use --tuple= or --tuples-file=.\n");
         return EXIT_FAILURE;
     }
+
+    /* Validate tuples against the final --max-block value now that all
+     * arguments (which may specify --max-block after --tuple=) have
+     * been parsed. */
+    for (ii = 0; ii < tuples.n; ++ii)
+    {
+        int jj;
+        for (jj = 0; jj < tuples.entries[ii].n; ++jj)
+        {
+            if (tuples.entries[ii].cand[jj] > g_max_block)
+            {
+                fprintf(stderr, "Block size %d exceeds --max-block=%d\n",
+                    tuples.entries[ii].cand[jj], g_max_block);
+                return EXIT_FAILURE;
+            }
+        }
+    }
+    g_max_levels = compute_max_levels(g_max_block);
 
     for (ii = first_pos_arg; ii < argc; ++ii)
     {
