@@ -505,6 +505,11 @@ static void print_summary(const file_stats_t *agg)
     }
 }
 
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out, "Usage: %s [--help] <file.srnx> ...\n", argv0);
+}
+
 int main(int argc, char *argv[])
 {
     file_stats_t agg, stats;
@@ -512,8 +517,13 @@ int main(int argc, char *argv[])
 
     if (argc < 2)
     {
-        fprintf(stderr, "Usage: srnx_scan <file.srnx>...\n");
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
+    }
+    if (!strcmp(argv[1], "--help"))
+    {
+        usage(stdout, argv[0]);
+        return EXIT_SUCCESS;
     }
 
     memset(&agg, 0, sizeof agg);

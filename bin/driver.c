@@ -5,7 +5,6 @@
 
 #include "bin/driver.h"
 #include <errno.h>
-#include <wordexp.h>
 
 int verbose;
 
@@ -22,32 +21,36 @@ void finish(void)
     /* this function intentionally left blank */
 }
 
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out, "Usage: %s [--mmap|--stdio] [-v] [--help] <file|-> ...\n",
+        argv0);
+}
+
 __attribute__((weak))
 int main(int argc, char *argv[])
 {
-    wordexp_t we;
     const char *filename;
     struct rinex_stream *s = NULL;
     struct rinex_parser *p = NULL;
     const char *err;
     int ii, use_mmap;
-    int res;
 
-    start(&argc, argv);
-
-    we.we_wordc = 0;
-    we.we_wordv = NULL;
-    we.we_offs = 300;
     if (argc == 1)
     {
-        res = wordexp("2020_200/m*.20o", &we, WRDE_NOCMD);
-        if (res != 0)
-        {
-            return EXIT_FAILURE;
-        }
-        argv = we.we_wordv - 1;
-        argc = we.we_wordc + 1;
+        usage(stderr, argv[0]);
+        return EXIT_FAILURE;
     }
+    for (ii = 1; ii < argc; ++ii)
+    {
+        if (!strcmp(argv[ii], "--help"))
+        {
+            usage(stdout, argv[0]);
+            return EXIT_SUCCESS;
+        }
+    }
+
+    start(&argc, argv);
 
     for (ii = 1, use_mmap = 0; ii < argc; ++ii)
     {
@@ -92,11 +95,6 @@ int main(int argc, char *argv[])
     if (p)
     {
         p->destroy(p);
-    }
-
-    if (we.we_wordv)
-    {
-        wordfree(&we);
     }
 
     finish();

@@ -561,6 +561,14 @@ static void print_corpus_totals(int n_files, uint64_t input_bytes)
         printf("  *** corpus mismatch: sum != input total ***\n");
 }
 
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out,
+        "Usage: %s [-r] [--] <output-dir> <file.srnx> ...\n"
+        "  -r: also write raw (RLE-decoded) LLI/SSI streams.\n",
+        argv0);
+}
+
 int main(int argc, char *argv[])
 {
     int arg_i = 1;
@@ -570,6 +578,11 @@ int main(int argc, char *argv[])
         {
             g_write_raw_indicators = 1;
             arg_i++;
+        }
+        else if (strcmp(argv[arg_i], "--help") == 0)
+        {
+            usage(stdout, argv[0]);
+            return EXIT_SUCCESS;
         }
         else if (strcmp(argv[arg_i], "--") == 0)
         {
@@ -585,9 +598,7 @@ int main(int argc, char *argv[])
 
     if (argc - arg_i < 2)
     {
-        fprintf(stderr,
-            "Usage: srnx_split [-r] <output_dir> <file.srnx>...\n"
-            "  -r: also write raw (RLE-decoded) LLI/SSI streams.\n");
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
     }
 

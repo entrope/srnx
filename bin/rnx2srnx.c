@@ -1777,6 +1777,14 @@ static int run_check(const char *input, const char *output)
     return -1;
 }
 
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
+        "          [--max-sleb-run=<N>] [--check] [--] <input.rnx|-> [output.srnx]\n"
+        "'-' as input reads from stdin and requires an explicit output name.\n",
+        argv0);
+}
+
 int main(int argc, char *argv[])
 {
     const char *input_name = NULL;
@@ -1809,6 +1817,11 @@ int main(int argc, char *argv[])
             do_check = 1;
             continue;
         }
+        if (!strcmp(arg, "--help"))
+        {
+            usage(stdout, argv[0]);
+            return EXIT_SUCCESS;
+        }
         if (arg[0] == '-' && arg[1] == '-' && arg[2] == '\0')
         {
             /* "--" ends option parsing. */
@@ -1833,8 +1846,7 @@ int main(int argc, char *argv[])
 
     if (!input_name)
     {
-        fprintf(stderr, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>] "
-            "[--max-sleb-run=<N>] [--check] <input.rnx> [output.srnx]\n", argv[0]);
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -3315,6 +3327,15 @@ static void format_tuple(char *buf, size_t buflen, const int cand[], int n)
 }
 
 /* ---- main ---- */
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out,
+        "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
+        "          [--tuple=N1,N2,...] [--tuples-file=PATH]\n"
+        "          [--max-sleb-run=<N>] [--max-block=<N>] [--timing] [--help] <input> ...\n",
+        argv0);
+}
+
 int main(int argc, char *argv[])
 {
     struct tuple_list tuples;
@@ -3333,6 +3354,11 @@ int main(int argc, char *argv[])
             continue;
         if (parse_digest_flag(arg, "--file-digest=", &g_file_digest_id))
             continue;
+        if (!strcmp(arg, "--help"))
+        {
+            usage(stdout, argv[0]);
+            return EXIT_SUCCESS;
+        }
         if (!strncmp(arg, "--tuple=", 8))
         {
             int cand[MAX_TUPLE_LEN]; int n = 0;
@@ -3399,11 +3425,7 @@ int main(int argc, char *argv[])
 
     if (first_pos_arg < 0)
     {
-        fprintf(stderr,
-            "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
-            "          [--tuple=N1,N2,...] [--tuples-file=PATH]\n"
-            "          [--max-sleb-run=<N>] [--max-block=<N>] [--timing] <input> ...\n",
-            argv[0]);
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
     }
     if (tuples.n == 0)

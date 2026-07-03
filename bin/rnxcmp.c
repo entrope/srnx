@@ -359,6 +359,11 @@ static void compare_files(void)
     compare_events();
 }
 
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out, "Usage: %s [--full] [--help] file1 file2\n", argv0);
+}
+
 int main(int argc, char *argv[])
 {
     const char *err;
@@ -367,6 +372,11 @@ int main(int argc, char *argv[])
     /* Parse arguments. */
     for (ii = 1; ii < argc; ++ii)
     {
+        if (!strcmp(argv[ii], "--help"))
+        {
+            usage(stdout, argv[0]);
+            return EXIT_SUCCESS;
+        }
         if (!strcmp(argv[ii], "--full"))
         {
             full_mode = 1;
@@ -379,7 +389,7 @@ int main(int argc, char *argv[])
 
     if (argc != 3)
     {
-        fprintf(stderr, "Usage: rnxcmp [--full] file1 file2\n");
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
     }
 

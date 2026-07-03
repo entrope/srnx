@@ -586,6 +586,12 @@ static char *derive_output_name(const char input_name[])
 
 /* ---- Main ---- */
 
+static void usage(FILE *out, const char *argv0)
+{
+    fprintf(out, "Usage: %s [--help] <input.srnx> [output.rnx|-]\n"
+        "'-' as output writes to stdout.\n", argv0);
+}
+
 int main(int argc, char *argv[])
 {
     const char *input_name;
@@ -596,9 +602,14 @@ int main(int argc, char *argv[])
     FILE *out;
 
     /* Parse positional arguments: <input.srnx> [output.rnx] */
+    if (argc == 2 && !strcmp(argv[1], "--help"))
+    {
+        usage(stdout, argv[0]);
+        return EXIT_SUCCESS;
+    }
     if (argc < 2 || argc > 3)
     {
-        fprintf(stderr, "Usage: %s <input.srnx> [output.rnx]\n", argv[0]);
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
     }
 
