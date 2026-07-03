@@ -468,8 +468,8 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
 {
     int64_t grand_total = p->buffer_len;
     struct sv_obs *sv;
-    const char *buffer;
-    int res, ii, jj, kk, sys_id, svn, n_obs;
+    int res, ii, jj, kk, sys_id, svn, raw_svn, n_obs;
+    char sys_char;
 
     /* Read the data into memory. */
     while ((res = p->read(p)) > 0)
@@ -501,11 +501,16 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
         ++data.n_epoch;
 
         /* Save the observations that are present. */
-        for (ii = jj = 0, buffer = p->buffer; ii < p->epoch.n_sats; ++ii)
+        for (ii = 0; ii < p->epoch.n_sats; ++ii)
         {
             /* Make sure the satellite system can hold this SVN. */
-            sys_id = *buffer++ & 31;
-            svn = *buffer++;
+            sys_char = p->sats[ii].system;
+            sys_id = sys_char;
+            if (sys_id == ' ')
+                sys_id = 'G';
+            sys_id &= 31;
+            raw_svn = p->sats[ii].number;
+            svn = raw_svn;
             if (svn > data.sys_info[sys_id].count)
             {
                 grow_system(sys_id, svn);
@@ -525,9 +530,9 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
                     exit(1);
                 }
 
-                sv->name[0] = buffer[-2];
-                sv->name[1] = (buffer[-1] / 10) + '0';
-                sv->name[2] = (buffer[-1] % 10) + '0';
+                sv->name[0] = sys_char;
+                sv->name[1] = (raw_svn / 10) + '0';
+                sv->name[2] = (raw_svn % 10) + '0';
                 sv->run_alloc = 31;
                 sv->run = calloc(sv->run_alloc, sizeof sv->run[0]);
                 if (!sv->run)
@@ -560,22 +565,17 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
             }
 
             /* Process its potential observations. */
-            for (kk = 0; kk < n_obs; )
+            jj = p->sats[ii].obs_0;
+            for (kk = 0; kk < n_obs; ++kk)
             {
-                if (*buffer & (1 << (kk & 7)))
-                {
-                    record(&sv->obs[kk], sv->n_obs, p->obs[jj], p->lli[jj], p->ssi[jj]);
-                    ++jj;
-                }
+                int64_t obs_val = p->obs[jj + kk];
+                char lli_val = p->lli[jj + kk];
+                char ssi_val = p->ssi[jj + kk];
 
-                if (!(++kk & 7))
+                if (obs_val >= RINEX_MIN_OBS && (obs_val != 0 || lli_val != ' '))
                 {
-                    buffer++;
+                    record(&sv->obs[kk], sv->n_obs, obs_val, lli_val, ssi_val);
                 }
-            }
-            if (kk & 7)
-            {
-                buffer++;
             }
 
             ++sv->n_obs;
