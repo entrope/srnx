@@ -586,15 +586,25 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     else /* epoch flag 2-5: special event record */
     {
         int n_lines, eol;
-        char flag = line[28];
 
-        /* How many lines in this special event record? */
-        if (parse_uint(&n_lines, line + 29, 3))
+        /* Reconstruct the header line into epoch_text, same as a full
+         * initialization epoch, so the timestamp/flag/line-count fields
+         * can be parsed exactly as rnx_read_v2() parses them for the
+         * uncompressed sibling file.
+         */
+        crx_line_space(crx, line_len + 1);
+        crx->epoch_text[0] = ' ';
+        memcpy(crx->epoch_text + 1, line + 1, line_len - 1);
+        crx->epoch_text[line_len] = '\0';
+
+        /* Parse the timestamp, epoch flag and line-count fields. */
+        err = rnx_v2_parse_time(p, crx->epoch_text);
+        if (err < 0)
         {
-            rnx_errorf(p_, "bad line count in special event '\\x%02x%02x%02x' (%.3s)",
-                line[29], line[30], line[31], line+29);
-            return RINEX_ERR_BAD_FORMAT;
+            return err;
         }
+        n_lines = p_->epoch.n_sats;
+
         /* Skip the marker line + n_lines following header records. */
         eol = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_lines + 1);
         if (eol <= RINEX_EOF)
@@ -607,7 +617,6 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
             /* Replace leading '&' with a space to be RINEX. */
             p->base.buffer[0] = ' ';
             p->parse_ofs = eol;
-            p_->epoch.flag = flag;
         }
         return err;
     }
