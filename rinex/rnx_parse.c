@@ -212,7 +212,7 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     struct rnx_v234_parser *p = (struct rnx_v234_parser *)p_;
     const char *line;
     int64_t i64;
-    int res, yy, mm, dd, hh, min, n_sats, line_len;
+    int res, yy, mm, dd, hh, min, n_sats, line_len, body_ofs;
     rinex_error_t err;
 
     /* Make sure we have an epoch to parse. */
@@ -248,7 +248,6 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     p->base.epoch.n_sats = n_sats;
 
     /* Is there a receiver clock offset? */
-    p->parse_ofs = res;
     if (line_len <= 43) /* 6X reserved field ends at column 41, need at
                          * least the units digit or the decimal point. */
     {
@@ -269,16 +268,18 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
         return RINEX_ERR_BAD_FORMAT;
     }
 
-    /* Get enough data. */
-    res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
+    /* Get enough data: the header line again (so p->parse_ofs stays put
+     * at its start) plus the n_sats data lines that follow it. Leaving
+     * p->parse_ofs at the header start lets the special-event case
+     * below copy the full header+data range, matching rnx_read_v2(). */
+    res = rnx_get_newlines(p_, &p->parse_ofs, &body_ofs, 1, n_sats);
     if (res <= RINEX_EOF)
     {
         p->parse_ofs = p->base.stream->size;
         return res;
     }
-    line_len = res - p->parse_ofs;
-    line = p->base.stream->buffer + p->parse_ofs;
-    p->parse_ofs = res;
+    line_len = res - body_ofs;
+    line = p->base.stream->buffer + body_ofs;
 
     /* Is it a set of observations or a special event? */
     switch (p->base.epoch.flag)
@@ -290,19 +291,15 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
             return err;
         }
         err = rnx_read_v34_observations(p, line);
-        if (err != RINEX_SUCCESS)
-        {
-            /* On parse error, back up to the epoch header start
-             * so the next read() attempt starts at the next epoch. */
-            p->parse_ofs = res;
-        }
+        p->parse_ofs = res;
         return err;
 
     case '2': case '3': case '4': case '5':
-        /* We already did most of the work. */
-        memcpy(p->base.buffer, line, line_len);
-        p->base.buffer_len = line_len;
-        return RINEX_SUCCESS;
+        /* rinex.h documents p->buffer as holding all n_sats+1 lines
+         * (header plus data) for special events. */
+        err = rnx_copy_text(p, res);
+        p->parse_ofs = res;
+        return err;
     }
 
     rnx_errorf(p_, "logic failure in rnx_read_v34 for epoch flag '\\x%02x' (%c)",
