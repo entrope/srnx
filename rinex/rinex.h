@@ -154,10 +154,20 @@ struct rinex_parser
 
     /** obs contains the parsed observation values, times 1000.
      *
-     * A value less than RINEX_MIN_OBS indicates the observation was
-     * missing or blank during this epoch.  This is only valid when
-     * \a epoch.flag is 0, 1 or 6.  The indexing is determined by
-     * #sats.
+     * A missing or blank observation is represented as 0 with a blank
+     * (' ') entry in #lli and #ssi.  The RINEX standards declare blank
+     * and zero fields to be equivalent ways of writing an empty or
+     * unknown value, so a genuine 0.000 measurement with no indicator
+     * flags cannot be distinguished from a missing one.  The canonical
+     * "is this observation present" test is therefore:
+     *
+     *   obs[i] >= RINEX_MIN_OBS && (obs[i] != 0 || lli[i] != ' ')
+     *
+     * (Values outside [RINEX_MIN_OBS, RINEX_MAX_OBS] do not occur in
+     * valid files and must also be treated as missing.)
+     *
+     * This is only valid when \a epoch.flag is 0, 1 or 6.  The
+     * indexing is determined by #sats.
      */
     int64_t *obs;
 

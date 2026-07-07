@@ -47,9 +47,11 @@ void process_file(struct rinex_parser *p, const char filename[])
             sys_obs = p->n_obs[sys_idx];
             for (jj = 0; jj < sys_obs; ++jj)
             {
-                int non_zero = (p->obs[sat_ofs + jj] != 0);
-                tmp_sat_obs |= (uint64_t)non_zero << jj;
-                n_obs += non_zero;
+                int64_t obs_val = p->obs[sat_ofs + jj];
+                int present = (obs_val >= RINEX_MIN_OBS)
+                    && (obs_val != 0 || p->lli[sat_ofs + jj] != ' ');
+                tmp_sat_obs |= (uint64_t)present << jj;
+                n_obs += present;
             }
             sat_obs[sat_idx] = tmp_sat_obs;
             ++sat_epochs[sat_idx];

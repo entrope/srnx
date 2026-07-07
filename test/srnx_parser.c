@@ -10,12 +10,11 @@
  *
  * Satellites are matched by name rather than array position, since the
  * SRNX backend lists satellites in a different (alphabetical) order
- * than the original file.  Missing-observation comparisons are
- * normalized: the text parser (rnx_read_v2()/rnx_read_v34(), see
- * rinex/parse_simd.ii) represents a blank/omitted field as obs=0 with a
- * blank LLI, while the documented rinex.h contract (and this SRNX
- * backend) uses a value below RINEX_MIN_OBS; both are treated as
- * "missing" here rather than requiring a byte-identical sentinel.
+ * than the original file.  Missing-observation comparisons use the
+ * documented rinex.h contract (missing = obs 0 with blank LLI, or a
+ * value outside the legal range) rather than requiring byte-identical
+ * slots, since e.g. a 0.000 field with a non-blank SSI is legitimately
+ * dropped by the SRNX conversion.
  */
 
 #include "rinex/rinex.h"
