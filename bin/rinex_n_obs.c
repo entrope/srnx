@@ -4,6 +4,7 @@
  */
 
 #include "bin/driver.h"
+#include "rinex/rnx_priv.h"
 
 int s_count[128];
 int hist[129];
@@ -50,8 +51,12 @@ void process_file(struct rinex_parser *p, const char filename[])
         {
             if (hdr[0] != ' ')
             {
-                count = (hdr[3] - '0') * 100 + (hdr[4] - '0') * 10
-                    + (hdr[5] - '0');
+                if (parse_uint(&count, hdr + 3, 3) || count < 1)
+                {
+                    printf("%s: invalid observation count '%.3s'\n",
+                        filename, hdr + 3);
+                    return;
+                }
                 ++hist[(count < 128) ? count : 128];
                 ii = hdr[0] & 127;
                 if (s_count[ii] < count)

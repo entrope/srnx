@@ -94,8 +94,10 @@ typedef enum rinex_error rinex_error_t;
 /** RINEX_MIN_OBS is the minimum legal value for a RINEX observation. */
 #define RINEX_MIN_OBS -999999999999LL
 
-/** RINEX_MAX_OBS is the maximum legal value for a RINEX observation. */
-#define RINEX_MAX_OBS 9999999999999LL
+/** RINEX_MAX_OBS is the maximum legal value for a RINEX observation.
+ * The F14.3 field reserves a sign position (blank for positive, '-' for
+ * negative), so at most nine integer digits fit: 999999999.999. */
+#define RINEX_MAX_OBS 999999999999LL
 
 /** rinex_sv_info holds information for a satellite observed during an
  * epoch.

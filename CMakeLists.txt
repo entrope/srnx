@@ -127,6 +127,18 @@ add_dependencies(test_srnx_parser rnx2srnx)
 add_test(NAME srnx_parser COMMAND test_srnx_parser)
 set_property(TEST srnx_parser PROPERTY LABELS function)
 
+add_executable(test_bin_tools test/test_bin_tools.c)
+target_link_libraries(test_bin_tools rinex tap)
+target_compile_definitions(test_bin_tools PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    RINEX_N_OBS_PATH="$<TARGET_FILE:rinex_n_obs>"
+    SRNX2RNX_PATH="$<TARGET_FILE:srnx2rnx>"
+    FIXTURE_V3_PATH="${CMAKE_SOURCE_DIR}/test/test_02.rnx"
+    FIXTURE_BAD_PATH="${CMAKE_SOURCE_DIR}/test/test_01.20o")
+add_dependencies(test_bin_tools rnx2srnx srnx2rnx rinex_n_obs)
+add_test(NAME bin_tools COMMAND test_bin_tools)
+set_property(TEST bin_tools PROPERTY LABELS function)
+
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)
 add_test(NAME parse_errors COMMAND test_parse_errors)

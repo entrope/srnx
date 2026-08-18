@@ -1535,7 +1535,7 @@ static void append_file_digest(struct mmbuf *mm)
 
 /* ---- Main converter ---- */
 
-static void rnx2srnx(const char input_name[], const char output_name[])
+static int rnx2srnx(const char input_name[], const char output_name[])
 {
     struct rinex_data data;
     struct mmbuf mm = { NULL, 0, 0 };
@@ -1547,7 +1547,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     size_t sdir_field_offset, epoc_offset, evtf_offset, sdir_offset;
     struct sdir_entry *sdir_entries = NULL;
     int n_sdir = 0, sdir_alloc = 0;
-    int sys_idx;
+    int sys_idx, status = 0;
 
     scratch_init(&scratch);
     g_output_name = output_name;
@@ -1559,7 +1559,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
         if (!stream)
         {
             fprintf(stderr, "Unable to open stdin\n");
-            return;
+            return 1;
         }
         err = rinex_load(stream, &data);
         stream->destroy(stream);
@@ -1571,7 +1571,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     if (err)
     {
         fprintf(stderr, "Unable to load %s: %s\n", input_name, err);
-        return;
+        return 1;
     }
 
     /* Pick an upper bound for the output size.  SRNX is compressed
@@ -1586,7 +1586,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     {
         fprintf(stderr, "Unable to stat %s\n", input_name);
         free_rinex_data(&data);
-        return;
+        return 1;
     }
     else
     {
@@ -1601,22 +1601,24 @@ static void rnx2srnx(const char input_name[], const char output_name[])
     {
         fprintf(stderr, "Unable to create %s\n", output_name);
         free_rinex_data(&data);
-        return;
+        return 1;
     }
     if (ftruncate(fd, (off_t)cap) != 0)
     {
         fprintf(stderr, "ftruncate failed on %s\n", output_name);
         close(fd);
+        unlink(output_name);
         free_rinex_data(&data);
-        return;
+        return 1;
     }
     mm.data = mmap(NULL, cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (mm.data == MAP_FAILED)
     {
         fprintf(stderr, "mmap failed on %s\n", output_name);
         close(fd);
+        unlink(output_name);
         free_rinex_data(&data);
-        return;
+        return 1;
     }
     mm.cap = cap;
     mm.used = 0;
@@ -1664,7 +1666,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
             if (!socd_offsets)
             {
                 fprintf(stderr, "Out of memory\n");
-                goto done;
+                status = 1; goto done;
             }
             for (jj = 0; jj < n_obs; ++jj)
                 socd_offsets[jj] = write_socd_chunk(&mm, &scratch, &data, p_sv, jj, p_sys, input_name);
@@ -1684,7 +1686,7 @@ static void rnx2srnx(const char input_name[], const char output_name[])
                 if (!sdir_entries)
                 {
                     fprintf(stderr, "Out of memory\n");
-                    goto done;
+                    status = 1; goto done;
                 }
             }
             memcpy(sdir_entries[n_sdir].name, p_sv->id, 4);
@@ -1712,13 +1714,22 @@ done:
     }
     if (fd >= 0)
     {
-        if (ftruncate(fd, (off_t)mm.used) != 0)
-            fprintf(stderr, "ftruncate-to-used failed on %s\n", output_name);
-        close(fd);
+        if (status != 0)
+        {
+            close(fd);
+            unlink(output_name);
+        }
+        else
+        {
+            if (ftruncate(fd, (off_t)mm.used) != 0)
+                fprintf(stderr, "ftruncate-to-used failed on %s\n", output_name);
+            close(fd);
+        }
     }
     free(sdir_entries);
     scratch_free(&scratch);
     free_rinex_data(&data);
+    return status;
 }
 
 /* ---- Filename helpers ---- */
@@ -1876,7 +1887,11 @@ int main(int argc, char *argv[])
         }
     }
 
-    rnx2srnx(input_name, output_name);
+    if (rnx2srnx(input_name, output_name) != 0)
+    {
+        free(output_name);
+        return EXIT_FAILURE;
+    }
 
     if (do_check && strcmp(input_name, "-") != 0)
     {
