@@ -172,6 +172,23 @@ static int indicator_idx(unsigned char ch)
 
 #define SRNX_PAYLOAD_SIZE 16
 
+/** SRNX 1.0 has no representation for observation epoch flags 1 or 6.
+ * Validate before creating an output file or reporting a measured size. */
+static int check_epoch_flags(const struct rinex_data *data, const char *filename)
+{
+    int ii;
+    for (ii = 0; ii < data->epoch_used; ++ii)
+    {
+        if (data->epoch[ii].flag != '0')
+        {
+            fprintf(stderr, "%s: SRNX cannot preserve epoch flag '%c' at epoch %d\n",
+                filename, data->epoch[ii].flag, ii + 1);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* ---- Epoch span helper (shared) ---- */
 
 /** Check if two epochs are in the same span (same interval, no minute
@@ -1574,6 +1591,12 @@ static int rnx2srnx(const char input_name[], const char output_name[])
         return 1;
     }
 
+    if (check_epoch_flags(&data, input_name))
+    {
+        free_rinex_data(&data);
+        return 1;
+    }
+
     /* Pick an upper bound for the output size.  SRNX is compressed
      * relative to RINEX, so input_size + a small margin is a safe
      * ceiling for all realistic observation files.
@@ -2826,6 +2849,8 @@ static int ctx_load(struct file_ctx *ctx, const char *filename)
         return -1;
     }
     ctx->loaded = 1;
+    if (check_epoch_flags(&ctx->data, filename))
+        return -1;
 
     ctx->chunk_digest_len = rnx_digest_length(g_chunk_digest_id);
     if (ctx->chunk_digest_len < 0) ctx->chunk_digest_len = 0;
@@ -3353,6 +3378,7 @@ static void usage(FILE *out, const char *argv0)
 
 int main(int argc, char *argv[])
 {
+    int status = EXIT_SUCCESS;
     struct tuple_list tuples;
     struct scratch scratch;
     int ii;
@@ -3478,6 +3504,7 @@ int main(int argc, char *argv[])
         if (ctx_load(&ctx, argv[ii]) != 0)
         {
             ctx_free(&ctx);
+            status = EXIT_FAILURE;
             continue;
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -3514,7 +3541,7 @@ int main(int argc, char *argv[])
 
     scratch_free(&scratch);
     tuple_list_free(&tuples);
-    return EXIT_SUCCESS;
+    return status;
 }
 
 #endif /* defined(RNX2SRNX_SEARCH) */

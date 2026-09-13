@@ -161,6 +161,15 @@ ninja -C +release
 
 ## Tools
 
+### rnx2srnx
+
+Converts RINEX or CRINEX observation data to SRNX. Epoch flags 1
+(power failure) and 6 (cycle-slip records) are rejected with an error
+before the output file is created or overwritten: SRNX 1.0 has no
+representation for those flags. Ordinary epochs and special events
+with flags 2 through 5 are supported. `rnx2srnx_search` applies the same
+restriction when measuring compression.
+
 ### rnx2srnx_search
 
 Compression-measurement clone of `rnx2srnx` used to evaluate which set
