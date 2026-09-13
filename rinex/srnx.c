@@ -194,6 +194,36 @@ static int64_t sleb128(const char **d)
     return (int64_t)(ul >> 1) ^ -(int64_t)(ul & 1);
 }
 
+/** Decodes an EPOC integer without reading beyond the chunk or shifting
+ * by more than 63 bits.  SRNX signed integers use ZigZag encoding. */
+static int epoc_uleb128(const char **p, const char *end, uint64_t *value)
+{
+    uint64_t result = 0;
+    unsigned int shift;
+    for (shift = 0; shift <= 63 && *p < end; shift += 7)
+    {
+        unsigned char byte = (unsigned char)*(*p)++;
+        if (shift == 63 && byte > 1)
+            return SRNX_CORRUPT;
+        result |= (uint64_t)(byte & 127) << shift;
+        if (!(byte & 128))
+        {
+            *value = result;
+            return 0;
+        }
+    }
+    return SRNX_CORRUPT;
+}
+
+static int epoc_sleb128(const char **p, const char *end, int64_t *value)
+{
+    uint64_t u;
+    if (epoc_uleb128(p, end, &u))
+        return SRNX_CORRUPT;
+    *value = (int64_t)(u >> 1) ^ -(int64_t)(u & 1);
+    return 0;
+}
+
 /** Verifies the per-chunk digest of the chunk with its FOURCC at \a chunk_start.
  *
  * \returns 0 if the digest matches (or the reader's digest id is 0);
@@ -670,6 +700,16 @@ struct srnx_reader *srnx_reset(struct srnx_reader **p_srnx)
 }
 
 /* Doc comment in srnx.h. */
+void srnx_close(struct srnx_reader *srnx)
+{
+    if (srnx)
+    {
+        srnx_reset(&srnx);
+        free(srnx);
+    }
+}
+
+/* Doc comment in srnx.h. */
 int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
 {
     struct srnx_reader *srnx;
@@ -696,16 +736,20 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
     res = fstat(fd, &sbuf);
     if (res < 0)
     {
-        srnx_errorf(srnx, "unable to fstat file: %s", strerror(errno));
-        return errno;
+        res = errno;
+        srnx_errorf(srnx, "unable to fstat file: %s", strerror(res));
+        close(fd);
+        return res;
     }
     file_size = sbuf.st_size;
 
     /* Memory-map the file. */
     if (!rnx_page_size && rnx_mmap_init())
     {
-        srnx_errorf(srnx, "rnx_mmap_init failed: %s", strerror(errno));
-        return errno;
+        res = errno;
+        srnx_errorf(srnx, "rnx_mmap_init failed: %s", strerror(res));
+        close(fd);
+        return res;
     }
     tot_len = (file_size + RINEX_EXTRA + rnx_page_size - 1) & -rnx_page_size;
     addr = rnx_mmap_padded(fd, 0, file_size, tot_len);
@@ -893,6 +937,8 @@ int srnx_get_epochs(
     int res, sec_e7;
     short hh_mm, mm;
 
+    *p_epochs_len = 0;
+
     /* Search for the EPOC chunk. */
     res = srnx_find_chunk_cached(srnx, "EPOC", &srnx->epoc_offset, &epoc, &len, NULL);
     if (res)
@@ -902,8 +948,8 @@ int srnx_get_epochs(
     end = epoc + len;
 
     /* How many epochs are in this file? */
-    n_epoch = uleb128(&epoc);
-    if (epoc > end)
+    if (epoc_uleb128(&epoc, end, &n_epoch)
+        || n_epoch > SIZE_MAX / sizeof(**p_epoch))
     {
         srnx_errorf(srnx, "over-long epoch count");
         return SRNX_CORRUPT;
@@ -912,6 +958,14 @@ int srnx_get_epochs(
     /* Allocate memory for the epochs array.
      * XXX: Separately track used vs alloc'ed lengths?
      */
+    if (n_epoch == 0)
+    {
+        if (epoc != end)
+            goto corrupt;
+        free(*p_epoch);
+        *p_epoch = NULL;
+        return 0;
+    }
     new_epochs = *p_epoch
         ? realloc(*p_epoch, n_epoch * sizeof(**p_epoch))
         : calloc(n_epoch, sizeof(**p_epoch));
@@ -921,13 +975,11 @@ int srnx_get_epochs(
         return ENOMEM;
     }
     *p_epoch = new_epochs;
-    *p_epochs_len = n_epoch;
 
     /* Walk over the epoch spans. */
     for (idx = 0; (idx < n_epoch) && (epoc < end); )
     {
-        i64 = sleb128(&epoc);
-        if (epoc >= end)
+        if (epoc_sleb128(&epoc, end, &i64) || epoc >= end)
         {
             srnx_errorf(srnx, "oversized EPOC increment");
             return SRNX_CORRUPT;
@@ -935,18 +987,20 @@ int srnx_get_epochs(
         /* Convert to whole seconds? */
         if (i64 < 0)
         {
+            if (i64 < -(INT64_MAX / 10000000))
+                goto corrupt;
             i64 *= -10000000;
         }
 
-        len = uleb128(&epoc) + 1;
-        if (epoc >= end || idx + len > n_epoch)
+        if (epoc_uleb128(&epoc, end, &len)
+            || epoc >= end || len >= n_epoch - idx)
         {
             srnx_errorf(srnx, "oversized EPOC count");
             return SRNX_CORRUPT;
         }
 
-        date = uleb128(&epoc);
-        if (epoc >= end || date > INT_MAX)
+        ++len;
+        if (epoc_uleb128(&epoc, end, &date) || epoc >= end || date > INT_MAX)
         {
             srnx_errorf(srnx, "oversize EPOC start date");
             return SRNX_CORRUPT;
@@ -957,8 +1011,7 @@ int srnx_get_epochs(
             date += (date < 800000) ? 20000000 : 19000000;
         }
 
-        time = uleb128(&epoc);
-        if (epoc > end || time > 2460610000000)
+        if (epoc_uleb128(&epoc, end, &time) || time > 2460610000000)
         {
             srnx_errorf(srnx, "oversize EPOC start time");
             return SRNX_CORRUPT;
@@ -974,10 +1027,16 @@ int srnx_get_epochs(
             epoch->yyyy_mm_dd = date;
             epoch->hh_mm = hh_mm;
             epoch->sec_e7 = sec_e7;
+            epoch->flag = '0';
+            epoch->n_sats = 0;
 
             /* Advance seconds count and check for minute rollover.
              * Comparison of previous sec_e7 is needed for leap seconds.
              */
+            if (len == 1)
+                continue;
+            if (i64 > INT_MAX - sec_e7)
+                goto corrupt;
             sec_e7 += i64;
             if (sec_e7 >= 600000000 && epoch->sec_e7 < 600000000)
             {
@@ -993,24 +1052,25 @@ int srnx_get_epochs(
         }
     }
 
+    if (idx != n_epoch)
+        goto corrupt;
+
     /* Walk over the receiver clock offset spans. */
     for (idx = 0; (epoc < end) && (idx < n_epoch); )
     {
-        i64 = sleb128(&epoc);
-        if (epoc > end)
+        if (epoc_sleb128(&epoc, end, &i64))
         {
             srnx_errorf(srnx, "oversize EPOC clock offset value");
             return SRNX_CORRUPT;
         }
 
-        len = uleb128(&epoc) + 1;
-        if (epoc > end)
+        if (epoc_uleb128(&epoc, end, &len) || len >= n_epoch - idx)
         {
             srnx_errorf(srnx, "oversize EPOC clock offset count");
             return SRNX_CORRUPT;
         }
 
-        for (; len > 0; len--)
+        for (++len; len > 0; len--)
         {
             (*p_epoch)[idx++].clock_offset = i64;
         }
@@ -1022,7 +1082,14 @@ int srnx_get_epochs(
         (*p_epoch)[idx].clock_offset = 0;
     }
 
+    if (epoc != end)
+        goto corrupt;
+    *p_epochs_len = n_epoch;
     return 0;
+
+corrupt:
+    srnx_errorf(srnx, "invalid or incomplete EPOC payload");
+    return SRNX_CORRUPT;
 }
 
 /* Doc comment in srnx.h. */
@@ -2581,11 +2648,7 @@ out:
     if (srnx)
     {
         strncpy(out->error, srnx->errmsg, sizeof out->error);
-        if (srnx->data && srnx->data_mapped)
-            munmap((void *)srnx->data, srnx->data_mapped);
-        for (kk = 0; kk < 33; ++kk)
-            free(srnx->sys_info[kk].code);
-        free(srnx);
+        srnx_close(srnx);
     }
     return res;
 }

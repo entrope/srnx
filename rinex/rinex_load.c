@@ -495,13 +495,17 @@ int rnx_load_realloc_obs(struct rinex_data *out, int start, int len, int req)
             alloc *= 2;
 
         new_obs = realloc(out->obs, alloc * sizeof *out->obs);
+        if (!new_obs)
+            return -1;
+        out->obs = new_obs;
         new_ssi = realloc(out->ssi, alloc);
+        if (!new_ssi)
+            return -1;
+        out->ssi = new_ssi;
         new_lli = realloc(out->lli, alloc);
-        if (!new_obs || !new_ssi || !new_lli)
+        if (!new_lli)
             return -1;
 
-        out->obs = new_obs;
-        out->ssi = new_ssi;
         out->lli = new_lli;
         out->obs[0] = alloc;
         memset(new_ssi + old_alloc, ' ', alloc - old_alloc);

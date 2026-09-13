@@ -35,15 +35,14 @@ void *rnx_memmem
 {
     const char *ptr;
 
+    if (n_size == 0)
+        return (void *)haystack;
     if (n_size > h_size)
-    {
-        assert(n_size <= h_size);
         return NULL;
-    }
 
-    for (ptr = haystack; ptr < haystack + h_size - n_size; ++ptr)
+    for (ptr = haystack; ptr <= haystack + h_size - n_size; ++ptr)
     {
-        ptr = memchr(ptr, needle[0], haystack + h_size - ptr);
+        ptr = memchr(ptr, needle[0], haystack + h_size - n_size - ptr + 1);
         if (!ptr)
         {
             return NULL;
@@ -91,29 +90,33 @@ int rnx_find_header
 )
 {
     char *pos;
-    int ofs = 0, ii;
+    size_t ofs = 0, ii, pos_ofs;
+
+    if (sizeof_header < 2 || sizeof_header > 21)
+        return RINEX_ERR_BAD_FORMAT;
 
     while (1)
     {
-        pos = rnx_memmem(in + ofs, in_size, header, sizeof_header - 1);
+        pos = rnx_memmem(in + ofs, in_size - ofs, header, sizeof_header - 1);
         if (!pos)
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        if ((pos < in + 60) || ((pos > in + 60) && (pos[-61] != '\n')))
+        pos_ofs = pos - in;
+        if (pos_ofs < 60 || (pos_ofs > 60 && pos[-61] != '\n'))
         {
             ofs = (pos - in) + 1;
             continue;
         }
 
-        for (ii = sizeof_header - 1; ii < 21; ++ii)
+        for (ii = sizeof_header - 1; ii < 20 && ii < in_size - pos_ofs; ++ii)
         {
             if (pos[ii] != ' ')
             {
                 break;
             }
         }
-        if (pos[ii] != '\n')
+        if (ii >= in_size - pos_ofs || pos[ii] != '\n')
         {
             ofs = (pos - in) + ii;
             continue;

@@ -28,7 +28,7 @@
 # define RNX2SRNX_PATH "./rnx2srnx"
 #endif
 #ifndef FIXTURE_PATH
-# define FIXTURE_PATH "../test/test_02.rnx"
+# define FIXTURE_PATH "fixture_v3.rnx"
 #endif
 
 static int find_sat(struct rinex_parser *p, char sys, int num)

@@ -229,9 +229,6 @@ const char *rinex_open(struct rinex_parser **p_parser, struct rinex_stream *stre
 
 /** Finds the start of the first line with the given header label.
  *
- * \warning Has undefined behavior for the first header.  This should
- *   not be a problem because the first header should be at p->buffer
- *   anyway.
  * \param[in] p RINEX parser with header in \a p->buffer.
  * \param[in] label Header label to search for.
  * \param[in] sizeof_label Size of \a label, including nul terminator.

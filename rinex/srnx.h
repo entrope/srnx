@@ -10,11 +10,13 @@
 
 #include "rinex_epoch.h"
 
-/* Note that ALL memory (de-)allocations are performed by the library.
- * This is significant on platforms like Microsoft Windows, where the
- * library may use a different heap than the rest of the process.  This
- * implies that most pointers passed by address to the library must be
- * initialized to NULL before the first library call.
+/* Reader objects are library-owned: release them with srnx_close() or
+ * srnx_free_obs_reader().  Output arrays are allocated/reallocated by the
+ * library and owned by the caller, who releases them with free().  Array
+ * pointers passed by address must initially be NULL or point to compatible
+ * malloc storage.  The library and caller must use the same C allocator.
+ * Header and event text pointers are borrowed until the reader is closed
+ * or reopened; do not free them.
  */
 
 /** srnx_reader represents a SRNX stream reader. */
@@ -38,8 +40,7 @@ struct srnx_load_slot
     /** n_values is the number of observations loaded for this signal. */
     int n_values;
 
-    /** obs holds the observation values (caller-allocated, freed by
-     * caller). */
+    /** obs holds library-allocated observation values, freed by the caller. */
     int64_t *obs;
 
     /** lli holds the loss-of-lock indicators, length #n_values. */
@@ -72,7 +73,7 @@ struct srnx_obs_code
      * For a RINEX 2.x file, the first two characters are used.
      * For a RINEX 3.x file, the first three characters are used.
      * Unused characters may be assumed to be '\0'.  (Callers must
-     * iniitalize them to '\0', and calles can ignore the actual value.)
+     * initialize them to '\0', and callees can ignore the actual value.)
      */
     char name[4];
 };
@@ -93,6 +94,12 @@ const char *srnx_error(const struct srnx_reader *srnx);
  */
 int srnx_open(struct srnx_reader **p_srnx, const char *filename, int flags);
 
+/** Releases a reader, including after a failed open.  NULL is allowed.
+ * Free observation readers before closing or reopening their parent.
+ * Caller-owned output arrays remain valid and must be freed separately.
+ */
+void srnx_close(struct srnx_reader *srnx);
+
 /** Loads the RINEX header from a SRNX file.
  *
  * \param[in] srnx SRNX reader object.
@@ -106,11 +113,11 @@ int srnx_get_header(
     size_t *rhdr_len
 );
 
-/** Loads the RINEX eoch values from a SRNX file.
+/** Loads the RINEX epoch values from a SRNX file.
  *
  * \param[in] srnx SRNX reader object.
  * \param[in,out] p_epoch Receives pointer to epoch structures.
- * \param[in,out] p_epochs_len Number of epochs valid in \a *epochs.
+ * \param[out] p_epochs_len Number of epochs on success; zero on failure.
  * \returns Zero on success, non-zero on error.
  */
 int srnx_get_epochs(

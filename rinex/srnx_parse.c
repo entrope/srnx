@@ -600,12 +600,7 @@ static void srnx_v1_destroy(struct rinex_parser *p_)
     free(p_->ssi);
     free(p_->buffer);
 
-    if (p->srnx)
-    {
-        struct srnx_reader *srnx = p->srnx;
-        srnx_reset(&srnx); /* releases mapped data and code tables */
-        free(srnx);
-    }
+    srnx_close(p->srnx);
 
     /* Unlike srnx->data (an SRNX-owned mmap), #base.stream is owned by
      * the caller of rinex_open(), exactly as for the text/CRX parsers;

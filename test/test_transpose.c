@@ -121,7 +121,7 @@ int main(int argc, char *argv[])
 
         for (jj = 0; jj < 32; ++jj)
         {
-            int bit = (truth[jj] >> (31 - ii)) & 1;
+            uint32_t bit = (truth[jj] >> (31 - ii)) & 1;
             xx |= bit << (31 - jj);
         }
 

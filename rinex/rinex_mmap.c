@@ -92,31 +92,27 @@ static int rinex_mmap_advance(
     }
 
     /* Check that we don't step past the end of the file. */
-    if (step > stream->file_size - stream->offset)
+    new_offset = stream->offset;
+    if (stream->map)
+        new_offset += stream->base.buffer - stream->map;
+    if (step > stream->file_size - new_offset)
     {
         return EINVAL;
     }
-    new_offset = stream->offset + (stream->base.buffer - stream->map) + step;
+    new_offset += step;
+
+    if (req_size > stream->file_size - new_offset)
+        req_size = stream->file_size - new_offset;
 
     /* If we already have the entire file mapped, we can only advance
      * within the current buffer.
      */
-    if (stream->offset + stream->total >= (size_t)stream->file_size + RINEX_EXTRA)
+    if (stream->map
+        && stream->offset + stream->total >= (size_t)stream->file_size + RINEX_EXTRA)
     {
-        eff_len = stream->map + stream->total - stream->base.buffer;
-        if (step > eff_len)
-        {
-            step = eff_len;
-        }
         stream->base.buffer += step;
-        stream->base.size -= step;
+        stream->base.size = req_size;
         return 0;
-    }
-
-    /* We can reduce the requested size to the actual end of the file. */
-    if (req_size > stream->file_size - new_offset)
-    {
-        req_size = stream->file_size - new_offset;
     }
 
     /* Clean up any previous mapping we have. */
@@ -148,6 +144,7 @@ static int rinex_mmap_advance(
             stream->fd, base_offset);
         if (stream->map == MAP_FAILED)
         {
+            stream->map = NULL;
             return errno;
         }
         madvise(stream->map, stream->total, MADV_SEQUENTIAL);
@@ -168,6 +165,7 @@ success:
         eff_len - base_offset, stream->total);
     if (stream->map == MAP_FAILED)
     {
+        stream->map = NULL;
         return errno;
     }
 
@@ -218,6 +216,7 @@ struct rinex_stream *rinex_mmap_stream(const char *filename)
     res = fstat(str->fd, &sbuf);
     if (res < 0)
     {
+        close(str->fd);
         free(str);
         return NULL;
     }

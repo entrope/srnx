@@ -97,6 +97,16 @@ include(CPack)
 
 enable_testing()
 
+# Integration tests use the same tracked sample as the parser unit tests.
+add_executable(write_test_fixtures test/write_fixtures.c)
+set(TEST_V3_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/fixture_v3.rnx")
+set(TEST_BAD_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/fixture_invalid.rnx")
+add_custom_command(OUTPUT "${TEST_V3_FIXTURE}" "${TEST_BAD_FIXTURE}"
+    COMMAND write_test_fixtures "${TEST_V3_FIXTURE}" "${TEST_BAD_FIXTURE}"
+    DEPENDS write_test_fixtures
+    VERBATIM)
+add_custom_target(test_fixtures DEPENDS "${TEST_V3_FIXTURE}" "${TEST_BAD_FIXTURE}")
+
 add_executable(test_digest test/test_digest.c)
 target_link_libraries(test_digest rinex tap)
 target_include_directories(test_digest PRIVATE ${BLAKE3_INCLUDE_DIRS})
@@ -113,8 +123,8 @@ add_executable(test_srnx_digest test/test_srnx_digest.c)
 target_link_libraries(test_srnx_digest rinex tap)
 target_compile_definitions(test_srnx_digest PRIVATE
     RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
-    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/test/test_02.rnx")
-add_dependencies(test_srnx_digest rnx2srnx)
+    FIXTURE_PATH="${TEST_V3_FIXTURE}")
+add_dependencies(test_srnx_digest rnx2srnx test_fixtures)
 add_test(NAME srnx_digest COMMAND test_srnx_digest)
 set_property(TEST srnx_digest PROPERTY LABELS function)
 
@@ -122,8 +132,8 @@ add_executable(test_srnx_parser test/srnx_parser.c)
 target_link_libraries(test_srnx_parser rinex tap)
 target_compile_definitions(test_srnx_parser PRIVATE
     RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
-    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/test/test_02.rnx")
-add_dependencies(test_srnx_parser rnx2srnx)
+    FIXTURE_PATH="${TEST_V3_FIXTURE}")
+add_dependencies(test_srnx_parser rnx2srnx test_fixtures)
 add_test(NAME srnx_parser COMMAND test_srnx_parser)
 set_property(TEST srnx_parser PROPERTY LABELS function)
 
@@ -131,11 +141,12 @@ add_executable(test_bin_tools test/test_bin_tools.c)
 target_link_libraries(test_bin_tools rinex tap)
 target_compile_definitions(test_bin_tools PRIVATE
     RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    RNX2SRNX_SEARCH_PATH="$<TARGET_FILE:rnx2srnx_search>"
     RINEX_N_OBS_PATH="$<TARGET_FILE:rinex_n_obs>"
     SRNX2RNX_PATH="$<TARGET_FILE:srnx2rnx>"
-    FIXTURE_V3_PATH="${CMAKE_SOURCE_DIR}/test/test_02.rnx"
-    FIXTURE_BAD_PATH="${CMAKE_SOURCE_DIR}/test/test_01.20o")
-add_dependencies(test_bin_tools rnx2srnx srnx2rnx rinex_n_obs)
+    FIXTURE_V3_PATH="${TEST_V3_FIXTURE}"
+    FIXTURE_BAD_PATH="${TEST_BAD_FIXTURE}")
+add_dependencies(test_bin_tools rnx2srnx rnx2srnx_search srnx2rnx rinex_n_obs test_fixtures)
 add_test(NAME bin_tools COMMAND test_bin_tools)
 set_property(TEST bin_tools PROPERTY LABELS function)
 
@@ -173,3 +184,13 @@ set_property(TEST transpose-bench PROPERTY LABELS benchmark)
 add_test(NAME transpose-bench-std COMMAND test_transpose -bench)
 set_property(TEST transpose-bench-std PROPERTY ENVIRONMENT "RINEX_SIMD=std")
 set_property(TEST transpose-bench-std PROPERTY LABELS benchmark)
+
+add_executable(test_reader_bounds test/test_reader_bounds.c)
+target_link_libraries(test_reader_bounds rinex tap)
+add_test(NAME reader_bounds COMMAND test_reader_bounds)
+set_property(TEST reader_bounds PROPERTY LABELS function)
+
+add_executable(test_load_alloc test/test_load_alloc.c)
+target_link_libraries(test_load_alloc rinex tap)
+add_test(NAME load_alloc COMMAND test_load_alloc)
+set_property(TEST load_alloc PROPERTY LABELS function)

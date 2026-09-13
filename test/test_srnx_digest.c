@@ -24,14 +24,8 @@
 # define RNX2SRNX_PATH "./rnx2srnx"
 #endif
 #ifndef FIXTURE_PATH
-# define FIXTURE_PATH "../test/test_02.rnx"
+# define FIXTURE_PATH "fixture_v3.rnx"
 #endif
-
-/* Reader struct is opaque in the public header; srnx_open returns a
- * pointer to a heap-allocated instance.  The test does not need to
- * iterate chunks — it just needs to open/verify — but we still need to
- * release the mapping and the struct.  Do it via the library.
- */
 
 static int run_rnx2srnx(int chunk_id, int file_id, const char *out)
 {
@@ -44,13 +38,6 @@ static int run_rnx2srnx(int chunk_id, int file_id, const char *out)
     res = system(cmd);
     return res;
 }
-
-/* srnx.h exposes srnx_open but no symmetric close.  The internals
- * munmap(data, data_mapped) and free() the struct on shutdown.  To keep
- * the test self-contained without depending on those internals, we
- * simply leak per iteration — this is a test binary, and the OS
- * reclaims on exit.
- */
 
 static void test_pair(int chunk_id, int file_id)
 {
@@ -70,6 +57,7 @@ static void test_pair(int chunk_id, int file_id)
     ok(res == 0, "srnx_verify_file_digest chunk=%d file=%d (res=%d)",
         chunk_id, file_id, res);
 
+    srnx_close(rdr);
     remove(path);
 }
 
@@ -150,6 +138,7 @@ int main(void)
             "srnx_verify_file_digest detects corrupted file digest (res=%d)",
             res);
 
+        srnx_close(rdr);
         remove(path);
     }
 

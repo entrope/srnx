@@ -401,7 +401,7 @@ static const char *rnx_open_v2(struct rnx_v234_parser *p, int hdr_ofs)
 static const char *rnx_open_v34(struct rnx_v234_parser *p)
 {
     static const char sys_n_obs[] = "SYS / # / OBS TYPES";
-    const char *line;
+    const char *line, *eol, *end = p->base.buffer + p->base.buffer_len;
     int res, ii, n_obs;
     char sys_id;
 
@@ -413,8 +413,14 @@ static const char *rnx_open_v34(struct rnx_v234_parser *p)
     }
 
     /* Keep going until we find a different header label. */
-    while (!memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
+    while (line < end)
     {
+        eol = memchr(line, '\n', end - line);
+        if (!eol)
+            return "Unterminated header line";
+        if (eol - line < 60 + sizeof(sys_n_obs) - 1
+            || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
+            break;
         /* How many observations for this system? */
         sys_id = line[0];
         res = parse_uint(&n_obs, line + 3, 3);
@@ -427,8 +433,10 @@ static const char *rnx_open_v34(struct rnx_v234_parser *p)
         /* Scan past following lines, 13 observation codes per line. */
         for (ii = 13; ii < n_obs; ii += 13)
         {
-            line = strchr(line, '\n') + 1;
-            if ((line[0] != ' ')
+            line = eol + 1;
+            eol = memchr(line, '\n', end - line);
+            if (!eol || eol - line < 60 + sizeof(sys_n_obs) - 1
+                || (line[0] != ' ')
                 || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
             {
                 return "Expected a successor SYS / # / OBS TYPES line";
@@ -436,7 +444,7 @@ static const char *rnx_open_v34(struct rnx_v234_parser *p)
         }
 
         /* Skip to the next line. */
-        line = strchr(line, '\n') + 1;
+        line = eol + 1;
     }
 
     /* Initially assume 500 observations is enough. */
