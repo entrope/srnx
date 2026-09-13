@@ -144,13 +144,20 @@ Each satellite could have per-signal tables:
 
 ## Build system
 
-This uses [CMake](https://cmake.org/) to build.  Typical usage, captured
-in bin/coverage.sh:
+This uses [CMake](https://cmake.org/) to build. The commands below also
+require Ninja, `pkg-config`, and the BLAKE3 C library providing the
+`libblake3` pkg-config module.
 
 ```bash
 cmake -G Ninja -B +debug -Wdev -DCMAKE_BUILD_TYPE=Debug
-ninja -C +debug test
+cmake --build +debug
+ctest --test-dir +debug -L function --output-on-failure
 ```
+
+The build generates integration-test fixtures from the sample data
+tracked in this repository; no external RINEX corpus is needed for the
+functional tests. Tests labeled `benchmark` are separate microbenchmarks
+and are excluded by `-L function`.
 
 For an optimized build, use something like:
 
@@ -210,7 +217,37 @@ xctrace record --template 'CPU Profiler' --launch -- ./+release/rinex_scan ...
 Open the resulting *.trace folder in Instruments.app, via Finder or via
 `open Launch_rinex_scan_*.trace`.
 
-### Throughput benchmarks
+## Measuring performance
+
+Measure RINEX v2 and v3, CRINEX, and SRNX separately. Also separate
+streaming scans (`rinex_scan`), whole-file loading (`rinex_load_file`),
+and conversion (`rnx2srnx` and `srnx2rnx`); they perform different work.
+Digest and transpose microbenchmarks do not measure file parsing.
+
+For each result, record:
+
+- Git revision, compiler version, build flags, CPU, operating system,
+  and SIMD selection (including any `RINEX_SIMD` override).
+- Exact command, corpus identity or checksums, file formats, file count,
+  and input bytes. For compression results, include output bytes and
+  chunk/file digest settings.
+- Whether input was cached in RAM or read from storage, storage device,
+  warm-up procedure, and number of repetitions.
+- Wall, user, and system times, and the median and range across runs.
+  State whether throughput uses encoded input bytes or equivalent RINEX
+  text bytes, and distinguish decimal MB/s from MiB/s.
+
+Use equivalent observations across formats when comparing them. Keep
+results for cached and uncached input separate, and include the revision
+and measurement date with any published table.
+
+### Historical throughput benchmarks: RINEX v2 scanning
+
+The results below are retained for historical reference. They are
+outdated measurements of the RINEX v2 reading path and do not describe
+current RINEX v3, CRINEX, SRNX, whole-file loading, or conversion performance.
+The original compiler details and cache conditions are included where
+available; the results are not a controlled comparison of the current code.
 
 For `./rinex_scan 2020_200/m*.20o`, with 42,091,216,806 bytes of input:
 
@@ -222,7 +259,7 @@ For `./rinex_scan 2020_200/m*.20o`, with 42,091,216,806 bytes of input:
    1432 MB/sec user, 930 MB/sec user+system, 787 MB/sec wall clock
 - AMD Threadripper 3960X, -O3:
    `./rinex_scan 2020_200/m*.20o  48.45s user 0.96s system 99% cpu 49.423 total`
-   869 MB/sec user, 852 MB/sec user+system, 852 MB/sec user+system
+   869 MB/sec user, 852 MB/sec user+system, 852 MB/sec wall clock
 - Apple M2 Max, optimized build but no NEON:
    `./+release/rinex_scan 2020_200/m*.20o  54.14s user 3.82s system 99% cpu 58.018 total`
    777 MB/sec user, 726 MB/sec user+system, 725 MB/sec wall clock
