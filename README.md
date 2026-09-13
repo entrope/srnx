@@ -170,12 +170,22 @@ ninja -C +release
 
 ### rnx2srnx
 
-Converts RINEX or CRINEX observation data to SRNX. Epoch flags 1
-(power failure) and 6 (cycle-slip records) are rejected with an error
-before the output file is created or overwritten: SRNX 1.0 has no
-representation for those flags. Ordinary epochs and special events
-with flags 2 through 5 are supported. `rnx2srnx_search` applies the same
-restriction when measuring compression.
+Converts RINEX or CRINEX observation data to SRNX. Complete epochs with
+flags 1 (power failure) and 6 (cycle-slip records) are stored as RINEX
+text in EVTF chunks, alongside special events with flags 2 through 5.
+Only flag-0 epochs enter EPOC and the compressed observation columns;
+EVTF records do not update or reset the delta predictor.
+
+`srnx2rnx` restores these records in order. The streaming `rinex_parser`
+API returns the satellite, observation and indicator arrays for flags
+1 and 6 as it does for text input. The columnar `rinex_load` and
+`srnx_load` APIs expose these records through `rinex_data.event`;
+clients needing all observations must also process those events.
+`rnx2srnx_search` includes their EVTF storage cost.
+
+The SRNX major version remains 1. Older readers that assume EVTF only
+contains flags 2 through 5 need updating to interpret the additional
+record types.
 
 ### rnx2srnx_search
 

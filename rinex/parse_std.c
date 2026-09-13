@@ -1,4 +1,5 @@
 #include "rinex/rnx_priv.h"
+#include <string.h>
 
 #define TRANSPOSE_U64(X) do { \
         X = (X & 0xAA55AA55AA55AA55) \
@@ -155,6 +156,16 @@ static const char *rnx_parse_obs
     int neg;
     int kk;
     char buf[16];
+
+    /* A missing value may still carry LLI/SSI characters. */
+    if (!memcmp(obs, "              ", 14))
+    {
+        obs += 14;
+        p->obs[nn] = 0;
+        p->lli[nn] = *obs == '\n' ? ' ' : *obs++;
+        p->ssi[nn] = *obs == '\n' ? ' ' : *obs++;
+        return obs;
+    }
 
     /* The first 11 characters must be present: space, minus, digit or dot. */
     for (kk = 0; kk < 10; ++kk)

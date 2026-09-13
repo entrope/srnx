@@ -343,6 +343,11 @@ static int srnx_v1_load_sats(struct srnx_v1_parser *p)
         return RINEX_ERR_BAD_FORMAT;
     }
 
+    if (!n_sat_names)
+    {
+        free(sat_names);
+        return RINEX_SUCCESS;
+    }
     p->sats = calloc((size_t)n_sat_names, sizeof *p->sats);
     if (!p->sats)
     {
@@ -427,6 +432,76 @@ static int srnx_v1_load_sats(struct srnx_v1_parser *p)
     return RINEX_SUCCESS;
 }
 
+/** Decode an observation-shaped EVTF using the ordinary RINEX parser.
+ * Its observations are returned for this read only, without consuming any
+ * EPOC entry or advancing the column readers. */
+static rinex_error_t srnx_v1_read_observation_event(struct srnx_v1_parser *p,
+    const struct rinex_event *ev)
+{
+    const char *header, *error;
+    size_t header_len, length;
+    char *text;
+    struct rinex_stream *stream;
+    struct rinex_parser *event = NULL;
+    rinex_error_t result;
+    int ii, n_obs = 0;
+
+    if (srnx_get_header(p->srnx, &header, &header_len))
+        return RINEX_ERR_BAD_FORMAT;
+    if (ev->text_len < 0 || header_len > INT_MAX - (size_t)ev->text_len)
+        return RINEX_ERR_BAD_FORMAT;
+    length = header_len + ev->text_len;
+    text = calloc(length + RINEX_EXTRA, 1);
+    if (!text) return RINEX_ERR_SYSTEM;
+    memcpy(text, header, header_len);
+    memcpy(text + header_len, ev->text, ev->text_len);
+    stream = rinex_buffer_stream(text, (int)length);
+    if (!stream)
+    {
+        free(text);
+        return RINEX_ERR_SYSTEM;
+    }
+    error = rinex_open(&event, stream);
+    if (error)
+    {
+        rnx_errorf(&p->base, "invalid observation EVTF header: %s", error);
+        result = RINEX_ERR_BAD_FORMAT;
+        goto done;
+    }
+    result = event->read(event);
+    if (result != RINEX_SUCCESS)
+    {
+        rnx_errorf(&p->base, "invalid observation EVTF: %s", event->errmsg);
+        result = RINEX_ERR_BAD_FORMAT;
+        goto done;
+    }
+    for (ii = 0; ii < event->epoch.n_sats; ++ii)
+        n_obs += event->n_obs[p->rinex_version == 2 ? 0 : event->sats[ii].system & 31];
+    result = srnx_v1_ensure_sats(p, event->epoch.n_sats);
+    if (result != RINEX_SUCCESS) goto done;
+    result = srnx_v1_ensure_obs(p, n_obs);
+    if (result != RINEX_SUCCESS) goto done;
+    p->base.epoch = event->epoch;
+    if (event->epoch.n_sats)
+        memcpy(p->base.sats, event->sats, event->epoch.n_sats * sizeof *event->sats);
+    if (n_obs)
+    {
+        memcpy(p->base.obs, event->obs, n_obs * sizeof *event->obs);
+        memcpy(p->base.lli, event->lli, n_obs);
+        memcpy(p->base.ssi, event->ssi, n_obs);
+    }
+    if (event->read(event) != RINEX_EOF)
+    {
+        rnx_errorf(&p->base, "extra records in observation EVTF");
+        result = RINEX_ERR_BAD_FORMAT;
+    }
+done:
+    if (event) event->destroy(event);
+    stream->destroy(stream);
+    free(text);
+    return result;
+}
+
 static rinex_error_t srnx_v1_read(struct rinex_parser *p_)
 {
     struct srnx_v1_parser *p = (struct srnx_v1_parser *)p_;
@@ -441,12 +516,23 @@ static rinex_error_t srnx_v1_read(struct rinex_parser *p_)
     {
         struct rinex_event *ev = &p->events[p->event_idx++];
         struct rinex_epoch epoch;
-        int res;
+        int res, flag_pos = p->rinex_version == 2 ? 28 : 31;
 
-        memset(&epoch, 0, sizeof epoch);
-        res = (p->rinex_version == 2)
-            ? srnx_v1_parse_event_v2(&epoch, ev->text)
-            : srnx_v1_parse_event_v34(&epoch, ev->text);
+        if (ev->text_len > flag_pos
+            && (ev->text[flag_pos] == '1' || ev->text[flag_pos] == '6'))
+        {
+            err = srnx_v1_read_observation_event(p, ev);
+            if (err != RINEX_SUCCESS) return err;
+            epoch = p_->epoch;
+            res = 0;
+        }
+        else
+        {
+            memset(&epoch, 0, sizeof epoch);
+            res = (p->rinex_version == 2)
+                ? srnx_v1_parse_event_v2(&epoch, ev->text)
+                : srnx_v1_parse_event_v34(&epoch, ev->text);
+        }
         if (res)
         {
             /* rnx_read_v34() has a pre-existing bug (see BUGS.md) where

@@ -126,7 +126,9 @@ int srnx_get_epochs(
     size_t *p_epochs_len
 );
 
-/* Loads the next special event from a SRNX file.
+/* Loads the next EVTF record from a SRNX file. Flags 1 and 6 include
+ * the complete satellite/value records in RINEX text; they are not part
+ * of the EPOC array or the SOCD values returned by the column APIs.
  *
  * \param[in] srnx SRNX reader object.
  * \param[in,out] p_event Receives pointer to special event text.

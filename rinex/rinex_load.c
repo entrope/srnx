@@ -8,6 +8,7 @@
 #include "rinex/rnx_priv.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <limits.h>
 #include <string.h>
@@ -565,6 +566,104 @@ const char *rnx_load_alloc_obs(struct rinex_data *out, struct rinex_satellite_da
     return NULL;
 }
 
+/** Write a fixed-point value without floating-point rounding. */
+static int event_fixed(FILE *file, int64_t value, int decimals, int width)
+{
+    char field[40];
+    uint64_t magnitude = value < 0 ? -(uint64_t)value : (uint64_t)value;
+    uint64_t unit = 1;
+    int ii, length;
+    for (ii = 0; ii < decimals; ++ii)
+        unit *= 10;
+    length = snprintf(field, sizeof field, "%s%"PRIu64".%0*"PRIu64,
+        value < 0 ? "-" : "", magnitude / unit, decimals, magnitude % unit);
+    if (length < 0 || length > width)
+        return -1;
+    return fprintf(file, "%*s", width, field) < 0 ? -1 : 0;
+}
+
+/** Preserve exceptional observations as ordinary RINEX text, including
+ * observations decoded from CRINEX. These records never enter SOCD. */
+static const char *observation_event(const struct rinex_parser *p, int version,
+    char **text, int *text_len)
+{
+    const struct rinex_epoch *ep = &p->epoch;
+    size_t length = 0;
+    FILE *file = open_memstream(text, &length);
+    int ii, jj, count, failed = 0;
+    if (!file)
+        return "unable to allocate exceptional epoch text";
+
+    if (version == 2)
+        fprintf(file, " %02d %2d %2d %2d %2d", ep->yyyy_mm_dd / 10000 % 100,
+            ep->yyyy_mm_dd / 100 % 100, ep->yyyy_mm_dd % 100,
+            ep->hh_mm / 100, ep->hh_mm % 100);
+    else
+        fprintf(file, "> %04d %02d %02d %02d %02d", ep->yyyy_mm_dd / 10000,
+            ep->yyyy_mm_dd / 100 % 100, ep->yyyy_mm_dd % 100,
+            ep->hh_mm / 100, ep->hh_mm % 100);
+    failed |= event_fixed(file, ep->sec_e7, 7, 11);
+    fprintf(file, "  %c%3d", ep->flag, ep->n_sats);
+
+    if (version == 2)
+    {
+        count = ep->n_sats < 12 ? ep->n_sats : 12;
+        for (ii = 0; ii < count; ++ii)
+            fprintf(file, "%c%02d", p->sats[ii].system, p->sats[ii].number);
+        if (ep->clock_offset)
+        {
+            fprintf(file, "%*s", 36 - count * 3, "");
+            failed |= event_fixed(file, ep->clock_offset / 1000, 9, 12);
+        }
+        fputc('\n', file);
+        for (; ii < ep->n_sats; ++ii)
+        {
+            if (ii % 12 == 0) fprintf(file, "%32s", "");
+            fprintf(file, "%c%02d", p->sats[ii].system, p->sats[ii].number);
+            if (ii % 12 == 11 || ii + 1 == ep->n_sats) fputc('\n', file);
+        }
+    }
+    else
+    {
+        if (ep->clock_offset)
+        {
+            fprintf(file, "%6s", "");
+            failed |= event_fixed(file, ep->clock_offset, 12, 15);
+        }
+        fputc('\n', file);
+    }
+
+    for (ii = 0; ii < ep->n_sats; ++ii)
+    {
+        count = p->n_obs[version == 2 ? 0 : p->sats[ii].system & 31];
+        if (version != 2)
+            fprintf(file, "%c%02d", p->sats[ii].system, p->sats[ii].number);
+        for (jj = 0; jj < count; ++jj)
+        {
+            int index = p->sats[ii].obs_0 + jj;
+            if (p->obs[index] == INT64_MIN)
+                fprintf(file, "%14s", "");
+            else
+                failed |= event_fixed(file, p->obs[index], 3, 14);
+            fputc(p->lli[index], file);
+            fputc(p->ssi[index], file);
+            if (version == 2 && jj % 5 == 4 && jj + 1 < count)
+                fputc('\n', file);
+        }
+        fputc('\n', file);
+    }
+    failed |= ferror(file);
+    failed |= fclose(file) != 0;
+    if (failed || length > INT_MAX)
+    {
+        free(*text);
+        *text = NULL;
+        return "unable to represent exceptional epoch as RINEX text";
+    }
+    *text_len = (int)length;
+    return NULL;
+}
+
 const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
 {
     struct rinex_parser *p = NULL;
@@ -640,12 +739,13 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
     /* Scan the records in the file. */
     while ((res = p->read(p)) > 0)
     {
-        if (p->epoch.flag != '0' && p->epoch.flag != '1' && p->epoch.flag != '6')
+        if (p->epoch.flag != '0')
         {
-            if (p->epoch.flag >= '2' && p->epoch.flag <= '5')
+            if (p->epoch.flag >= '1' && p->epoch.flag <= '6')
             {
                 struct rinex_event *ev;
-                char *text;
+                char *text = NULL;
+                int text_len = p->buffer_len;
 
                 if (out->event_used >= out->event_alloc)
                 {
@@ -661,17 +761,26 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
                     out->event = new_ev;
                 }
 
-                text = malloc(p->buffer_len);
-                if (!text)
+                if (p->epoch.flag == '1' || p->epoch.flag == '6')
                 {
-                    errmsg = "unable to allocate event text";
-                    goto fail_errmsg;
+                    errmsg = observation_event(p, out->rinex_version, &text, &text_len);
+                    if (errmsg)
+                        goto fail_errmsg;
                 }
-                memcpy(text, p->buffer, p->buffer_len);
+                else
+                {
+                    text = malloc(text_len);
+                    if (!text)
+                    {
+                        errmsg = "unable to allocate event text";
+                        goto fail_errmsg;
+                    }
+                    memcpy(text, p->buffer, text_len);
+                }
 
                 ev = &out->event[out->event_used++];
                 ev->epoch_index = out->epoch_used;
-                ev->text_len = p->buffer_len;
+                ev->text_len = text_len;
                 ev->text = text;
             }
             continue;

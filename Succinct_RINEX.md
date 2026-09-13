@@ -132,12 +132,25 @@ satellite's `SATE` chunk.
 
 ### <a name="evtf"></a>EVTF: Event Flag or Special Record
 
-The `EVTF` payload consists of an epoch index, followed by the event
-record in standard RINEX format, including all newlines.
+The `EVTF` payload consists of an epoch index, followed by one complete
+record with epoch flag 1 through 6 in standard RINEX format, including
+all newlines. Flags 1 and 6 use the observation-record layout: the epoch
+header includes the satellite list where required, and all satellite
+observation or cycle-slip fields follow, including continuation lines,
+receiver clock offset, LLI and SSI fields. CRINEX input MUST be decoded
+to RINEX text before storing it here.
+
+A flag-1 or flag-6 record MUST NOT also be represented in EPOC, SATE or
+SOCD. Its values do not participate in SOCD scaling, delta encoding or
+predictor state updates. Reading EVTF does not reset a SOCD predictor.
 
 The epoch index is a ULEB128 indication of where the event record
-exists relative to observation epochs: 0 indicates before the first
-epoch, 1 indicates between the first and second epoch, and so forth.
+exists relative to flag-0 observation epochs: 0 indicates before the
+first flag-0 epoch, 1 indicates between the first and second, and so
+forth. A value equal to the EPOC epoch count indicates a trailing event.
+Multiple EVTF records may share an index and timestamp; their original
+relative order MUST be preserved. EVTF records themselves do not
+increment this index.
 
 `EVTF` chunks SHOULD be stored in order of increasing epoch index.
 
@@ -145,8 +158,10 @@ As in the `RHDR` chunk, each newline is represented as a single LF.
 
 ### <a name="epoc"></a>EPOC: Epoch records
 
-The `EPOC` payload consists of a ULEB128 count of epochs, one or more
-epoch spans, and run-length-encoded (RLE-encoded) receiver clock offsets.
+The `EPOC` payload consists of a ULEB128 count of flag-0 epochs, epoch
+spans covering that count, and run-length-encoded (RLE-encoded) receiver
+clock offsets. A zero count has no following spans or clock offsets;
+such a file may still contain EVTF records.
 For a RINEX 2.x-based file, the clock offsets SHOULD be omitted, which
 (as described below) implies they are all zero.
 

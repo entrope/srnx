@@ -493,7 +493,7 @@ static int srnx_parse_rhdr(
         return srnx_parse_rhdr_v2(srnx, rhdr, rhdr_len);
     }
 
-    if (!memcmp(rhdr, "     3.", 7))
+    if (!memcmp(rhdr, "     3.", 7) || !memcmp(rhdr, "     4.", 7))
     {
         return srnx_parse_rhdr_v3(srnx, rhdr, rhdr_len);
     }

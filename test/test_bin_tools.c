@@ -32,9 +32,6 @@
 #ifndef RNX2SRNX_PATH
 # define RNX2SRNX_PATH "rnx2srnx"
 #endif
-#ifndef RNX2SRNX_SEARCH_PATH
-# define RNX2SRNX_SEARCH_PATH "rnx2srnx_search"
-#endif
 #ifndef RINEX_N_OBS_PATH
 # define RINEX_N_OBS_PATH "rinex_n_obs"
 #endif
@@ -113,77 +110,8 @@ static char *slurp(const char *path)
     return buf;
 }
 
-static void test_epoch_flags(void)
-{
-    int version, flag;
-    for (version = 2; version <= 4; ++version)
-    {
-        for (flag = 1; flag <= 6; flag += 5)
-        {
-            const char *input = "test_flag.rnx", *output = "test_flag.srnx";
-            const char *log = "test_flag.log";
-            char cmd[1024], *message;
-            struct rinex_data data;
-            const char *err;
-            FILE *file = fopen(input, "w");
-            if (!file) BAIL_OUT("cannot write epoch flag fixture");
-            fprintf(file, "%9.2f           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n",
-                version == 2 ? 2.11 : version == 3 ? 3.04 : 4.00);
-            if (version == 2)
-                fprintf(file, "%-60s%s\n", "     1    C1", "# / TYPES OF OBSERV");
-            else
-                fprintf(file, "%-60s%s\n", "G    1 C1C", "SYS / # / OBS TYPES");
-            fprintf(file, "%-60s%s\n", "", "END OF HEADER");
-            if (version == 2)
-                fprintf(file, " 20  7 18  0  0  0.0000000  %d  1G01\n", flag);
-            else
-                fprintf(file, "> 2020 07 18 00 00  0.0000000  %d  1\n", flag);
-            fprintf(file, "%s  28541439.844 5\n", version == 2 ? "" : "G01");
-            fclose(file);
-
-            err = rinex_load_file(input, &data);
-            ok(err == NULL && data.epoch_used == 1 && data.epoch[0].flag == '0' + flag,
-                "RINEX v%d still loads epoch flag %d", version, flag);
-            if (!err) free_rinex_data(&data);
-
-            remove(output);
-            snprintf(cmd, sizeof cmd, "%s %s %s >%s 2>&1",
-                RNX2SRNX_PATH, input, output, log);
-            ok(system(cmd) != 0 && file_size(output) == -1,
-                "v%d flag %d conversion fails before creating output", version, flag);
-            message = slurp(log);
-            ok(message && strstr(message, "cannot preserve epoch flag"),
-                "v%d flag %d has a specific diagnostic", version, flag);
-            free(message);
-
-            /* An unsuccessful conversion must also preserve existing output. */
-            file = fopen(output, "w");
-            if (!file) BAIL_OUT("cannot write output sentinel");
-            fputs("keep", file);
-            fclose(file);
-            ok(system(cmd) != 0 && file_size(output) == 4,
-                "v%d flag %d leaves existing output intact", version, flag);
-
-            if (version == 3)
-            {
-                snprintf(cmd, sizeof cmd, "%s --tuple=8 %s >%s 2>&1",
-                    RNX2SRNX_SEARCH_PATH, input, log);
-                ok(system(cmd) != 0, "search rejects flag %d with failure status", flag);
-                message = slurp(log);
-                ok(message && strstr(message, "cannot preserve epoch flag"),
-                    "search explains unsupported flag %d", flag);
-                free(message);
-            }
-            remove(input);
-            remove(output);
-            remove(log);
-        }
-    }
-}
-
 int main(void)
 {
-    test_epoch_flags();
     /* --- rinex_n_obs: no SIGBUS on valid v3, correct maxima. --- */
     {
         char out_path[256];

@@ -172,23 +172,6 @@ static int indicator_idx(unsigned char ch)
 
 #define SRNX_PAYLOAD_SIZE 16
 
-/** SRNX 1.0 has no representation for observation epoch flags 1 or 6.
- * Validate before creating an output file or reporting a measured size. */
-static int check_epoch_flags(const struct rinex_data *data, const char *filename)
-{
-    int ii;
-    for (ii = 0; ii < data->epoch_used; ++ii)
-    {
-        if (data->epoch[ii].flag != '0')
-        {
-            fprintf(stderr, "%s: SRNX cannot preserve epoch flag '%c' at epoch %d\n",
-                filename, data->epoch[ii].flag, ii + 1);
-            return -1;
-        }
-    }
-    return 0;
-}
-
 /* ---- Epoch span helper (shared) ---- */
 
 /** Check if two epochs are in the same span (same interval, no minute
@@ -1591,19 +1574,13 @@ static int rnx2srnx(const char input_name[], const char output_name[])
         return 1;
     }
 
-    if (check_epoch_flags(&data, input_name))
-    {
-        free_rinex_data(&data);
-        return 1;
-    }
-
     /* Pick an upper bound for the output size.  SRNX is compressed
      * relative to RINEX, so input_size + a small margin is a safe
      * ceiling for all realistic observation files.
      */
     if (!strcmp(input_name, "-"))
     {
-        cap = (size_t)data.obs[0] * 16 + data.file_header_len + 65536;
+        cap = (size_t)(data.obs ? data.obs[0] : 0) * 16 + data.file_header_len + 65536;
     }
     else if (stat(input_name, &st) != 0)
     {
@@ -1617,6 +1594,19 @@ static int rnx2srnx(const char input_name[], const char output_name[])
     }
     if (cap < 262144)
         cap = 262144;
+
+    /* EVTF preserves decoded text and can expand compressed input. */
+    for (sys_idx = 0; sys_idx < data.event_used; ++sys_idx)
+    {
+        size_t extra = (size_t)data.event[sys_idx].text_len + 128;
+        if (extra > SIZE_MAX - cap)
+        {
+            fprintf(stderr, "Exceptional records exceed output size limit\n");
+            free_rinex_data(&data);
+            return 1;
+        }
+        cap += extra;
+    }
 
     /* Open and size the output file. */
     fd = open(output_name, O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -2849,8 +2839,6 @@ static int ctx_load(struct file_ctx *ctx, const char *filename)
         return -1;
     }
     ctx->loaded = 1;
-    if (check_epoch_flags(&ctx->data, filename))
-        return -1;
 
     ctx->chunk_digest_len = rnx_digest_length(g_chunk_digest_id);
     if (ctx->chunk_digest_len < 0) ctx->chunk_digest_len = 0;
