@@ -171,7 +171,8 @@ static const char *srnx_errorf(struct srnx_reader *srnx, const char *fmt, ...)
     return srnx->errmsg;
 }
 
-/** Decodes a ULEB128 from \a *d, returning it and advancing \a *d. */
+/** Decodes a ULEB128 from \a *d, returning it and advancing \a *d.
+ * Bits beyond the 64th of an overlong (corrupt) encoding are ignored. */
 static uint64_t uleb128(const char **d)
 {
     uint64_t accum = 0;
@@ -180,7 +181,8 @@ static uint64_t uleb128(const char **d)
 
     do {
         ch = (unsigned char)*(*d)++;
-        accum |= (uint64_t)(ch & 127) << shift;
+        if (shift < 64)
+            accum |= (uint64_t)(ch & 127) << shift;
         shift += 7;
     } while (ch & 128);
 
@@ -2532,7 +2534,12 @@ int srnx_load(const char *filename, struct rinex_data *out)
         if (p_sv->obs_used == 0)
             continue;
 
-        /* Load observations for all signals. */
+        /* Load observations for all signals, one at a time so that each
+         * is decoded once and signals the satellite lacks are skipped.
+         * Missing signals (SRNX_UNKNOWN_CODE) leave their slots zeroed;
+         * srnx_get_obs_by_index() frees its own slot on failure.  Other
+         * errors are fatal.
+         */
         {
             int *idx;
             struct srnx_load_slot *slots;
@@ -2549,32 +2556,20 @@ int srnx_load(const char *filename, struct rinex_data *out)
             }
 
             for (jj = 0; jj < n_obs; ++jj)
-                idx[jj] = jj;
-
-            res = srnx_get_obs_by_index(srnx, name, n_obs, idx, slots);
-            if (res)
             {
-                /* Some signals may not exist; that's OK for
-                 * SRNX_UNKNOWN_CODE.  Other errors are fatal.
-                 */
-                if (res != SRNX_UNKNOWN_CODE)
+                idx[jj] = jj;
+                res = srnx_get_obs_by_index(srnx, name, 1, &idx[jj], &slots[jj]);
+                if (res && res != SRNX_UNKNOWN_CODE)
                 {
+                    while (--jj >= 0)
+                    {
+                        free(slots[jj].obs);
+                        free(slots[jj].lli);
+                        free(slots[jj].ssi);
+                    }
                     free(idx);
                     free(slots);
                     goto out;
-                }
-
-                /* Load signals one at a time so missing ones are skipped.
-                 * srnx_get_obs_by_index() already frees any buffers it
-                 * allocated before failing.
-                 */
-                for (jj = 0; jj < n_obs; ++jj)
-                {
-                    int one_idx = jj;
-
-                    res = srnx_get_obs_by_index(srnx, name, 1, &one_idx,
-                        &slots[jj]);
-                    /* else signal not present, leave as zeroed */
                 }
             }
 
