@@ -511,6 +511,113 @@ static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
     return dp[0];
 }
 
+/* ---- SOC2 delta-order search (shared) ---- */
+
+/* How SOC2 coding chooses a delta order (--order-search=).  ORDER_SCAN
+ * evaluates orders 0, 1, 2, ... until two consecutive orders fail to
+ * improve; ORDER_GUESS starts at the order with the smallest residual
+ * bit-length sum and moves to neighbouring orders while that improves. */
+enum order_search { ORDER_SCAN, ORDER_GUESS };
+static int g_order_search = ORDER_GUESS;
+
+/** Parses an --order-search= option; returns 1 if \a arg was one. */
+static int parse_order_search(const char *arg)
+{
+    if (strncmp(arg, "--order-search=", 15))
+        return 0;
+    if (!strcmp(arg + 15, "scan"))
+        g_order_search = ORDER_SCAN;
+    else if (!strcmp(arg + 15, "guess"))
+        g_order_search = ORDER_GUESS;
+    else
+    {
+        fprintf(stderr, "Invalid --order-search value '%s' (scan or guess)\n", arg + 15);
+        exit(EXIT_FAILURE);
+    }
+    return 1;
+}
+
+/** Cheap estimate of the best delta order for the \a count values whose
+ * delta matrix (stride \a count) is \a delta_matrix: the order minimizing
+ * the sum of the residuals' ZigZag bit lengths plus its initial state. */
+static int rice_order_guess(const int64_t *delta_matrix, int count)
+{
+    uint64_t best_bits = UINT64_MAX;
+    int ord, best = 0;
+
+    for (ord = 0; ord <= 7 && ord < count; ++ord)
+    {
+        const int64_t *vals = delta_matrix + (size_t)ord * count;
+        uint64_t bits = 8 * (uint64_t)ord;
+        int ii;
+        for (ii = 0; ii < count; ++ii)
+        {
+            uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
+            bits += uu ? 64 - __builtin_clzll(uu) : 0;
+        }
+        if (bits < best_bits)
+        {
+            best_bits = bits;
+            best = ord;
+        }
+    }
+    return best;
+}
+
+/** Chooses a delta order for \a count values with delta matrix
+ * \a delta_matrix, per g_order_search.  \a eval(ctx, ord) returns the
+ * byte cost of coding with delta order \a ord, excluding its initial
+ * state.  Stores the chosen order's cost (excluding initial state) in
+ * \a *out_cost and returns the order. */
+static int rice_select_order(const int64_t *delta_matrix, int count,
+    int64_t (*eval)(void *ctx, int ord), void *ctx, int64_t *out_cost)
+{
+    int64_t best_total, best_cost;
+    int best_order, ord, dir, no_improve;
+
+    if (g_order_search == ORDER_SCAN)
+    {
+        best_order = 0;
+        best_cost = best_total = eval(ctx, 0);
+        no_improve = 0;
+        for (ord = 1; ord <= 7 && ord < count; ++ord)
+        {
+            int64_t cost = eval(ctx, ord);
+            if (ord + cost < best_total)
+            {
+                best_total = ord + cost;
+                best_cost = cost;
+                best_order = ord;
+                no_improve = 0;
+            }
+            else if (++no_improve >= 2)
+                break;
+        }
+    }
+    else
+    {
+        int guess = rice_order_guess(delta_matrix, count);
+        best_order = guess;
+        best_cost = eval(ctx, guess);
+        best_total = guess + best_cost;
+        for (dir = -1; dir <= 1; dir += 2)
+        {
+            for (ord = guess + dir; ord >= 0 && ord <= 7 && ord < count; ord += dir)
+            {
+                int64_t cost = eval(ctx, ord);
+                if (ord + cost >= best_total)
+                    break;
+                best_total = ord + cost;
+                best_cost = cost;
+                best_order = ord;
+            }
+        }
+    }
+
+    *out_cost = best_cost;
+    return best_order;
+}
+
 /* ---- SOC2 predictor planning (shared) ----
  *
  * Following the SOC2 encoder guidance in Succinct_RINEX.md: each
@@ -1957,39 +2064,37 @@ static struct rice_scratch enc_rice_scratch(struct rnx2srnx_scratch *scratch)
     return rs;
 }
 
-/** Select the delta order minimizing the split-Rice cost of the \a count
- * values whose delta matrix is \a delta_matrix; like select_delta_order(),
+/* Context for select_delta_order_rice()'s order evaluations. */
+struct rice_order_ctx
+{
+    struct rnx2srnx_scratch *scratch;
+    const int64_t *delta_matrix;
+    int count;
+};
+
+static int64_t rice_order_eval(void *ctx, int ord)
+{
+    struct rice_order_ctx *oc = ctx;
+    struct rice_scratch rs = enc_rice_scratch(oc->scratch);
+    return rice_dp(&rs, oc->delta_matrix + (size_t)ord * oc->count, oc->count,
+        rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, NULL);
+}
+
+/** Select the delta order for the split-Rice coding of the \a count values
+ * whose delta matrix is \a delta_matrix, per --order-search;
  * \a *out_choices receives the chosen order's block choices. */
 static int select_delta_order_rice(struct rnx2srnx_scratch *scratch,
     const int64_t *delta_matrix, int count, struct block_choice **out_choices)
 {
+    struct rice_order_ctx oc = { scratch, delta_matrix, count };
     struct rice_scratch rs = enc_rice_scratch(scratch);
-    struct block_choice *best_buf = scratch->choices_a;
-    struct block_choice *cand_buf = scratch->choices_b;
-    int64_t best_cost;
-    int best_order = 0, ord, no_improve = 0;
+    int64_t cost;
+    int order = rice_select_order(delta_matrix, count, rice_order_eval, &oc, &cost);
 
-    best_cost = rice_dp(&rs, delta_matrix, count, rnx_rice_block_sizes,
-        RNX_N_BLOCK_SIZES, best_buf);
-    for (ord = 1; ord <= 7 && ord < count; ++ord)
-    {
-        int64_t cost = ord + rice_dp(&rs, delta_matrix + (size_t)ord * count,
-            count, rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, cand_buf);
-        if (cost < best_cost)
-        {
-            struct block_choice *tmp = best_buf;
-            best_buf = cand_buf;
-            cand_buf = tmp;
-            best_cost = cost;
-            best_order = ord;
-            no_improve = 0;
-        }
-        else if (++no_improve >= 2)
-            break;
-    }
-
-    *out_choices = best_buf;
-    return best_order;
+    rice_dp(&rs, delta_matrix + (size_t)order * count, count,
+        rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, scratch->choices_a);
+    *out_choices = scratch->choices_a;
+    return order;
 }
 
 /** Write a split-Rice block of \a m values with Rice parameter \a rr:
@@ -2940,9 +3045,11 @@ static int run_check(const char *input, const char *output)
 static void usage(FILE *out, const char *argv0)
 {
     fprintf(out, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
-        "          [--max-sleb-run=<N>] [--socd] [--check] [--] <input.rnx|-> [output.srnx]\n"
+        "          [--max-sleb-run=<N>] [--socd] [--order-search=scan|guess] [--check]\n"
+        "          [--] <input.rnx|-> [output.srnx]\n"
         "'-' as input reads from stdin and requires an explicit output name.\n"
-        "--socd writes revision 1.0 SOCD chunks instead of SOC2.\n",
+        "--socd writes revision 1.0 SOCD chunks instead of SOC2.\n"
+        "--order-search chooses how SOC2 delta orders are searched (default: guess).\n",
         argv0);
 }
 
@@ -2983,6 +3090,8 @@ int main(int argc, char *argv[])
             g_use_socd = 1;
             continue;
         }
+        if (parse_order_search(arg))
+            continue;
         if (!strcmp(arg, "--help"))
         {
             usage(stdout, argv[0]);
@@ -3376,38 +3485,34 @@ static int64_t dp_core_rice(struct scratch *scratch, const int64_t *vals,
     return rice_dp(&rs, vals, count, g_cand, g_n_cand, NULL);
 }
 
-/** Select the delta order minimizing the split-Rice cost of the whole
+/* Context for select_delta_order_rice()'s order evaluations. */
+struct rice_order_ctx
+{
+    struct scratch *scratch;
+    const int64_t *delta_matrix;
+    int count;
+};
+
+static int64_t rice_order_eval(void *ctx, int ord)
+{
+    struct rice_order_ctx *oc = ctx;
+    return dp_core_rice(oc->scratch, oc->delta_matrix + (size_t)ord * oc->count,
+        oc->count);
+}
+
+/** Select the delta order for the split-Rice coding of the whole
  * \a count-value sequence whose delta matrix (stride \a count) is
- * \a delta_matrix; mirrors select_delta_order().  \a *out_best_dp_cost
- * receives the DP-only cost for the chosen order. */
+ * \a delta_matrix, per --order-search.  \a *out_best_dp_cost receives the
+ * DP-only cost for the chosen order. */
 static int select_delta_order_rice(struct scratch *scratch,
     const int64_t *delta_matrix, int count, int64_t *out_best_dp_cost)
 {
-    int best_order = 0;
-    int64_t best_dp, best_total;
-    int ord, no_improve;
-
-    best_dp = dp_core_rice(scratch, delta_matrix, count);
-    best_total = best_dp;
-    no_improve = 0;
-    for (ord = 1; ord <= 7 && ord < count; ++ord)
-    {
-        int64_t dp_cost = dp_core_rice(scratch,
-            delta_matrix + (size_t)ord * count, count);
-        int64_t total = (int64_t)ord + dp_cost;
-        if (total < best_total)
-        {
-            best_total = total;
-            best_dp = dp_cost;
-            best_order = ord;
-            no_improve = 0;
-        }
-        else if (++no_improve >= 2)
-            break;
-    }
+    struct rice_order_ctx oc = { scratch, delta_matrix, count };
+    int64_t cost;
+    int order = rice_select_order(delta_matrix, count, rice_order_eval, &oc, &cost);
     if (out_best_dp_cost)
-        *out_best_dp_cost = best_dp;
-    return best_order;
+        *out_best_dp_cost = cost;
+    return order;
 }
 
 /* Precompute bit-widths for all 8 delta orders into scratch->all_bw
@@ -4666,6 +4771,7 @@ static void usage(FILE *out, const char *argv0)
     fprintf(out,
         "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
         "          [--tuple=N1,N2,...] [--tuples-file=PATH] [--soc2] [--fixed-order]\n"
+        "          [--order-search=scan|guess]\n"
         "          [--max-sleb-run=<N>] [--max-block=<N>] [--timing] [--help] <input> ...\n",
         argv0);
 }
@@ -4723,6 +4829,8 @@ int main(int argc, char *argv[])
             g_fixed_order = 1;
             continue;
         }
+        if (parse_order_search(arg))
+            continue;
         if (!strncmp(arg, "--max-sleb-run=", 15))
         {
             char *end;
