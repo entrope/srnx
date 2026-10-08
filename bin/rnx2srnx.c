@@ -546,6 +546,41 @@ static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
 enum order_search { ORDER_SCAN, ORDER_GUESS };
 static int g_order_search = ORDER_GUESS;
 
+/* With ORDER_GUESS, a neighbouring delta order is tried only if its
+ * bit-length estimate is within this fraction of the guess's
+ * (--order-margin=<percent>); negative ("off") means always try it. */
+static double g_order_margin = 0.05;
+
+/* SOC2 coding with and without a predictor are both coded in full unless
+ * one's estimate beats the other's by more than this fraction
+ * (--pred-margin=<percent>); negative ("off") means always code both. */
+static double g_pred_margin = 0.05;
+
+/** Parses a --<name>=<percent> margin option into \a *out (as a
+ * fraction; "off" is negative); returns 1 if \a arg was that option. */
+static int parse_margin(const char *arg, const char *prefix, double *out)
+{
+    size_t len = strlen(prefix);
+    char *end;
+    double value;
+
+    if (strncmp(arg, prefix, len))
+        return 0;
+    if (!strcmp(arg + len, "off"))
+    {
+        *out = -1;
+        return 1;
+    }
+    value = strtod(arg + len, &end);
+    if (end == arg + len || *end != '\0' || value < 0)
+    {
+        fprintf(stderr, "Invalid %s value '%s' (percent or off)\n", prefix, arg + len);
+        exit(EXIT_FAILURE);
+    }
+    *out = value / 100;
+    return 1;
+}
+
 /** Parses an --order-search= option; returns 1 if \a arg was one. */
 static int parse_order_search(const char *arg)
 {
@@ -565,12 +600,17 @@ static int parse_order_search(const char *arg)
 
 /** Cheap estimate of the best delta order for the \a count values whose
  * delta matrix (stride \a count) is \a delta_matrix: the order minimizing
- * the sum of the residuals' ZigZag bit lengths plus its initial state. */
-static int rice_order_guess(const int64_t *delta_matrix, int count)
+ * the sum of the residuals' ZigZag bit lengths plus its initial state.
+ * If \a est is not NULL, est[ord] receives each order's estimate in bits
+ * (UINT64_MAX for orders that do not apply). */
+static int rice_order_guess(const int64_t *delta_matrix, int count, uint64_t *est)
 {
     uint64_t best_bits = UINT64_MAX;
     int ord, best = 0;
 
+    if (est)
+        for (ord = 0; ord < 8; ++ord)
+            est[ord] = UINT64_MAX;
     for (ord = 0; ord <= 7 && ord < count; ++ord)
     {
         const int64_t *vals = delta_matrix + (size_t)ord * count;
@@ -581,6 +621,8 @@ static int rice_order_guess(const int64_t *delta_matrix, int count)
             uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
             bits += uu ? 64 - __builtin_clzll(uu) : 0;
         }
+        if (est)
+            est[ord] = bits;
         if (bits < best_bits)
         {
             best_bits = bits;
@@ -628,7 +670,8 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
     }
     else
     {
-        int guess = rice_order_guess(delta_matrix, count);
+        uint64_t est[8];
+        int guess = rice_order_guess(delta_matrix, count, est);
         best_order = guess;
         best_cost = eval(ctx, guess);
         best_total = guess + best_cost;
@@ -638,7 +681,11 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
         {
             for (ord = guess + dir; ord >= 0 && ord <= 7 && ord < count; ord += dir)
             {
-                int64_t cost = eval(ctx, ord);
+                int64_t cost;
+                if (g_order_margin >= 0
+                    && (double)est[ord] > (double)est[guess] * (1 + g_order_margin))
+                    break;
+                cost = eval(ctx, ord);
                 if (ord + cost >= best_total)
                     break;
                 best_total = ord + cost;
@@ -2296,6 +2343,24 @@ static void encode_soc2_packed(struct wbuf *out, struct rnx2srnx_scratch *scratc
     wbuf_free(&packed);
 }
 
+/** Cheap estimate, in bytes, of SOC2 packed data for \a seq[]: the
+ * residual bit lengths at the guessed delta order, plus marker blocks. */
+static double soc2_estimate(struct rnx2srnx_scratch *scratch,
+    const int64_t *seq, const int64_t *obs, int count, int64_t scale)
+{
+    uint64_t est[8];
+    int ii, n_coded = 0;
+
+    for (ii = 0; ii < count; ++ii)
+        if (seq[ii] > SOC2_UNPRED)
+            scratch->present_scaled[n_coded++] = seq[ii];
+    if (n_coded == 0)
+        return (double)soc2_marker_bytes(seq, obs, count, scale);
+    compute_delta_matrix(scratch->delta_matrix, scratch->present_scaled, n_coded);
+    ii = rice_order_guess(scratch->delta_matrix, n_coded, est);
+    return est[ii] / 8.0 + (double)soc2_marker_bytes(seq, obs, count, scale);
+}
+
 /** Write a ULEB128-length-prefixed RLE of \a sym[] over \a n_sym symbols. */
 static void wbuf_rle_symbols(struct wbuf *wb, const unsigned char *sym,
     int count, int n_sym)
@@ -2338,7 +2403,7 @@ static size_t write_soc2_chunk(struct mmbuf *mm,
     const char *lli_arr, *ssi_arr;
     unsigned char *sym;
     size_t offset, ssi_plain, ssi_pred = SIZE_MAX, cost[2];
-    int obs_count, ii, bad, n_cand, best, ssi_ref = 0;
+    int obs_count, ii, bad, n_cand, best, ssi_ref = 0, coded[2];
     int64_t obs_gcd;
 
     if (sv->start[sig_idx] < 0)
@@ -2380,20 +2445,39 @@ static size_t write_soc2_chunk(struct mmbuf *mm,
     }
 
     /* Code the values without and (if planned) with the predictor, and
-     * keep the smaller. */
+     * keep the smaller.  With --pred-margin, a coding whose estimate is
+     * clearly worse than the other's is not coded at all. */
     pred[0] = &none;
     pred[1] = &plan->pred;
     n_cand = plan->pred.kind != SRNX_PRED_NONE ? 2 : 1;
-    best = 0;
     for (ii = 0; ii < n_cand; ++ii)
     {
-        int64_t *seq = scratch->seq + (size_t)ii * scratch->cap;
-        soc2_build_seq(seq, obs_arr, obs_count, obs_gcd, pred[ii],
+        soc2_build_seq(scratch->seq + (size_t)ii * scratch->cap, obs_arr,
+            obs_count, obs_gcd, pred[ii],
             ii ? data->obs + sv->start[pred[ii]->ref] : NULL, t7);
+        coded[ii] = 1;
+    }
+    if (n_cand == 2 && g_pred_margin >= 0)
+    {
+        double est[2];
+        for (ii = 0; ii < 2; ++ii)
+            est[ii] = soc2_estimate(scratch, scratch->seq + (size_t)ii * scratch->cap,
+                obs_arr, obs_count, obs_gcd) + soc2_pred_bytes(pred[ii]);
+        if (est[1] < est[0] * (1 - g_pred_margin))
+            coded[0] = 0;
+        else if (est[0] < est[1] * (1 - g_pred_margin))
+            coded[1] = 0;
+    }
+    best = -1;
+    for (ii = 0; ii < n_cand; ++ii)
+    {
         wbuf_init(&packed[ii]);
-        encode_soc2_packed(&packed[ii], scratch, seq, obs_arr, obs_count, obs_gcd);
+        if (!coded[ii])
+            continue;
+        encode_soc2_packed(&packed[ii], scratch, scratch->seq + (size_t)ii * scratch->cap,
+            obs_arr, obs_count, obs_gcd);
         cost[ii] = soc2_pred_bytes(pred[ii]) + packed[ii].used;
-        if (cost[ii] < cost[best])
+        if (best < 0 || cost[ii] < cost[best])
             best = ii;
     }
 
@@ -3091,11 +3175,15 @@ static int run_check(const char *input, const char *output)
 static void usage(FILE *out, const char *argv0)
 {
     fprintf(out, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
-        "          [--max-sleb-run=<N>] [--socd] [--order-search=scan|guess] [--check]\n"
+        "          [--max-sleb-run=<N>] [--socd] [--order-search=scan|guess]\n"
+        "          [--order-margin=<percent|off>] [--pred-margin=<percent|off>] [--check]\n"
         "          [--] <input.rnx|-> [output.srnx]\n"
         "'-' as input reads from stdin and requires an explicit output name.\n"
         "--socd writes revision 1.0 SOCD chunks instead of SOC2.\n"
-        "--order-search chooses how SOC2 delta orders are searched (default: guess).\n",
+        "--order-search chooses how SOC2 delta orders are searched (default: guess).\n"
+        "--order-margin=<percent|off> and --pred-margin=<percent|off> (default: 5)\n"
+        "  skip delta orders, or SOC2 codings with or without a predictor, whose\n"
+        "  estimates are worse by more than that margin; off codes them all.\n",
         argv0);
 }
 
@@ -3136,7 +3224,9 @@ int main(int argc, char *argv[])
             g_use_socd = 1;
             continue;
         }
-        if (parse_order_search(arg))
+        if (parse_order_search(arg)
+            || parse_margin(arg, "--order-margin=", &g_order_margin)
+            || parse_margin(arg, "--pred-margin=", &g_pred_margin))
             continue;
         if (!strcmp(arg, "--help"))
         {
@@ -4817,7 +4907,7 @@ static void usage(FILE *out, const char *argv0)
     fprintf(out,
         "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
         "          [--tuple=N1,N2,...] [--tuples-file=PATH] [--soc2] [--fixed-order]\n"
-        "          [--order-search=scan|guess]\n"
+        "          [--order-search=scan|guess] [--order-margin=<percent|off>]\n"
         "          [--max-sleb-run=<N>] [--max-block=<N>] [--timing] [--help] <input> ...\n",
         argv0);
 }
@@ -4875,7 +4965,9 @@ int main(int argc, char *argv[])
             g_fixed_order = 1;
             continue;
         }
-        if (parse_order_search(arg))
+        if (parse_order_search(arg)
+            || parse_margin(arg, "--order-margin=", &g_order_margin)
+            || parse_margin(arg, "--pred-margin=", &g_pred_margin))
             continue;
         if (!strncmp(arg, "--max-sleb-run=", 15))
         {
