@@ -130,6 +130,7 @@ typedef struct {
     uint64_t    soc2_count;
     uint64_t    soc2_kind_count[4];  /* by predictor kind; [3] = extended */
     uint64_t    soc2_ssi_ref_count;
+    uint64_t    soc2_order_count[3][8]; /* [predictor kind][delta order] */
     uint64_t    total_epochs;
     scale_entry scales[256];
     int         n_scales;
@@ -382,6 +383,25 @@ static void scan_file(const char *filename, file_stats_t *stats)
             stats->soc2_kind_count[mode & 3]++;
             if (mode >> 2)
                 stats->soc2_ssi_ref_count++;
+            if ((mode & 3) < 3)
+            {
+                /* Skip the SSIs and predictor fields to the delta order. */
+                uint64_t ssi_len = read_uleb128(&rptr);
+                rptr += ssi_len;
+                if ((mode & 3) != 0)
+                {
+                    read_uleb128(&rptr);  /* reference */
+                    read_sleb128(&rptr);  /* num */
+                    read_uleb128(&rptr);  /* den */
+                    if ((mode & 3) == 2)
+                    {
+                        read_uleb128(&rptr);  /* stencil */
+                        read_uleb128(&rptr);  /* max_span */
+                    }
+                }
+                read_uleb128(&rptr);      /* packed length */
+                stats->soc2_order_count[mode & 3][read_uleb128(&rptr) & 7]++;
+            }
         }
         else
         {
@@ -406,6 +426,9 @@ static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
     for (int i = 0; i < 4; i++)
         agg->soc2_kind_count[i] += stats->soc2_kind_count[i];
     agg->soc2_ssi_ref_count += stats->soc2_ssi_ref_count;
+    for (int k = 0; k < 3; k++)
+        for (int i = 0; i < 8; i++)
+            agg->soc2_order_count[k][i] += stats->soc2_order_count[k][i];
     agg->total_epochs += stats->total_epochs;
 
     for (int i = 0; i < stats->n_scales; i++)
@@ -473,6 +496,13 @@ static void print_summary(const file_stats_t *agg)
             agg->soc2_kind_count[0], agg->soc2_kind_count[1],
             agg->soc2_kind_count[2], agg->soc2_kind_count[3]);
         printf("    SSI references: %" PRIu64 "\n", agg->soc2_ssi_ref_count);
+        for (int k = 0; k < 3; k++)
+        {
+            printf("    delta orders (predictor kind %d):", k);
+            for (int i = 0; i < 8; i++)
+                printf(" %" PRIu64, agg->soc2_order_count[k][i]);
+            printf("\n");
+        }
     }
 
     printf("\nTotal epochs: %" PRIu64 "\n", agg->total_epochs);
