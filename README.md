@@ -187,6 +187,19 @@ The SRNX major version remains 1. Older readers that assume EVTF only
 contains flags 2 through 5 need updating to interpret the additional
 record types.
 
+By default, observation columns are written as revision 1.1 `SOC2`
+chunks (minor version 1): each signal is predicted from a carrier phase
+of the same satellite when that is smaller, signal-strength indicators
+may be predicted from a signal-strength observation, and values use
+split Golomb-Rice blocks.  Referenced chunks are written before the
+chunks that use them.  `--socd` writes revision 1.0 `SOCD` chunks
+instead, for readers that do not support revision 1.1.
+
+The library reads both.  A `SOC2` column is decoded completely when it
+is opened (its blocks hold up to 2048 values, and predictions need the
+reference column), and each `srnx_reader` caches the reference columns
+it decodes until it is closed.
+
 ### rnx2srnx_search
 
 Compression-measurement clone of `rnx2srnx` used to evaluate which set

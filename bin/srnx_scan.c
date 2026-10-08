@@ -127,6 +127,9 @@ typedef struct {
     int         evtf_count;
     int         sate_count;
     uint64_t    socd_count;
+    uint64_t    soc2_count;
+    uint64_t    soc2_kind_count[4];  /* by predictor kind; [3] = extended */
+    uint64_t    soc2_ssi_ref_count;
     uint64_t    total_epochs;
     scale_entry scales[256];
     int         n_scales;
@@ -367,6 +370,19 @@ static void scan_file(const char *filename, file_stats_t *stats)
                     rptr - packed_end);
             }
         }
+        else if (memcmp(fourcc, "SOC2", 4) == 0)
+        {
+            /* Summarize the mode value; split-Rice blocks are not walked. */
+            stats->soc2_count++;
+            rptr += 8;               /* observation name */
+            read_uleb128(&rptr);     /* count-minus-1 */
+            uint64_t lli_len = read_uleb128(&rptr);
+            rptr += lli_len;
+            uint64_t mode = read_uleb128(&rptr);
+            stats->soc2_kind_count[mode & 3]++;
+            if (mode >> 2)
+                stats->soc2_ssi_ref_count++;
+        }
         else
         {
             printf("  WARNING: unrecognized chunk %.4s at offset %" PRId64
@@ -386,6 +402,10 @@ static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
     agg->evtf_count   += stats->evtf_count;
     agg->sate_count   += stats->sate_count;
     agg->socd_count   += stats->socd_count;
+    agg->soc2_count   += stats->soc2_count;
+    for (int i = 0; i < 4; i++)
+        agg->soc2_kind_count[i] += stats->soc2_kind_count[i];
+    agg->soc2_ssi_ref_count += stats->soc2_ssi_ref_count;
     agg->total_epochs += stats->total_epochs;
 
     for (int i = 0; i < stats->n_scales; i++)
@@ -445,6 +465,15 @@ static void print_summary(const file_stats_t *agg)
     printf("  EVTF: %d\n", agg->evtf_count);
     printf("  SATE: %d\n", agg->sate_count);
     printf("  SOCD: %" PRIu64 "\n", agg->socd_count);
+    printf("  SOC2: %" PRIu64 "\n", agg->soc2_count);
+    if (agg->soc2_count > 0)
+    {
+        printf("    predictor kinds: none %" PRIu64 ", value %" PRIu64
+            ", rate %" PRIu64 ", extended %" PRIu64 "\n",
+            agg->soc2_kind_count[0], agg->soc2_kind_count[1],
+            agg->soc2_kind_count[2], agg->soc2_kind_count[3]);
+        printf("    SSI references: %" PRIu64 "\n", agg->soc2_ssi_ref_count);
+    }
 
     printf("\nTotal epochs: %" PRIu64 "\n", agg->total_epochs);
 

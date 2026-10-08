@@ -47,6 +47,26 @@ struct srnx_system_info
     int codes_len;
 };
 
+/** srnx_column is a fully decoded observation column, cached by its
+ * reader so that SOC2 chunks predicted from it need not decode it again.
+ */
+struct srnx_column
+{
+    /** Next cached column. */
+    struct srnx_column *next;
+
+    /** Satellite and observation index of this column. */
+    struct srnx_satellite_name name;
+    int obs_idx;
+
+    /** Predictor kind of the column's chunk (0 for SOCD). */
+    int kind;
+
+    /** Number of values, and the values (INT64_MIN when absent). */
+    uint64_t n_values;
+    int64_t *values;
+};
+
 /* Doc comment in srnx.h. */
 struct srnx_reader
 {
@@ -99,6 +119,17 @@ struct srnx_reader
      */
     struct srnx_system_info sys_info[33];
 
+    /** Decoded columns cached for SOC2 predictions and SSI references,
+     * hashed by satellite and observation index. */
+    struct srnx_column *columns[64];
+
+    /** Epoch timestamps (1e-7 s, from rnx_epoch_time_e7()) for SOC2 rate
+     * predictors, or NULL until first needed. */
+    int64_t *epoch_t7;
+
+    /** Number of entries in #epoch_t7. */
+    size_t epoch_t7_len;
+
     /** errmsg describes why a read failed. */
     char errmsg[160];
 };
@@ -149,6 +180,27 @@ struct srnx_obs_reader
      * and so forth, up to \a delta[order] .
      */
     int64_t delta[8];
+
+    /** For a SOC2 chunk: every decoded observation value (#n_values
+     * entries, INT64_MIN when absent); NULL for a SOCD chunk, which is
+     * decoded incrementally into #obs instead. */
+    int64_t *column;
+
+    /** For a SOC2 chunk: next index into #column. */
+    uint64_t column_idx;
+
+    /** For a SOC2 chunk: predictor kind. */
+    int soc2_kind;
+
+    /** For a SOC2 chunk: 1 + the SSI reference's observation index, or 0. */
+    int ssi_ref;
+
+    /** For a SOC2 chunk: offset of the SSI RLE's length, relative to
+     * \a parent->data. */
+    uint64_t ssi_offset;
+
+    /** Satellite whose observations this reader holds. */
+    struct srnx_satellite_name name;
 
     /** Decoded observation values. */
     int64_t obs[256];
@@ -558,6 +610,12 @@ int srnx_open_buffer(
         res = SRNX_CORRUPT;
         goto out;
     }
+    if (ul > 1)
+    {
+        srnx_errorf(srnx, "unsupported minor version %"PRIu64, ul);
+        res = SRNX_BAD_MAJOR;
+        goto out;
+    }
     srnx->minor = ul;
 
     /* Read per-chunk digest identifer. */
@@ -683,6 +741,18 @@ struct srnx_reader *srnx_reset(struct srnx_reader **p_srnx)
         {
             free(srnx->sys_info[ul].code);
         }
+
+        for (ul = 0; ul < 64; ++ul)
+        {
+            while (srnx->columns[ul])
+            {
+                struct srnx_column *col = srnx->columns[ul];
+                srnx->columns[ul] = col->next;
+                free(col->values);
+                free(col);
+            }
+        }
+        free(srnx->epoch_t7);
     }
     else
     {
@@ -1408,12 +1478,12 @@ static int64_t srnx_find_socd(
             return SRNX_UNKNOWN_CODE;
         }
 
-        /* Validate SOCD block is for the expected SV and observation. */
+        /* Validate SOCD or SOC2 block is for the expected SV and observation. */
         s64 += sate_offset;
         payload = srnx->data + s64;
-        if (memcmp(payload, "SOCD", 4))
+        if (memcmp(payload, "SOCD", 4) && memcmp(payload, "SOC2", 4))
         {
-            srnx_errorf(srnx, "expected SOCD at %"PRId64" but got '\\x%02x%02x%02x%02x' (%.4s)",
+            srnx_errorf(srnx, "expected SOCD or SOC2 at %"PRId64" but got '\\x%02x%02x%02x%02x' (%.4s)",
                 s64, payload[0], payload[1], payload[2], payload[3], payload);
             return SRNX_CORRUPT;
         }
@@ -1474,15 +1544,810 @@ static int prime_delta_decoder(
     return 0;
 }
 
-/* Doc comment in srnx.h. */
-int srnx_open_obs_by_index(
+static int decode_observations(struct srnx_obs_reader *p_socd);
+static int srnx_open_obs_internal(
     struct srnx_reader *srnx,
     struct srnx_satellite_name name,
     int obs_idx,
+    int depth,
+    struct srnx_obs_reader **p_rdr
+);
+
+/** Allocates \a *p_rdr if it is NULL, else releases its SOC2 column;
+ * then zeroes it.
+ */
+static int obs_reader_reset(
+    struct srnx_reader *srnx,
     struct srnx_obs_reader **p_rdr
 )
 {
-    const char *rptr;
+    if (!*p_rdr)
+    {
+        *p_rdr = malloc(sizeof **p_rdr);
+        if (!*p_rdr)
+        {
+            srnx_errorf(srnx, "allocation failed for obs reader");
+            return ENOMEM;
+        }
+    }
+    else
+    {
+        free((*p_rdr)->column);
+    }
+    memset(*p_rdr, 0, sizeof **p_rdr);
+    return 0;
+}
+
+/** SOC2 predictor fields; see the SOC2 section of Succinct_RINEX.md. */
+struct soc2_pred
+{
+    int kind;
+    int ref;
+    int64_t num;
+    uint64_t den;
+    int stencil;
+    uint64_t max_span;
+};
+
+/** Computes the SOC2 prediction for satellite epoch \a kk.
+ *
+ * \param[in] pr Predictor (kind SRNX_PRED_VALUE or SRNX_PRED_RATE).
+ * \param[in] ref Reference values for all \a count satellite epochs.
+ * \param[in] t7 Satellite epoch times (1e-7 s); used by rate predictors.
+ * \param[in] count Number of satellite epochs.
+ * \param[in] kk Satellite epoch to predict.
+ * \param[in] scale Observation scale.
+ * \param[out] p_q Receives the prediction reduced to \a scale.
+ * \returns Nonzero if a prediction is available at \a kk.
+ */
+static inline int soc2_predict(
+    const struct soc2_pred *pr,
+    const int64_t *ref,
+    const int64_t *t7,
+    uint64_t count,
+    uint64_t kk,
+    int64_t scale,
+    int64_t *p_q
+)
+{
+    int64_t pp;
+
+    if (pr->kind == SRNX_PRED_VALUE)
+    {
+        if (ref[kk] == INT64_MIN)
+            return 0;
+        pp = rnx_rdiv128((__int128)ref[kk] * pr->num, (__int128)pr->den);
+    }
+    else
+    {
+        uint64_t aa, bb;
+        int64_t dt;
+
+        if (pr->stencil != 2 && kk == 0)
+            return 0;
+        aa = pr->stencil == 2 ? kk : kk - 1;
+        bb = pr->stencil == 0 ? kk : kk + 1;
+        if (bb >= count || ref[aa] == INT64_MIN || ref[bb] == INT64_MIN)
+            return 0;
+        dt = t7[bb] - t7[aa];
+        if (dt <= 0 || (pr->max_span && (uint64_t)dt > pr->max_span))
+            return 0;
+        pp = rnx_rdiv128(((__int128)ref[bb] - ref[aa]) * 10000000 * pr->num,
+            (__int128)dt * pr->den);
+    }
+    *p_q = scale == 1 ? pp : rnx_rdiv128(pp, scale);
+    return 1;
+}
+
+/** Advances an order-\a order delta decoder by last-level delta \a delta
+ * and returns the decoded value (as undelta_and_scale() does for SOCD).
+ */
+static int64_t soc2_undelta(int64_t *state, int order, int64_t delta)
+{
+    int jj;
+
+    if (order == 0)
+        return delta;
+    state[order - 1] = (int64_t)((uint64_t)state[order - 1] + (uint64_t)delta);
+    for (jj = order - 2; jj >= 0; --jj)
+        state[jj] = (int64_t)((uint64_t)state[jj] + (uint64_t)state[jj + 1]);
+    return state[0];
+}
+
+/** Converts \a n last-level deltas in \a vals[] to values in place,
+ * advancing the order-\a order delta decoder \a state.
+ */
+static void soc2_undelta_block(int64_t *state, int order, int64_t *vals, int n)
+{
+    uint64_t y0, y1, y2, y3, y4, y5, y6;
+    int ii;
+
+    if (order == 0)
+        return;
+    y0 = state[0];
+    y1 = order > 1 ? (uint64_t)state[1] : 0;
+    y2 = order > 2 ? (uint64_t)state[2] : 0;
+    y3 = order > 3 ? (uint64_t)state[3] : 0;
+    y4 = order > 4 ? (uint64_t)state[4] : 0;
+    y5 = order > 5 ? (uint64_t)state[5] : 0;
+    y6 = order > 6 ? (uint64_t)state[6] : 0;
+    switch (order)
+    {
+    case 1:
+        for (ii = 0; ii < n; ++ii)
+            vals[ii] = (int64_t)(y0 += (uint64_t)vals[ii]);
+        break;
+    case 2:
+        for (ii = 0; ii < n; ++ii)
+        {
+            y1 += (uint64_t)vals[ii];
+            vals[ii] = (int64_t)(y0 += y1);
+        }
+        break;
+    case 3:
+        for (ii = 0; ii < n; ++ii)
+        {
+            y2 += (uint64_t)vals[ii];
+            y1 += y2;
+            vals[ii] = (int64_t)(y0 += y1);
+        }
+        break;
+    case 4:
+        for (ii = 0; ii < n; ++ii)
+        {
+            y3 += (uint64_t)vals[ii];
+            y2 += y3; y1 += y2;
+            vals[ii] = (int64_t)(y0 += y1);
+        }
+        break;
+    case 5:
+        for (ii = 0; ii < n; ++ii)
+        {
+            y4 += (uint64_t)vals[ii];
+            y3 += y4; y2 += y3; y1 += y2;
+            vals[ii] = (int64_t)(y0 += y1);
+        }
+        break;
+    case 6:
+        for (ii = 0; ii < n; ++ii)
+        {
+            y5 += (uint64_t)vals[ii];
+            y4 += y5; y3 += y4; y2 += y3; y1 += y2;
+            vals[ii] = (int64_t)(y0 += y1);
+        }
+        break;
+    case 7:
+        for (ii = 0; ii < n; ++ii)
+        {
+            y6 += (uint64_t)vals[ii];
+            y5 += y6; y4 += y5; y3 += y4; y2 += y3; y1 += y2;
+            vals[ii] = (int64_t)(y0 += y1);
+        }
+        break;
+    }
+    state[0] = (int64_t)y0;
+    if (order > 1) state[1] = (int64_t)y1;
+    if (order > 2) state[2] = (int64_t)y2;
+    if (order > 3) state[3] = (int64_t)y3;
+    if (order > 4) state[4] = (int64_t)y4;
+    if (order > 5) state[5] = (int64_t)y5;
+    if (order > 6) state[6] = (int64_t)y6;
+}
+
+/** Reads every value of an open SOCD reader into \a out[n_values]. */
+static int read_socd_values(
+    struct srnx_obs_reader *p_socd,
+    int64_t *out,
+    uint64_t n_values
+)
+{
+    uint64_t jj, count;
+    int res;
+
+    for (jj = 0; jj < n_values; )
+    {
+        res = decode_observations(p_socd);
+        if (res)
+            return res;
+        if (!p_socd->obs_valid)
+        {
+            srnx_errorf(p_socd->parent, "no valid observations");
+            return SRNX_CORRUPT;
+        }
+        count = p_socd->obs_valid;
+        if (count > n_values - jj)
+            count = n_values - jj;
+        memcpy(out + jj, p_socd->obs, sizeof(int64_t) * count);
+        jj += count;
+    }
+    return 0;
+}
+
+/** Returns the column-cache bucket for satellite \a name, index \a obs_idx. */
+static struct srnx_column **column_bucket(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int obs_idx
+)
+{
+    unsigned hash = ((unsigned char)name.name[0] * 31u
+        + (unsigned char)name.name[1]) * 31u + (unsigned char)name.name[2];
+    return &srnx->columns[(hash * 7u + (unsigned)obs_idx) & 63];
+}
+
+/** Finds a cached column, or returns NULL. */
+static struct srnx_column *column_lookup(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int obs_idx
+)
+{
+    struct srnx_column *col;
+    for (col = *column_bucket(srnx, name, obs_idx); col; col = col->next)
+        if (col->obs_idx == obs_idx && !memcmp(col->name.name, name.name, 3))
+            return col;
+    return NULL;
+}
+
+/** Returns the decoded column \a obs_idx of satellite \a name, decoding
+ * and caching it in \a srnx if necessary.
+ *
+ * \param[in] depth Prediction depth of the column (see
+ *   srnx_open_obs_internal()); a column at depth 2 must not be predicted.
+ */
+static int srnx_column_values(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int obs_idx,
+    int depth,
+    const struct srnx_column **p_col
+)
+{
+    struct srnx_obs_reader *rdr = NULL;
+    struct srnx_column *col;
+    int res;
+
+    col = column_lookup(srnx, name, obs_idx);
+    if (col)
+    {
+        if (depth >= 2 && col->kind != SRNX_PRED_NONE)
+        {
+            srnx_errorf(srnx, "SOC2 prediction chain too long for %.3s",
+                name.name);
+            return SRNX_CORRUPT;
+        }
+        *p_col = col;
+        return 0;
+    }
+
+    res = srnx_open_obs_internal(srnx, name, obs_idx, depth, &rdr);
+    if (res)
+    {
+        srnx_free_obs_reader(rdr);
+        return res;
+    }
+
+    col = calloc(1, sizeof *col);
+    if (!col)
+    {
+        srnx_free_obs_reader(rdr);
+        srnx_errorf(srnx, "allocation failed for column cache");
+        return ENOMEM;
+    }
+    col->name = name;
+    col->obs_idx = obs_idx;
+    col->n_values = rdr->n_values;
+    if (rdr->column)
+    {
+        col->kind = rdr->soc2_kind;
+        col->values = rdr->column;
+        rdr->column = NULL;
+    }
+    else
+    {
+        col->values = malloc(rdr->n_values * sizeof *col->values);
+        res = col->values
+            ? read_socd_values(rdr, col->values, rdr->n_values)
+            : ENOMEM;
+        if (res)
+        {
+            if (res == ENOMEM)
+                srnx_errorf(srnx, "allocation failed for column cache");
+            free(col->values);
+            free(col);
+            srnx_free_obs_reader(rdr);
+            return res;
+        }
+    }
+    srnx_free_obs_reader(rdr);
+
+    col->next = *column_bucket(srnx, name, obs_idx);
+    *column_bucket(srnx, name, obs_idx) = col;
+    *p_col = col;
+    return 0;
+}
+
+/** Fills \a *p_t7 with the times (1e-7 s) of the \a n_values epochs in
+ * which satellite \a name is present.  The caller frees \a *p_t7.
+ */
+static int srnx_satellite_times(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    uint64_t n_values,
+    int64_t **p_t7
+)
+{
+    struct rinex_range *runs = NULL;
+    int64_t *t7;
+    uint64_t kk;
+    int res, n_runs = 0, alloc = 0, obs_count = 0, s_idx, ii, ei;
+
+    if (!srnx->epoch_t7)
+    {
+        struct rinex_epoch *epochs = NULL;
+        size_t n_epochs = 0, jj;
+
+        res = srnx_get_epochs(srnx, &epochs, &n_epochs);
+        if (res)
+        {
+            free(epochs);
+            return res;
+        }
+        srnx->epoch_t7 = malloc((n_epochs ? n_epochs : 1) * sizeof *srnx->epoch_t7);
+        if (!srnx->epoch_t7)
+        {
+            free(epochs);
+            srnx_errorf(srnx, "allocation failed for epoch times");
+            return ENOMEM;
+        }
+        for (jj = 0; jj < n_epochs; ++jj)
+            srnx->epoch_t7[jj] = rnx_epoch_time_e7(&epochs[jj]);
+        srnx->epoch_t7_len = n_epochs;
+        free(epochs);
+    }
+
+    s_idx = srnx->sys_idx[name.name[0] & 31];
+    res = srnx_get_presence_runs(srnx, name,
+        s_idx ? srnx->sys_info[s_idx].codes_len : 0,
+        &runs, &n_runs, &alloc, &obs_count);
+    if (res)
+    {
+        free(runs);
+        return res;
+    }
+    if ((uint64_t)obs_count != n_values)
+    {
+        free(runs);
+        srnx_errorf(srnx, "SATE presence for %.3s does not match its observations",
+            name.name);
+        return SRNX_CORRUPT;
+    }
+
+    t7 = malloc(n_values * sizeof *t7);
+    if (!t7)
+    {
+        free(runs);
+        srnx_errorf(srnx, "allocation failed for satellite epoch times");
+        return ENOMEM;
+    }
+    for (ii = 0, kk = 0; ii < n_runs; ++ii)
+    {
+        for (ei = runs[ii].start; ei < runs[ii].end; ++ei)
+        {
+            if (ei < 0 || (size_t)ei >= srnx->epoch_t7_len)
+            {
+                free(runs);
+                free(t7);
+                srnx_errorf(srnx, "SATE presence for %.3s exceeds EPOC", name.name);
+                return SRNX_CORRUPT;
+            }
+            t7[kk++] = srnx->epoch_t7[ei];
+        }
+    }
+    free(runs);
+    *p_t7 = t7;
+    return 0;
+}
+
+/** Decodes a SOC2 chunk's packed observations into \a column.
+ *
+ * \a data and \a end delimit the blocks; \a order and \a state are the
+ * initial delta decoder state.
+ */
+static int soc2_decode_blocks(
+    struct srnx_reader *srnx,
+    int64_t *column,
+    uint64_t n_values,
+    const char *data,
+    const char *end,
+    int order,
+    int64_t *state,
+    int64_t scale,
+    const struct soc2_pred *pr,
+    const int64_t *ref,
+    const int64_t *t7
+)
+{
+    int64_t rem[RNX_MAX_RICE_BLOCK];
+    uint64_t kk = 0, count, jj;
+    int64_t delta, qq_pred;
+    int ii;
+
+#define SOC2_EMIT(dd) do { \
+        int64_t yy_ = soc2_undelta(state, order, (dd)); \
+        if (pr->kind != SRNX_PRED_NONE) \
+        { \
+            if (!soc2_predict(pr, ref, t7, n_values, kk, scale, &qq_pred)) \
+                goto no_prediction; \
+            yy_ = (int64_t)((uint64_t)yy_ + (uint64_t)qq_pred); \
+        } \
+        column[kk++] = (int64_t)((uint64_t)yy_ * (uint64_t)scale); \
+    } while (0)
+
+    while (data < end)
+    {
+        unsigned char ch = (unsigned char)*data++;
+
+        if (ch == SRNX_BLOCK_RESET)
+        {
+            uint64_t new_order = uleb128(&data);
+            if (new_order > 7 || data > end)
+                goto corrupt;
+            order = (int)new_order;
+            for (ii = 0; ii < order; ++ii)
+                state[ii] = sleb128(&data);
+            if (data > end)
+                goto corrupt;
+            continue;
+        }
+
+        if (ch >= SRNX_BLOCK_UNPRED)
+        {
+            count = uleb128(&data) + 1;
+            if (data > end || count > n_values - kk)
+                goto corrupt;
+            switch (ch)
+            {
+            case SRNX_BLOCK_UNPRED:
+                if (pr->kind == SRNX_PRED_NONE)
+                    goto corrupt;
+                for (jj = 0; jj < count; ++jj)
+                {
+                    int64_t value = sleb128(&data);
+                    if (data > end
+                        || soc2_predict(pr, ref, t7, n_values, kk, scale, &qq_pred))
+                        goto corrupt;
+                    column[kk++] = (int64_t)((uint64_t)value * (uint64_t)scale);
+                }
+                break;
+            case BLOCK_ABSENT:
+                for (jj = 0; jj < count; ++jj)
+                    column[kk++] = INT64_MIN;
+                break;
+            case BLOCK_ZERO:
+                for (jj = 0; jj < count; ++jj)
+                    SOC2_EMIT(0);
+                break;
+            case BLOCK_SLEB128:
+                for (jj = 0; jj < count; ++jj)
+                {
+                    delta = sleb128(&data);
+                    if (data > end)
+                        goto corrupt;
+                    SOC2_EMIT(delta);
+                }
+                break;
+            }
+            continue;
+        }
+
+        if ((ch >> 5) < RNX_N_BLOCK_SIZES)
+        {
+            int mm = rnx_rice_block_sizes[ch >> 5], rr = ch & 31, bit = 0;
+            uint64_t mask = rr ? ((uint64_t)1 << rr) - 1 : 0;
+
+            if ((uint64_t)mm > n_values - kk)
+                goto corrupt;
+            if (rr > 0)
+            {
+                if ((size_t)(end - data) < (size_t)rr * mm / 8)
+                    goto corrupt;
+                transpose(rem, data, rr, mm);
+                data += (size_t)rr * mm / 8;
+            }
+            else
+            {
+                memset(rem, 0, (size_t)mm * sizeof rem[0]);
+            }
+
+            /* Quotients: one bits ended by a zero bit, MSB first.  Read
+             * 64 bits at a time while at least eight bytes remain. */
+            for (ii = 0; ii < mm; ++ii)
+            {
+                uint64_t qq = 0, uu;
+                if (end - data >= 8)
+                {
+                    uint64_t word;
+                    unsigned ones;
+                    memcpy(&word, data, 8);
+                    word = __builtin_bswap64(word) << bit;
+                    ones = ~word ? (unsigned)__builtin_clzll(~word) : 64;
+                    if (ones < 64u - bit)
+                    {
+                        unsigned total = bit + ones + 1;
+                        qq = ones;
+                        data += total >> 3;
+                        bit = total & 7;
+                        goto have_quotient;
+                    }
+                }
+                for (;;)
+                {
+                    unsigned vv, ones, avail;
+                    if (data >= end)
+                        goto corrupt;
+                    vv = ((unsigned)(unsigned char)*data << bit) & 0xFF;
+                    avail = 8 - bit;
+                    ones = (unsigned)__builtin_clz(~(vv << 24));
+                    if (ones < avail)
+                    {
+                        qq += ones;
+                        bit += ones + 1;
+                        if (bit == 8)
+                        {
+                            data++;
+                            bit = 0;
+                        }
+                        break;
+                    }
+                    qq += avail;
+                    data++;
+                    bit = 0;
+                }
+            have_quotient:
+                if (rr && (qq >> (64 - rr)))
+                    goto corrupt; /* value would not fit in 64 bits */
+                uu = qq << rr | ((uint64_t)rem[ii] & mask);
+                rem[ii] = (int64_t)(uu >> 1) ^ -(int64_t)(uu & 1);
+            }
+            if (bit)
+                data++;
+
+            /* Undelta the block, then add predictions and scale. */
+            soc2_undelta_block(state, order, rem, mm);
+            if (pr->kind == SRNX_PRED_NONE)
+            {
+                for (ii = 0; ii < mm; ++ii)
+                    column[kk + ii] = (int64_t)((uint64_t)rem[ii] * (uint64_t)scale);
+            }
+            else if (pr->kind == SRNX_PRED_VALUE)
+            {
+                const int64_t *rv = ref + kk;
+                for (ii = 0; ii < mm; ++ii)
+                {
+                    int64_t pp;
+                    if (rv[ii] == INT64_MIN)
+                    {
+                        kk += ii;
+                        goto no_prediction;
+                    }
+                    pp = rnx_rdiv128((__int128)rv[ii] * pr->num, (__int128)pr->den);
+                    if (scale != 1)
+                        pp = rnx_rdiv128(pp, scale);
+                    column[kk + ii] = (int64_t)(((uint64_t)rem[ii]
+                        + (uint64_t)pp) * (uint64_t)scale);
+                }
+            }
+            else
+            {
+                for (ii = 0; ii < mm; ++ii)
+                {
+                    if (!soc2_predict(pr, ref, t7, n_values, kk + ii, scale, &qq_pred))
+                    {
+                        kk += ii;
+                        goto no_prediction;
+                    }
+                    column[kk + ii] = (int64_t)(((uint64_t)rem[ii]
+                        + (uint64_t)qq_pred) * (uint64_t)scale);
+                }
+            }
+            kk += mm;
+            continue;
+        }
+
+        srnx_errorf(srnx, "unsupported SOC2 block code %d", ch);
+        return SRNX_CORRUPT;
+    }
+#undef SOC2_EMIT
+
+    if (data != end || kk != n_values)
+        goto corrupt;
+    return 0;
+
+no_prediction:
+    srnx_errorf(srnx, "SOC2 value at satellite epoch %"PRIu64" has no prediction", kk);
+    return SRNX_CORRUPT;
+
+corrupt:
+    srnx_errorf(srnx, "corrupt SOC2 packed data near satellite epoch %"PRIu64, kk);
+    return SRNX_CORRUPT;
+}
+
+/** Opens and completely decodes a SOC2 chunk.
+ *
+ * \a rptr points just past the chunk's LLIs, and \a payload_end at the
+ * end of its payload.
+ */
+static int soc2_open(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int obs_idx,
+    int depth,
+    int64_t chunk_offset,
+    const char *rptr,
+    const char *payload_end,
+    uint64_t n_values,
+    uint64_t lli_offset,
+    struct srnx_obs_reader **p_rdr
+)
+{
+    const struct srnx_column *ref_col = NULL;
+    struct srnx_obs_code *codes;
+    struct soc2_pred pr;
+    const char *data_end;
+    uint64_t mode, u64, ssi_offset, scale_order, scale;
+    int64_t state[8], *t7 = NULL;
+    int sys_idx, n_codes, ssi_ref, order, ii, res;
+
+    sys_idx = srnx->sys_idx[name.name[0] & 31];
+    codes = srnx->sys_info[sys_idx].code;
+    n_codes = srnx->sys_info[sys_idx].codes_len;
+    memset(&pr, 0, sizeof pr);
+
+    /* Mode value: SSI reference and predictor kind. */
+    mode = uleb128(&rptr);
+    pr.kind = (int)(mode & 3);
+    if (pr.kind == 3)
+    {
+        u64 = uleb128(&rptr);
+        srnx_errorf(srnx, "unsupported SOC2 predictor kind %"PRIu64" at %"PRId64,
+            u64, chunk_offset);
+        return SRNX_CORRUPT;
+    }
+    if ((mode >> 2) > (uint64_t)n_codes || rptr > payload_end)
+        goto corrupt;
+    ssi_ref = (int)(mode >> 2);
+    if (ssi_ref && codes[ssi_ref - 1].name[0] != 'S')
+    {
+        srnx_errorf(srnx, "SOC2 SSI reference is not a signal strength at %"PRId64,
+            chunk_offset);
+        return SRNX_CORRUPT;
+    }
+
+    /* SSIs (decoded later by srnx_read_obs_ssi_lli()). */
+    ssi_offset = rptr - srnx->data;
+    u64 = uleb128(&rptr);
+    if (rptr > payload_end || u64 > (uint64_t)(payload_end - rptr))
+        goto corrupt;
+    rptr += u64;
+
+    /* Predictor fields. */
+    if (pr.kind != SRNX_PRED_NONE)
+    {
+        u64 = uleb128(&rptr);
+        pr.num = sleb128(&rptr);
+        pr.den = uleb128(&rptr);
+        if (pr.kind == SRNX_PRED_RATE)
+        {
+            uint64_t stencil = uleb128(&rptr);
+            pr.max_span = uleb128(&rptr);
+            if (stencil > 2)
+                goto corrupt;
+            pr.stencil = (int)stencil;
+        }
+        if (rptr > payload_end || u64 >= (uint64_t)n_codes
+            || (int)u64 == obs_idx || pr.den == 0)
+            goto corrupt;
+        pr.ref = (int)u64;
+        if (depth >= 2)
+        {
+            srnx_errorf(srnx, "SOC2 prediction chain too long at %"PRId64, chunk_offset);
+            return SRNX_CORRUPT;
+        }
+    }
+
+    /* Packed observation data header. */
+    u64 = uleb128(&rptr);
+    if (rptr > payload_end || u64 > (uint64_t)(payload_end - rptr))
+        goto corrupt;
+    data_end = rptr + u64;
+    scale_order = uleb128(&rptr);
+    if (scale_order > 15 || rptr > data_end)
+        goto corrupt;
+    scale = 1;
+    if (scale_order & 8)
+    {
+        scale = uleb128(&rptr);
+        if (scale == 0 || scale > 1000000000 || rptr > data_end)
+            goto corrupt;
+    }
+    order = (int)(scale_order & 7);
+    for (ii = 0; ii < order; ++ii)
+        state[ii] = sleb128(&rptr);
+    if (rptr > data_end)
+        goto corrupt;
+
+    res = obs_reader_reset(srnx, p_rdr);
+    if (res)
+        return res;
+    (*p_rdr)->parent = srnx;
+    (*p_rdr)->name = name;
+    (*p_rdr)->n_values = n_values;
+    (*p_rdr)->scale = (unsigned int)scale;
+    (*p_rdr)->lli_offset = lli_offset;
+    (*p_rdr)->ssi_offset = ssi_offset;
+    (*p_rdr)->ssi_ref = ssi_ref;
+    (*p_rdr)->soc2_kind = pr.kind;
+    (*p_rdr)->data_offset = data_end - srnx->data;
+    (*p_rdr)->data_end = data_end - srnx->data;
+    (*p_rdr)->column = malloc(n_values * sizeof *(*p_rdr)->column);
+    if (!(*p_rdr)->column)
+    {
+        srnx_errorf(srnx, "allocation failed for SOC2 column of length %"PRIu64, n_values);
+        return ENOMEM;
+    }
+
+    /* A column already decoded as a reference need not be decoded again. */
+    {
+        const struct srnx_column *col = column_lookup(srnx, name, obs_idx);
+        if (col && col->n_values == n_values)
+        {
+            memcpy((*p_rdr)->column, col->values, n_values * sizeof *col->values);
+            return 0;
+        }
+    }
+
+    /* Reference values and, for rate predictors, satellite epoch times. */
+    if (pr.kind != SRNX_PRED_NONE)
+    {
+        res = srnx_column_values(srnx, name, pr.ref, depth + 1, &ref_col);
+        if (res)
+            return res;
+        if (ref_col->n_values != n_values)
+            goto corrupt;
+        if (pr.kind == SRNX_PRED_RATE)
+        {
+            res = srnx_satellite_times(srnx, name, n_values, &t7);
+            if (res)
+                return res;
+        }
+    }
+
+    res = soc2_decode_blocks(srnx, (*p_rdr)->column, n_values, rptr, data_end,
+        order, state, (int64_t)scale, &pr, ref_col ? ref_col->values : NULL, t7);
+    free(t7);
+    return res;
+
+corrupt:
+    srnx_errorf(srnx, "corrupt SOC2 chunk at %"PRId64, chunk_offset);
+    return SRNX_CORRUPT;
+}
+
+/** Opens a reader for observation index \a obs_idx of satellite \a name.
+ *
+ * \a depth is how many SOC2 prediction steps lead to this column: 0 for a
+ * column the caller asked for, 1 for its reference, 2 for the reference's
+ * reference, which must not itself use a predictor.
+ */
+static int srnx_open_obs_internal(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int obs_idx,
+    int depth,
+    struct srnx_obs_reader **p_rdr
+)
+{
+    const char *rptr, *payload_end;
     uint64_t u64, n_values, lli_offset, data_end, scale_order, scale;
     int64_t socd_offset;
     struct srnx_obs_code code;
@@ -1521,10 +2386,16 @@ int srnx_open_obs_by_index(
         srnx_errorf(srnx, "oversize SOCD at %"PRId64, socd_offset);
         return SRNX_CORRUPT;
     }
+    payload_end = rptr + u64;
     rptr += 8; /* srnx_find_socd() verifies observation name */
 
     /* Read number of observations. */
     n_values = 1 + uleb128(&rptr);
+    if (n_values > INT_MAX || rptr > payload_end)
+    {
+        srnx_errorf(srnx, "oversize observation count at %"PRId64, socd_offset);
+        return SRNX_CORRUPT;
+    }
 
     /* Skip LLI indicators. */
     lli_offset = rptr - srnx->data;
@@ -1535,6 +2406,13 @@ int srnx_open_obs_by_index(
         return SRNX_CORRUPT;
     }
     rptr += u64;
+
+    /* SOC2 chunks are decoded completely here. */
+    if (!memcmp(srnx->data + socd_offset, "SOC2", 4))
+    {
+        return soc2_open(srnx, name, obs_idx, depth, socd_offset, rptr,
+            payload_end, n_values, lli_offset, p_rdr);
+    }
 
     /* Then skip SSI indicators. */
     u64 = uleb128(&rptr);
@@ -1574,19 +2452,15 @@ int srnx_open_obs_by_index(
         }
     }
 
-    /* Allocate *p_rdr if necessary. */
-    if (!*p_rdr)
+    /* Allocate (or reset) *p_rdr. */
+    err = obs_reader_reset(srnx, p_rdr);
+    if (err)
     {
-        *p_rdr = malloc(sizeof **p_rdr);
-        if (!*p_rdr)
-        {
-            srnx_errorf(srnx, "allocation failed for obs reader");
-            return ENOMEM;
-        }
+        return err;
     }
 
     /* Store everything we need to keep. */
-    memset(*p_rdr, 0, sizeof **p_rdr);
+    (*p_rdr)->name = name;
     (*p_rdr)->order = scale_order & 7;
     (*p_rdr)->parent = srnx;
     (*p_rdr)->n_values = n_values;
@@ -1607,8 +2481,23 @@ int srnx_open_obs_by_index(
 }
 
 /* Doc comment in srnx.h. */
+int srnx_open_obs_by_index(
+    struct srnx_reader *srnx,
+    struct srnx_satellite_name name,
+    int obs_idx,
+    struct srnx_obs_reader **p_rdr
+)
+{
+    return srnx_open_obs_internal(srnx, name, obs_idx, 0, p_rdr);
+}
+
+/* Doc comment in srnx.h. */
 void srnx_free_obs_reader(struct srnx_obs_reader *p_socd)
 {
+    if (p_socd)
+    {
+        free(p_socd->column);
+    }
     free(p_socd);
 }
 
@@ -1650,6 +2539,55 @@ static int decompress_indicators(
     }
 
     /* Fill any remaining indicators with spaces. */
+    memset(out + ii, ' ', n_values - ii);
+    return 0;
+}
+
+/** Decompresses SOC2 SSIs coded against an SSI reference: a twelve-symbol
+ * RLE whose symbol 11 means the SSI predicted from the reference.
+ */
+static int decompress_predicted_ssis(
+    struct srnx_obs_reader *p_socd,
+    char *out,
+    const char *in,
+    const char *end
+)
+{
+    static const char alphabet[] = " 0123456789";
+    const struct srnx_column *col;
+    uint64_t ii, kk, val, count, n_values = p_socd->n_values;
+    int res;
+
+    res = srnx_column_values(p_socd->parent, p_socd->name,
+        p_socd->ssi_ref - 1, 1, &col);
+    if (res)
+        return res;
+    if (col->n_values != n_values)
+        return SRNX_CORRUPT;
+
+    for (ii = 0; in < end; )
+    {
+        val = uleb128(&in);
+        count = val / 12 + 1;
+        if (ii + count > n_values)
+            return SRNX_CORRUPT;
+        if (val % 12 < 11)
+        {
+            memset(out + ii, alphabet[val % 12], count);
+        }
+        else
+        {
+            for (kk = ii; kk < ii + count; ++kk)
+            {
+                if (col->values[kk] == INT64_MIN)
+                    return SRNX_CORRUPT;
+                out[kk] = rnx_ssi_from_strength(col->values[kk]);
+            }
+        }
+        ii += count;
+    }
+    if (in > end)
+        return SRNX_CORRUPT;
     memset(out + ii, ' ', n_values - ii);
     return 0;
 }
@@ -1697,8 +2635,19 @@ int srnx_read_obs_ssi_lli(
     inds += u64; /* bounds-checked by srnx_open_obs_by_index() */
 
     /* Decompress the SSIs. */
+    if (p_socd->column)
+    {
+        inds = p_socd->parent->data + p_socd->ssi_offset;
+    }
     u64 = uleb128(&inds);
-    res = decompress_indicators(*p_ssi, n_values, inds, inds + u64);
+    if (p_socd->ssi_ref)
+    {
+        res = decompress_predicted_ssis(p_socd, *p_ssi, inds, inds + u64);
+    }
+    else
+    {
+        res = decompress_indicators(*p_ssi, n_values, inds, inds + u64);
+    }
     if (res)
     {
         srnx_errorf(p_socd->parent, "unable to decompress SSIs after LLIs at %"PRIu64, p_socd->lli_offset);
@@ -1995,6 +2944,15 @@ int srnx_read_obs_value(
 {
     int res;
 
+    /* SOC2 readers hold every value already. */
+    if (p_socd->column)
+    {
+        if (p_socd->column_idx >= p_socd->n_values)
+            return SRNX_END_OF_DATA;
+        *p_value = p_socd->column[p_socd->column_idx++];
+        return 0;
+    }
+
     /* Do we need more observations? */
     if (p_socd->obs_idx >= p_socd->obs_valid)
     {
@@ -2147,7 +3105,7 @@ int srnx_get_obs_by_index(
 )
 {
     struct srnx_obs_reader *p_socd;
-    int64_t count, *obs;
+    int64_t *obs;
     int ii, jj, res;
 
     p_socd = NULL;
@@ -2175,28 +3133,16 @@ int srnx_get_obs_by_index(
         slots[ii].obs = obs;
 
         /* Read observation values into slots[ii].obs. */
-        for (jj = 0; jj < slots[ii].n_values; )
+        if (p_socd->column)
         {
-            res = decode_observations(p_socd);
+            memcpy(slots[ii].obs, p_socd->column,
+                sizeof(int64_t) * slots[ii].n_values);
+        }
+        else
+        {
+            res = read_socd_values(p_socd, slots[ii].obs, slots[ii].n_values);
             if (res)
                 goto fail;
-            if (!p_socd->obs_valid)
-            {
-                srnx_errorf(srnx, "no valid observations");
-                res = SRNX_CORRUPT;
-                goto fail;
-            }
-
-            if (p_socd->obs_valid < slots[ii].n_values - jj)
-            {
-                count = p_socd->obs_valid;
-            }
-            else
-            {
-                count = slots[ii].n_values - jj;
-            }
-            memcpy(slots[ii].obs + jj, p_socd->obs, sizeof(int64_t) * count);
-            jj += count;
         }
     }
 

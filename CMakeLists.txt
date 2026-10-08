@@ -136,6 +136,8 @@ target_compile_definitions(test_srnx_parser PRIVATE
 add_dependencies(test_srnx_parser rnx2srnx test_fixtures)
 add_test(NAME srnx_parser COMMAND test_srnx_parser)
 set_property(TEST srnx_parser PROPERTY LABELS function)
+add_test(NAME srnx_parser_socd COMMAND test_srnx_parser --socd)
+set_property(TEST srnx_parser_socd PROPERTY LABELS function)
 
 add_executable(test_bin_tools test/test_bin_tools.c)
 target_link_libraries(test_bin_tools rinex tap)
@@ -203,3 +205,13 @@ target_compile_definitions(test_evtf PRIVATE
 add_dependencies(test_evtf rnx2srnx srnx2rnx rnx2srnx_search)
 add_test(NAME evtf COMMAND test_evtf)
 set_property(TEST evtf PROPERTY LABELS function)
+add_test(NAME evtf_socd COMMAND test_evtf --socd)
+set_property(TEST evtf_socd PROPERTY LABELS function)
+
+add_executable(test_soc2 test/test_soc2.c)
+target_link_libraries(test_soc2 rinex tap m)
+target_compile_definitions(test_soc2 PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>")
+add_dependencies(test_soc2 rnx2srnx)
+add_test(NAME soc2 COMMAND test_soc2)
+set_property(TEST soc2 PROPERTY LABELS function)

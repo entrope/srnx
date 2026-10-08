@@ -31,6 +31,112 @@ static const int rnx_block_sizes[RNX_N_BLOCK_SIZES] = {
     8, 16, 24, 32, 40, 48, 112
 };
 
+/* Split-Rice block sizes selected by the high 3 bits of a SOC2
+ * block-header byte; the low 5 bits are the Rice parameter. */
+static const int rnx_rice_block_sizes[RNX_N_BLOCK_SIZES] = {
+    8, 24, 56, 144, 240, 640, 2048
+};
+#define RNX_MAX_RICE_BLOCK 2048
+#define RNX_RICE_MAX_R 31
+
+/* SOC2 block codes beyond the SOCD set. */
+#define SRNX_BLOCK_RESET   0xFB
+#define SRNX_BLOCK_UNPRED  0xFC
+
+/* SOC2 predictor kinds and Doppler stencils. */
+#define SRNX_PRED_NONE  0
+#define SRNX_PRED_VALUE 1
+#define SRNX_PRED_RATE  2
+
+/** Exact floor(\a un / \a ud).  Most SOC2 predictions fit 64-bit hardware
+ * division; the rest use a double-precision estimate corrected by an
+ * exact remainder, falling back to 128-bit division (a slow library call
+ * on most targets) only if the estimate is far off. */
+static inline uint64_t rnx_udiv128(unsigned __int128 un, unsigned __int128 ud)
+{
+    if ((un >> 64) == 0 && (ud >> 64) == 0)
+        return (uint64_t)un / (uint64_t)ud;
+    if ((ud >> 64) == 0 && (uint64_t)(un >> 64) < (uint64_t)ud)
+    {
+        double est = ((double)(uint64_t)(un >> 64) * 18446744073709551616.0
+            + (double)(uint64_t)un) / (double)(uint64_t)ud;
+        if (est < 1.8e19)
+        {
+            uint64_t qq = (uint64_t)est;
+            __int128 rem = (__int128)un - (__int128)qq * (__int128)ud;
+            int iter;
+            for (iter = 0; iter < 8 && rem < 0; ++iter)
+            {
+                qq--;
+                rem += (__int128)ud;
+            }
+            for (; iter < 8 && rem >= (__int128)ud; ++iter)
+            {
+                qq++;
+                rem -= (__int128)ud;
+            }
+            if (rem >= 0 && rem < (__int128)ud)
+                return qq;
+        }
+    }
+    return (uint64_t)(un / ud);
+}
+
+/** Divide, rounding to the nearest integer with ties away from zero,
+ * as SOC2 predictions require.  \a den must be nonzero. */
+static inline int64_t rnx_rdiv128(__int128 num, __int128 den)
+{
+    unsigned __int128 un, ud;
+    uint64_t qq;
+    int neg;
+
+    if (den < 0)
+    {
+        num = -num;
+        den = -den;
+    }
+    neg = num < 0;
+    un = (unsigned __int128)(neg ? -num : num);
+    ud = (unsigned __int128)den;
+    qq = rnx_udiv128(un + ud / 2, ud);
+    return neg ? -(int64_t)qq : (int64_t)qq;
+}
+
+/** Days since 1970-01-01 of a proleptic Gregorian date. */
+static inline int64_t rnx_days_from_civil(int yy, int mm, int dd)
+{
+    int era, yoe, doy, doe;
+    yy -= mm <= 2;
+    era = (yy >= 0 ? yy : yy - 399) / 400;
+    yoe = yy - era * 400;
+    doy = (153 * (mm + (mm > 2 ? -3 : 9)) + 2) / 5 + dd - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (int64_t)era * 146097 + doe - 719468;
+}
+
+/** Timestamp of \a ep in units of 1e-7 s, continuous across days (two-digit
+ * years are interpreted as in RINEX 2).  SOC2 rate predictors use
+ * differences of these. */
+static inline int64_t rnx_epoch_time_e7(const struct rinex_epoch *ep)
+{
+    int ymd = ep->yyyy_mm_dd;
+    int yy = ymd / 10000;
+    if (yy < 100)
+        yy += yy < 80 ? 2000 : 1900;
+    return (rnx_days_from_civil(yy, ymd / 100 % 100, ymd % 100) * 86400
+        + (ep->hh_mm / 100) * 3600 + (ep->hh_mm % 100) * 60) * 10000000LL
+        + ep->sec_e7;
+}
+
+/** Predicted SSI digit ('1'..'9') for a signal-strength value \a s in
+ * milli-units (thousandths of dB-Hz), per the SOC2 SSI reference rule. */
+static inline char rnx_ssi_from_strength(int64_t s)
+{
+    int64_t digit = s < 0 ? 1 : s / 6000;
+    digit = digit < 1 ? 1 : digit > 9 ? 9 : digit;
+    return (char)('0' + digit);
+}
+
 /* Negative SRNX error numbers, returned by srnx.c's functions (declared
  * in srnx.h) and by the internal helpers declared below.
  */

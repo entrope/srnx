@@ -69,13 +69,17 @@ static void compare(const char *input, const char *output)
     pa->destroy(pa); pb->destroy(pb); a->destroy(a); b->destroy(b);
 }
 
+/* Extra rnx2srnx options (such as --socd), from the command line. */
+static const char *g_convert_args = "";
+
 static void roundtrip(const char *input, int expected_epochs, int expected_events)
 {
     const char *srnx = "evtf_test.srnx", *rnx = "evtf_test_out.rnx";
     struct rinex_data data;
     char cmd[2048];
     int result;
-    snprintf(cmd, sizeof cmd, "\"%s\" %s %s", RNX2SRNX_PATH, input, srnx);
+    snprintf(cmd, sizeof cmd, "\"%s\" %s %s %s", RNX2SRNX_PATH, g_convert_args,
+        input, srnx);
     result = system(cmd);
     ok(result == 0, "convert %s to SRNX", input);
     if (result) BAIL_OUT("conversion failed");
@@ -104,7 +108,8 @@ static void roundtrip(const char *input, int expected_epochs, int expected_event
     ok(system(cmd) == 0, "search accepts exceptional epochs");
     if (expected_epochs == 0)
     {
-        snprintf(cmd, sizeof cmd, "\"%s\" - %s <%s", RNX2SRNX_PATH, srnx, input);
+        snprintf(cmd, sizeof cmd, "\"%s\" %s - %s <%s", RNX2SRNX_PATH,
+            g_convert_args, srnx, input);
         ok(system(cmd) == 0, "event-only input also converts through stdin");
     }
     remove(srnx); remove(rnx); remove("evtf_search.out");
@@ -194,9 +199,11 @@ static void test_crx(unsigned char *bytes, size_t length, int version)
     remove("evtf_test.crx");
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
     int version, only;
+    if (argc > 1)
+        g_convert_args = argv[1];
     for (version = 2; version <= 4; ++version)
         for (only = 0; only <= 1; ++only)
         {

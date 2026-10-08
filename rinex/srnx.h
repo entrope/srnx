@@ -22,9 +22,11 @@
 /** srnx_reader represents a SRNX stream reader. */
 struct srnx_reader;
 
-/** srnx_obs_reader is used to read a particular `SOCD` chunk.
- * One SOCD chunk contains the observation data for a single (satellite,
- * observation code) pair.
+/** srnx_obs_reader is used to read a particular `SOCD` or `SOC2` chunk.
+ * One such chunk contains the observation data for a single (satellite,
+ * observation code) pair.  A SOCD chunk is decoded incrementally; a SOC2
+ * chunk is decoded completely when it is opened, using (and caching in
+ * the srnx_reader) any reference column it is predicted from.
  */
 struct srnx_obs_reader;
 

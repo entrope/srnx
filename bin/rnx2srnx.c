@@ -71,6 +71,12 @@ static int uleb128_len(uint64_t val)
     return n;
 }
 
+static int sleb128_len(int64_t val)
+{
+    uint64_t uv = ((uint64_t)val << 1) ^ (uint64_t)(val >> 63);
+    return uleb128_len(uv);
+}
+
 /* SLEB128 byte-length from two's-complement bit-width.
  *
  * For any val with twos_comp_bw(val) == bw, sleb128_len(val) is constant.
@@ -150,13 +156,14 @@ enum block_kind
 {
     BK_BLOCK,   /**< m × bw transposed bit matrix */
     BK_ZERO,    /**< zero-run (>= 16 zeros) */
-    BK_SLEB     /**< SLEB128 run (1..16 values) */
+    BK_SLEB,    /**< SLEB128 run (1..16 values) */
+    BK_RICE     /**< SOC2 split-Rice block; bw holds the Rice parameter */
 };
 
 struct block_choice
 {
     short kind;     /**< enum block_kind */
-    short bw;       /**< for BK_BLOCK: 1..32; else unused */
+    short bw;       /**< BK_BLOCK: 1..32; BK_RICE: Rice parameter 0..31 */
     int   len;      /**< values consumed by this edge */
 };
 
@@ -237,6 +244,737 @@ static int parse_digest_flag(const char *arg, const char *prefix, int *out)
     return 1;
 }
 
+/* ---- SLEB128-run search (shared) ---- */
+
+/** Best SLEB128-run edge starting at \a ii.
+ *
+ * Minimises `2 + (psum[ii + L] - psum[ii]) + dp[ii + L]` over lengths
+ * L in [1, max_L], storing the best L in \a *out_L.  Costs fit in int32
+ * (dp < 30 MB; psum delta <= 160 bytes for 16 vals).  Processes 16-wide
+ * SIMD chunks updating the running argmin; a scalar tail (starting at
+ * chunk_start) handles any remainder. */
+static inline int64_t sleb_run_best(const int64_t *dp, const uint32_t *psum,
+    int ii, int max_L, int *out_L)
+{
+    uint32_t pii = psum[ii];
+    int64_t sleb_min = INT64_MAX;
+    int sleb_min_L = 0;
+    int chunk_start = 1, L;
+#if defined(__ARM_NEON)
+    for (; chunk_start + 15 <= max_L; chunk_start += 16)
+    {
+        const int64_t *dpv = dp + ii + chunk_start;
+        int32x4_t dp0 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 0)), vmovn_s64(vld1q_s64(dpv+ 2)));
+        int32x4_t dp1 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 4)), vmovn_s64(vld1q_s64(dpv+ 6)));
+        int32x4_t dp2 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 8)), vmovn_s64(vld1q_s64(dpv+10)));
+        int32x4_t dp3 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+12)), vmovn_s64(vld1q_s64(dpv+14)));
+        uint32x4_t pii_v = vdupq_n_u32(pii);
+        const uint32_t *psv = psum + ii + chunk_start;
+        int32x4_t d0 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 0), pii_v));
+        int32x4_t d1 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 4), pii_v));
+        int32x4_t d2 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 8), pii_v));
+        int32x4_t d3 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+12), pii_v));
+        int32x4_t two = vdupq_n_s32(2);
+        int32x4_t c0 = vaddq_s32(vaddq_s32(d0, dp0), two);
+        int32x4_t c1 = vaddq_s32(vaddq_s32(d1, dp1), two);
+        int32x4_t c2 = vaddq_s32(vaddq_s32(d2, dp2), two);
+        int32x4_t c3 = vaddq_s32(vaddq_s32(d3, dp3), two);
+        int b = chunk_start;
+        int32x4_t i0 = (int32x4_t){b+ 0, b+ 1, b+ 2, b+ 3};
+        int32x4_t i1 = (int32x4_t){b+ 4, b+ 5, b+ 6, b+ 7};
+        int32x4_t i2 = (int32x4_t){b+ 8, b+ 9, b+10, b+11};
+        int32x4_t i3 = (int32x4_t){b+12, b+13, b+14, b+15};
+        uint32x4_t gt;
+        gt = vcgtq_s32(c0, c1); c0 = vbslq_s32(gt, c1, c0); i0 = vbslq_s32(gt, i1, i0);
+        gt = vcgtq_s32(c2, c3); c2 = vbslq_s32(gt, c3, c2); i2 = vbslq_s32(gt, i3, i2);
+        gt = vcgtq_s32(c0, c2); c0 = vbslq_s32(gt, c2, c0); i0 = vbslq_s32(gt, i2, i0);
+        int32x2_t c_lo = vget_low_s32(c0), c_hi = vget_high_s32(c0);
+        int32x2_t i_lo = vget_low_s32(i0), i_hi = vget_high_s32(i0);
+        uint32x2_t gt2 = vcgt_s32(c_lo, c_hi);
+        c_lo = vbsl_s32(gt2, c_hi, c_lo);
+        i_lo = vbsl_s32(gt2, i_hi, i_lo);
+        int32_t ca = vget_lane_s32(c_lo, 0), ia = vget_lane_s32(i_lo, 0);
+        int32_t cb = vget_lane_s32(c_lo, 1), ib = vget_lane_s32(i_lo, 1);
+        int32_t chunk_min = (ca <= cb) ? ca : cb;
+        int chunk_min_L = (ca <= cb) ? ia : ib;
+        if (chunk_min < sleb_min) { sleb_min = chunk_min; sleb_min_L = chunk_min_L; }
+    }
+#elif defined(__AVX2__)
+    for (; chunk_start + 15 <= max_L; chunk_start += 16)
+    {
+        const int64_t *dpv = dp + ii + chunk_start;
+        __m128i n03 = _mm_unpacklo_epi64(
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 0)), 0x08),
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 2)), 0x08));
+        __m128i n47 = _mm_unpacklo_epi64(
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 4)), 0x08),
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 6)), 0x08));
+        __m128i n8b = _mm_unpacklo_epi64(
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 8)), 0x08),
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+10)), 0x08));
+        __m128i ncf = _mm_unpacklo_epi64(
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+12)), 0x08),
+            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+14)), 0x08));
+        __m256i dp0 = _mm256_set_m128i(n47, n03);
+        __m256i dp1 = _mm256_set_m128i(ncf, n8b);
+        __m256i pii_v = _mm256_set1_epi32((int)pii);
+        const uint32_t *psv = psum + ii + chunk_start;
+        __m256i d0 = _mm256_sub_epi32(_mm256_loadu_si256((__m256i*)(psv+ 0)), pii_v);
+        __m256i d1 = _mm256_sub_epi32(_mm256_loadu_si256((__m256i*)(psv+ 8)), pii_v);
+        __m256i two = _mm256_set1_epi32(2);
+        __m256i c0 = _mm256_add_epi32(_mm256_add_epi32(d0, dp0), two);
+        __m256i c1 = _mm256_add_epi32(_mm256_add_epi32(d1, dp1), two);
+        int b = chunk_start;
+        __m256i i0 = _mm256_set_epi32(b+7, b+6, b+5, b+4, b+3, b+2, b+1, b+0);
+        __m256i i1 = _mm256_set_epi32(b+15, b+14, b+13, b+12, b+11, b+10, b+9, b+8);
+        __m256i gt = _mm256_cmpgt_epi32(c0, c1);
+        __m256i cv = _mm256_blendv_epi8(c0, c1, gt);
+        __m256i iv = _mm256_blendv_epi8(i0, i1, gt);
+        __m128i cv_lo = _mm256_castsi256_si128(cv);
+        __m128i cv_hi = _mm256_extracti128_si256(cv, 1);
+        __m128i iv_lo = _mm256_castsi256_si128(iv);
+        __m128i iv_hi = _mm256_extracti128_si256(iv, 1);
+        __m128i gt2 = _mm_cmpgt_epi32(cv_lo, cv_hi);
+        cv_lo = _mm_blendv_epi8(cv_lo, cv_hi, gt2);
+        iv_lo = _mm_blendv_epi8(iv_lo, iv_hi, gt2);
+        __m128i cv_r = _mm_shuffle_epi32(cv_lo, 0x4E);
+        __m128i iv_r = _mm_shuffle_epi32(iv_lo, 0x4E);
+        __m128i gt3 = _mm_cmpgt_epi32(cv_lo, cv_r);
+        cv_lo = _mm_blendv_epi8(cv_lo, cv_r, gt3);
+        iv_lo = _mm_blendv_epi8(iv_lo, iv_r, gt3);
+        cv_r = _mm_shuffle_epi32(cv_lo, 0xB1);
+        iv_r = _mm_shuffle_epi32(iv_lo, 0xB1);
+        __m128i gt4 = _mm_cmpgt_epi32(cv_lo, cv_r);
+        cv_lo = _mm_blendv_epi8(cv_lo, cv_r, gt4);
+        iv_lo = _mm_blendv_epi8(iv_lo, iv_r, gt4);
+        int32_t chunk_min = _mm_cvtsi128_si32(cv_lo);
+        int chunk_min_L = _mm_cvtsi128_si32(iv_lo);
+        if (chunk_min < sleb_min) { sleb_min = chunk_min; sleb_min_L = chunk_min_L; }
+    }
+#endif /* __ARM_NEON || __AVX2__ */
+    for (L = chunk_start; L <= max_L; ++L)
+    {
+        int64_t c = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
+        if (c < sleb_min) { sleb_min = c; sleb_min_L = L; }
+    }
+    *out_L = sleb_min_L;
+    return sleb_min;
+}
+
+/* ---- Split-Rice block DP (shared; SOC2) ---- */
+
+/* Quotients above this are capped when summing; such a block costs far
+ * more than an SLEB128 run, so the DP never selects it. */
+#define RICE_Q_CAP ((uint64_t)1 << 32)
+
+/* Zigzag values above this are capped when estimating a block's mean. */
+#define RICE_U_CAP ((uint64_t)1 << 40)
+
+/** Scratch arrays for rice_dp(), each with room for \a stride entries
+ * (at least count + 1); rice_q has (RNX_RICE_MAX_R + 1) rows of them. */
+struct rice_scratch
+{
+    int64_t  *dp;
+    uint32_t *psum;
+    uint64_t *usum;
+    uint64_t *rice_q;
+    size_t    stride;
+};
+
+/** SOC2 split-Rice DP: the same shortest-path search as the SOCD DP, but
+ * each candidate block of m values (m from \a cand) is a split-Rice block
+ * costing 1 + r*m/8 + ceil(sum(q + 1) / 8) bytes for its best Rice
+ * parameter r.  Zero-run and SLEB128-run edges are as in SOCD.
+ *
+ * The best r lies in [0, bitlen(mean u)], searched downward: below the
+ * top, a block's bit count is at least 8 + r*m + (sum u >> r), which grows
+ * as r shrinks, so the search stops once that bound cannot beat the best
+ * block so far.  If \a choices is non-NULL it receives the optimal edge
+ * at each position.  Returns the minimal byte count. */
+static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
+    int count, const int *cand, int n_cand, struct block_choice *choices)
+{
+    size_t stride = rs->stride;
+    uint64_t *rice_q = rs->rice_q;
+    uint64_t *usum = rs->usum;
+    uint32_t *psum = rs->psum;
+    int64_t *dp = rs->dp;
+    uint64_t u_max = 0;
+    int ii, rr, ci, zlen_next, r_max;
+
+    /* The search never exceeds r = bitlen(mean u) <= bitlen(max u), so
+     * only those prefix rows are needed. */
+    for (ii = 0; ii < count; ++ii)
+    {
+        uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
+        if (uu > u_max)
+            u_max = uu;
+    }
+    if (u_max > RICE_U_CAP)
+        u_max = RICE_U_CAP;
+    r_max = u_max ? 64 - __builtin_clzll(u_max) : 1;
+    if (r_max > RNX_RICE_MAX_R)
+        r_max = RNX_RICE_MAX_R;
+
+    usum[0] = 0;
+    psum[0] = 0;
+    for (rr = 0; rr <= r_max; ++rr)
+        rice_q[rr * stride] = 0;
+    for (ii = 0; ii < count; ++ii)
+    {
+        uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
+        uint8_t bw = twos_comp_bw(vals[ii]);
+        usum[ii + 1] = usum[ii] + (uu < RICE_U_CAP ? uu : RICE_U_CAP);
+        psum[ii + 1] = psum[ii] + sleb128_len_from_bw[bw > 64 ? 64 : bw];
+        for (rr = 0; rr <= r_max; ++rr)
+        {
+            uint64_t qq = uu >> rr;
+            uint64_t *row = rice_q + rr * stride;
+            row[ii + 1] = row[ii] + (qq < RICE_Q_CAP ? qq : RICE_Q_CAP) + 1;
+        }
+    }
+
+    dp[count] = 0;
+    zlen_next = 0;
+    for (ii = count - 1; ii >= 0; --ii)
+    {
+        int remaining = count - ii, max_L, sleb_L, zlen;
+        int64_t best = INT64_MAX, cost;
+        struct block_choice best_choice = {BK_SLEB, 0, 1};
+
+        zlen = (vals[ii] == 0) ? zlen_next + 1 : 0;
+        zlen_next = zlen;
+        if (zlen > 0)
+        {
+            cost = 1 + uleb128_len((uint64_t)(zlen - 1)) + dp[ii + zlen];
+            if (cost < best)
+            {
+                best = cost;
+                best_choice.kind = BK_ZERO;
+                best_choice.bw = 0;
+                best_choice.len = zlen;
+            }
+        }
+
+        for (ci = 0; ci < n_cand; ++ci)
+        {
+            int m = cand[ci], r_hi, best_r = 0;
+            uint64_t usum_m, mean, best_block = UINT64_MAX;
+
+            if (remaining < m)
+                break;
+            usum_m = usum[ii + m] - usum[ii];
+            mean = usum_m / (uint64_t)m;
+            r_hi = mean ? 64 - __builtin_clzll(mean) : 1;
+            if (r_hi > r_max)
+                r_hi = r_max;
+            for (rr = r_hi; rr >= 0; --rr)
+            {
+                const uint64_t *row = rice_q + rr * stride;
+                uint64_t qbits, block;
+                if (rr < r_hi && 8 + (uint64_t)rr * m + (usum_m >> rr)
+                    >= 8 * best_block)
+                    break;
+                qbits = row[ii + m] - row[ii];
+                block = 1 + (uint64_t)rr * m / 8 + (qbits + 7) / 8;
+                if (block < best_block)
+                {
+                    best_block = block;
+                    best_r = rr;
+                }
+            }
+            cost = (int64_t)best_block + dp[ii + m];
+            if (cost < best)
+            {
+                best = cost;
+                best_choice.kind = BK_RICE;
+                best_choice.bw = (short)best_r;
+                best_choice.len = m;
+            }
+        }
+
+        max_L = remaining < g_max_sleb_run ? remaining : g_max_sleb_run;
+        cost = sleb_run_best(dp, psum, ii, max_L, &sleb_L);
+        if (cost < best)
+        {
+            best = cost;
+            best_choice.kind = BK_SLEB;
+            best_choice.bw = 0;
+            best_choice.len = sleb_L;
+        }
+
+        dp[ii] = best;
+        if (choices)
+            choices[ii] = best_choice;
+    }
+
+    return dp[0];
+}
+
+/* ---- SOC2 predictor planning (shared) ----
+ *
+ * Following the SOC2 encoder guidance in Succinct_RINEX.md: each
+ * satellite's reference carrier phase (the one present at the most
+ * epochs) is coded without prediction; other carrier phases are
+ * predicted from it, and pseudoranges and Doppler from the carrier phase
+ * on their own band (or the reference).  Whether a predictor pays off is
+ * decided per signal by comparing coded sizes.
+ */
+
+/* Markers in a SOC2 value sequence. */
+#define SOC2_ABSENT INT64_MIN        /* no observation at this satellite epoch */
+#define SOC2_UNPRED (INT64_MIN + 1)  /* observation in an unpredicted-values block */
+
+/* Doppler predictor max_span: 300 seconds, in units of 1e-7 s. */
+#define SOC2_DOPPLER_MAX_SPAN 3000000000ULL
+
+/* glo_chan[] entry for a GLONASS slot without a known frequency channel. */
+#define GLO_CHAN_UNKNOWN 127
+
+struct soc2_pred
+{
+    int      kind;     /* SRNX_PRED_NONE, SRNX_PRED_VALUE or SRNX_PRED_RATE */
+    int      ref;      /* reference observation index */
+    int64_t  num;
+    uint64_t den;
+    int      stencil;  /* rate: 0 backward, 1 central, 2 forward */
+    uint64_t max_span; /* rate: 1e-7 s units, 0 = unlimited */
+};
+
+/* The plan for one signal of a satellite. */
+struct soc2_plan
+{
+    struct soc2_pred pred; /* predictor to try; kind 0 if none applies */
+    int s_ref;             /* same-band S observation for SSIs, or -1 */
+};
+
+/** Carrier frequency in Hz of band \a band of system \a sys, or 0 if
+ * unknown.  \a glo_chan is the GLONASS FDMA frequency channel. */
+static int64_t soc2_freq_hz(char sys, char band, int glo_chan)
+{
+    switch (sys)
+    {
+    case 'G': case 'J': case 'S': case 'I':
+        if (band == '1') return 1575420000;
+        if (band == '2' && (sys == 'G' || sys == 'J')) return 1227600000;
+        if (band == '5') return 1176450000;
+        if (band == '6' && sys == 'J') return 1278750000;
+        if (band == '9' && sys == 'I') return 2492028000;
+        return 0;
+    case 'E':
+        switch (band)
+        {
+        case '1': return 1575420000;
+        case '5': return 1176450000;
+        case '6': return 1278750000;
+        case '7': return 1207140000;
+        case '8': return 1191795000;
+        }
+        return 0;
+    case 'C':
+        switch (band)
+        {
+        case '1': return 1575420000;
+        case '2': return 1561098000;
+        case '5': return 1176450000;
+        case '6': return 1268520000;
+        case '7': return 1207140000;
+        case '8': return 1191795000;
+        }
+        return 0;
+    case 'R':
+        switch (band)
+        {
+        case '1': return 1602000000 + (int64_t)glo_chan * 562500;
+        case '2': return 1246000000 + (int64_t)glo_chan * 437500;
+        case '3': return 1202025000;
+        case '4': return 1600995000;
+        case '6': return 1248060000;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/** Byte count of a ULEB128-length-prefixed RLE of \a sym[] over an
+ * alphabet of \a n_sym symbols, omitting trailing runs of symbol 0
+ * (space), as SOCD and SOC2 indicator RLEs do. */
+static size_t rle_symbols_bytes(const unsigned char *sym, int count, int n_sym)
+{
+    size_t rle_used = 0;
+    int ii = 0;
+
+    while (count > 0 && sym[count - 1] == 0)
+        count--;
+    while (ii < count)
+    {
+        int run_start = ii;
+        while (ii < count && sym[ii] == sym[run_start])
+            ii++;
+        rle_used += (size_t)uleb128_len((uint64_t)(ii - run_start - 1) * n_sym
+            + sym[run_start]);
+    }
+    return (size_t)uleb128_len((uint64_t)rle_used) + rle_used;
+}
+
+/** Fill \a sym[] with the SOC2 SSI symbols of \a ssi[]: the indicator's
+ * alphabet index, or 11 where it equals the SSI predicted from
+ * \a svals[] (NULL for no SSI reference).  Returns the index of the first
+ * SSI outside the alphabet (mapped to symbol 0), or -1 if none. */
+static int soc2_ssi_symbols(unsigned char *sym, const char *ssi,
+    const int64_t *svals, int count)
+{
+    int kk, bad = -1;
+    for (kk = 0; kk < count; ++kk)
+    {
+        int idx = indicator_idx((unsigned char)ssi[kk]);
+        if (idx < 0)
+        {
+            if (bad < 0)
+                bad = kk;
+            idx = 0;
+        }
+        if (svals && svals[kk] != INT64_MIN
+            && ssi[kk] == rnx_ssi_from_strength(svals[kk]))
+            idx = 11;
+        sym[kk] = (unsigned char)idx;
+    }
+    return bad;
+}
+
+/** Bytes of the predictor fields (the kind itself is in the mode value). */
+static size_t soc2_pred_bytes(const struct soc2_pred *pr)
+{
+    size_t nn = 0;
+    if (pr->kind == SRNX_PRED_NONE)
+        return nn;
+    nn += (size_t)uleb128_len((uint64_t)pr->ref);
+    nn += (size_t)sleb128_len(pr->num);
+    nn += (size_t)uleb128_len(pr->den);
+    if (pr->kind == SRNX_PRED_RATE)
+    {
+        nn += (size_t)uleb128_len((uint64_t)pr->stencil);
+        nn += (size_t)uleb128_len(pr->max_span);
+    }
+    return nn;
+}
+
+/** Set \a pr's multiplier to num / den in lowest terms. */
+static void soc2_set_ratio(struct soc2_pred *pr, int64_t num, int64_t den)
+{
+    int64_t div = gcd(num, den);
+    if (div > 1)
+    {
+        num /= div;
+        den /= div;
+    }
+    pr->num = num;
+    pr->den = (uint64_t)den;
+}
+
+/** Parse GLONASS SLOT / FRQ # records from the RINEX header \a hdr into
+ * \a glo_chan[slot], leaving GLO_CHAN_UNKNOWN for unlisted slots. */
+static void soc2_parse_glo_chan(const char *hdr, int len, signed char glo_chan[100])
+{
+    const char *end = hdr + len;
+    const char *line;
+
+    memset(glo_chan, GLO_CHAN_UNKNOWN, 100);
+    for (line = hdr; line < end; )
+    {
+        const char *eol = memchr(line, '\n', (size_t)(end - line));
+        size_t line_len = eol ? (size_t)(eol - line) : (size_t)(end - line);
+        if (line_len >= 80 && !memcmp(line + 60, "GLONASS SLOT / FRQ #", 20))
+        {
+            int ii;
+            for (ii = 0; ii + 3 <= 60; ++ii)
+            {
+                if (line[ii] == 'R' && isdigit((unsigned char)line[ii + 1])
+                    && isdigit((unsigned char)line[ii + 2]))
+                {
+                    char field[8];
+                    int slot = (line[ii + 1] - '0') * 10 + (line[ii + 2] - '0');
+                    long chan;
+                    char *endp;
+                    memcpy(field, line + ii + 3, 4);
+                    field[4] = '\0';
+                    chan = strtol(field, &endp, 10);
+                    if (endp != field && chan >= -7 && chan <= 13)
+                        glo_chan[slot] = (signed char)chan;
+                    ii += 6;
+                }
+            }
+        }
+        line += line_len + 1;
+    }
+}
+
+/** Estimate a GLONASS FDMA channel as the one making the band-1
+ * code-minus-carrier sequence smoothest (least total |second difference|). */
+static int soc2_estimate_glo_chan(const int64_t *code, const int64_t *phase,
+    int count)
+{
+    int best_chan = 0, chan, kk;
+    double best_sum = -1;
+
+    for (chan = -7; chan <= 6; ++chan)
+    {
+        int64_t freq = soc2_freq_hz('R', '1', chan);
+        int64_t prev1 = INT64_MIN, prev2 = INT64_MIN;
+        double sum = 0;
+        for (kk = 0; kk < count; ++kk)
+        {
+            int64_t cmc;
+            if (code[kk] == INT64_MIN || phase[kk] == INT64_MIN)
+            {
+                prev1 = prev2 = INT64_MIN;
+                continue;
+            }
+            cmc = code[kk] - rnx_rdiv128((__int128)phase[kk] * 299792458, freq);
+            if (prev1 != INT64_MIN && prev2 != INT64_MIN)
+            {
+                int64_t d2 = cmc - 2 * prev1 + prev2;
+                sum += (double)(d2 < 0 ? -d2 : d2);
+            }
+            prev2 = prev1;
+            prev1 = cmc;
+        }
+        if (best_sum < 0 || sum < best_sum)
+        {
+            best_sum = sum;
+            best_chan = chan;
+        }
+    }
+    return best_chan;
+}
+
+/** Index of the observation of type \a type on the band of \a code,
+ * preferring the same tracking attribute, else the most-present one;
+ * -1 if none. */
+static int soc2_same_band(const struct rinex_system_data *p_sys,
+    const struct rinex_satellite_data *sv, const int *present, char type,
+    const char *code)
+{
+    int jj, best = -1;
+    for (jj = 0; jj < p_sys->n_obs; ++jj)
+    {
+        const char *oc = p_sys->obs[jj];
+        if (oc[0] != type || oc[1] != code[1] || sv->start[jj] < 0)
+            continue;
+        if (oc[2] == code[2])
+            return jj;
+        if (best < 0 || present[jj] > present[best])
+            best = jj;
+    }
+    return best;
+}
+
+/** Plan SOC2 coding for the signals of satellite \a sv: fills \a t7[]
+ * (satellite epoch times, 1e-7 s; obs_used entries) and \a plans[]
+ * (p_sys->n_obs entries).  \a glo_chan_tab is from soc2_parse_glo_chan().
+ * Returns 0, or -1 if out of memory. */
+static int soc2_plan_sv(const struct rinex_data *data,
+    const struct rinex_satellite_data *sv,
+    const struct rinex_system_data *p_sys, const signed char glo_chan_tab[100],
+    int64_t *t7, struct soc2_plan *plans)
+{
+    int count = sv->obs_used, n_obs = p_sys->n_obs;
+    char sys = sv->id[0];
+    int *present;
+    int jj, kk, ref = -1, glo_chan = 0;
+
+    present = calloc((size_t)n_obs, sizeof *present);
+    if (!present)
+        return -1;
+
+    kk = 0;
+    for (jj = 0; jj < sv->when_used; ++jj)
+    {
+        int ei;
+        for (ei = sv->when[jj].start; ei < sv->when[jj].end; ++ei)
+            t7[kk++] = rnx_epoch_time_e7(&data->epoch[ei]);
+    }
+
+    for (jj = 0; jj < n_obs; ++jj)
+    {
+        const int64_t *obs;
+        if (sv->start[jj] < 0)
+            continue;
+        obs = data->obs + sv->start[jj];
+        for (kk = 0; kk < count; ++kk)
+            present[jj] += obs[kk] != INT64_MIN;
+    }
+
+    if (sys == 'R')
+    {
+        int slot = atoi(sv->id + 1);
+        if (slot > 0 && slot < 100 && glo_chan_tab[slot] != GLO_CHAN_UNKNOWN)
+            glo_chan = glo_chan_tab[slot];
+        else
+        {
+            int cj = -1, lj = -1;
+            for (jj = 0; jj < n_obs; ++jj)
+            {
+                const char *oc = p_sys->obs[jj];
+                if (sv->start[jj] < 0 || oc[1] != '1')
+                    continue;
+                if ((oc[0] == 'C' || oc[0] == 'P') && cj < 0)
+                    cj = jj;
+                if (oc[0] == 'L' && lj < 0)
+                    lj = jj;
+            }
+            if (cj >= 0 && lj >= 0)
+                glo_chan = soc2_estimate_glo_chan(data->obs + sv->start[cj],
+                    data->obs + sv->start[lj], count);
+        }
+    }
+
+    /* Reference carrier phase: the one present at the most epochs. */
+    for (jj = 0; jj < n_obs; ++jj)
+    {
+        const char *oc = p_sys->obs[jj];
+        if (sv->start[jj] < 0 || oc[0] != 'L'
+            || !soc2_freq_hz(sys, oc[1], glo_chan))
+            continue;
+        if (ref < 0 || present[jj] > present[ref])
+            ref = jj;
+    }
+
+    for (jj = 0; jj < n_obs; ++jj)
+    {
+        const char *code = p_sys->obs[jj];
+        struct soc2_pred *pred = &plans[jj].pred;
+        int64_t f_tgt;
+        int src;
+
+        memset(pred, 0, sizeof *pred);
+        pred->den = 1;
+        plans[jj].s_ref = -1;
+        if (sv->start[jj] < 0)
+            continue;
+        plans[jj].s_ref = soc2_same_band(p_sys, sv, present, 'S', code);
+
+        f_tgt = soc2_freq_hz(sys, code[1], glo_chan);
+        src = soc2_same_band(p_sys, sv, present, 'L', code);
+        if (src < 0 || !soc2_freq_hz(sys, p_sys->obs[src][1], glo_chan))
+            src = ref;
+        if (ref < 0 || !f_tgt)
+            continue;
+        if (code[0] == 'L' && jj != ref)
+        {
+            int64_t f_ref = soc2_freq_hz(sys, p_sys->obs[ref][1], glo_chan);
+            pred->kind = SRNX_PRED_VALUE;
+            pred->ref = ref;
+            soc2_set_ratio(pred, f_tgt, f_ref);
+        }
+        else if (code[0] == 'C' || code[0] == 'P')
+        {
+            int64_t f_src = soc2_freq_hz(sys, p_sys->obs[src][1], glo_chan);
+            pred->kind = SRNX_PRED_VALUE;
+            pred->ref = src;
+            soc2_set_ratio(pred, 299792458, f_src);
+        }
+        else if (code[0] == 'D')
+        {
+            int64_t f_src = soc2_freq_hz(sys, p_sys->obs[src][1], glo_chan);
+            pred->kind = SRNX_PRED_RATE;
+            pred->ref = src;
+            pred->stencil = 1;
+            pred->max_span = SOC2_DOPPLER_MAX_SPAN;
+            soc2_set_ratio(pred, -f_tgt, f_src);
+        }
+    }
+
+    free(present);
+    return 0;
+}
+
+/** Fill \a seq[] for observations \a obs[] (\a count satellite epochs) at
+ * \a scale under predictor \a pr, with reference values \a ref_vals and
+ * satellite epoch times \a t7: each entry is the scaled residual
+ * x / scale - q, or SOC2_ABSENT, or SOC2_UNPRED.  With kind 0, residuals
+ * are just x / scale.  Returns the number of residuals. */
+static int soc2_build_seq(int64_t *seq, const int64_t *obs, int count,
+    int64_t scale, const struct soc2_pred *pr, const int64_t *ref_vals,
+    const int64_t *t7)
+{
+    int kk, coded = 0;
+
+    for (kk = 0; kk < count; ++kk)
+    {
+        int64_t pp = 0;
+        int avail = 0;
+
+        if (obs[kk] == INT64_MIN)
+        {
+            seq[kk] = SOC2_ABSENT;
+            continue;
+        }
+        if (pr->kind == SRNX_PRED_VALUE && ref_vals[kk] != INT64_MIN)
+        {
+            pp = rnx_rdiv128((__int128)ref_vals[kk] * pr->num, (__int128)pr->den);
+            avail = 1;
+        }
+        else if (pr->kind == SRNX_PRED_RATE)
+        {
+            int aa = pr->stencil == 2 ? kk : kk - 1;
+            int bb = pr->stencil == 0 ? kk : kk + 1;
+            if (aa >= 0 && bb < count && ref_vals[aa] != INT64_MIN
+                && ref_vals[bb] != INT64_MIN)
+            {
+                int64_t dt = t7[bb] - t7[aa];
+                if (dt > 0 && (pr->max_span == 0 || (uint64_t)dt <= pr->max_span))
+                {
+                    pp = rnx_rdiv128((__int128)(ref_vals[bb] - ref_vals[aa])
+                        * 10000000 * pr->num, (__int128)dt * pr->den);
+                    avail = 1;
+                }
+            }
+        }
+
+        if (pr->kind == SRNX_PRED_NONE)
+        {
+            seq[kk] = obs[kk] / scale;
+            coded++;
+        }
+        else if (avail)
+        {
+            seq[kk] = obs[kk] / scale - rnx_rdiv128(pp, scale);
+            coded++;
+        }
+        else
+            seq[kk] = SOC2_UNPRED;
+    }
+    return coded;
+}
+
+/** Bytes of the absent-value (0xFD) and unpredicted-value (0xFC) blocks
+ * that \a seq[] needs. */
+static size_t soc2_marker_bytes(const int64_t *seq, const int64_t *obs,
+    int count, int64_t scale)
+{
+    size_t bytes = 0;
+    int kk, run;
+
+    for (kk = 0; kk < count; kk += run)
+    {
+        int64_t marker = seq[kk];
+        run = 1;
+        if (marker != SOC2_ABSENT && marker != SOC2_UNPRED)
+            continue;
+        while (kk + run < count && seq[kk + run] == marker)
+            run++;
+        bytes += 1 + (size_t)uleb128_len((uint64_t)(run - 1));
+        if (marker == SOC2_UNPRED)
+        {
+            int jj;
+            for (jj = kk; jj < kk + run; ++jj)
+                bytes += (size_t)sleb128_len(obs[jj] / scale);
+        }
+    }
+    return bytes;
+}
+
 #if !defined(RNX2SRNX_SEARCH)
 /* ============================================================
  * rnx2srnx: the real converter.  Writes an actual SRNX file.
@@ -245,6 +983,9 @@ static int parse_digest_flag(const char *arg, const char *prefix, int *out)
 
 /* Output filename for cleanup on fatal error. */
 static const char *g_output_name;
+
+/* Nonzero (--socd) to write revision 1.0 SOCD chunks instead of SOC2. */
+static int g_use_socd;
 
 /* ---- Memory-mapped output buffer ---- */
 
@@ -475,6 +1216,9 @@ struct rnx2srnx_scratch
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a; /**< cap; "best so far" */
     struct block_choice *choices_b; /**< cap; "candidate" */
+    uint64_t *rice_q;        /**< (RNX_RICE_MAX_R + 1) * (cap + 1) : SOC2 prefix sums of q+1 per Rice parameter */
+    uint64_t *usum;          /**< cap + 1 : SOC2 prefix sums of capped zigzag values */
+    int64_t *seq;            /**< 2 * cap : SOC2 candidate value sequences */
 };
 
 static void scratch_init(struct rnx2srnx_scratch *s)
@@ -493,6 +1237,9 @@ static void scratch_free(struct rnx2srnx_scratch *s)
     free(s->psum_arr);
     free(s->choices_a);
     free(s->choices_b);
+    free(s->rice_q);
+    free(s->usum);
+    free(s->seq);
     memset(s, 0, sizeof *s);
 }
 
@@ -523,6 +1270,10 @@ static void scratch_reserve(struct rnx2srnx_scratch *s, size_t need)
     s->psum_arr       = xrealloc(s->psum_arr,   (cap + 1) * sizeof *s->psum_arr);
     s->choices_a      = xrealloc(s->choices_a,        cap * sizeof *s->choices_a);
     s->choices_b      = xrealloc(s->choices_b,        cap * sizeof *s->choices_b);
+    s->rice_q         = xrealloc(s->rice_q,
+        (size_t)(RNX_RICE_MAX_R + 1) * (cap + 1) * sizeof *s->rice_q);
+    s->usum           = xrealloc(s->usum,       (cap + 1) * sizeof *s->usum);
+    s->seq            = xrealloc(s->seq,          2 * cap * sizeof *s->seq);
     s->cap = cap;
 }
 
@@ -889,15 +1640,15 @@ static int select_delta_order(struct rnx2srnx_scratch *scratch,
 
 /* ---- Bit-matrix transposition (encode direction) ---- */
 
-/** Write a bit-transposed block of \a count values, each \a bits wide.
- * count must be 16 or 32.
+/** Write a bit-transposed block of \a count values (a multiple of 8, at
+ * most RNX_MAX_RICE_BLOCK), each \a bits wide (at most 32).
  */
 static void write_transposed_block(struct wbuf *wb, const int64_t *vals,
     int count, int bits)
 {
     int byte_col, row;
     int bytes_per_row = count >> 3;
-    char matrix[32 * 16]; /* max 32 bits * 16 bytes/row for count=128 = 512 bytes */
+    char matrix[32 * (RNX_MAX_RICE_BLOCK / 8)];
 
     /* Process 8 columns at a time (one output byte per row).
      * Each group of 8 vals[] is loaded once and reused across all rows,
@@ -969,6 +1720,8 @@ static void emit_blocks(struct wbuf *packed, const int64_t *ord_vals,
                 wbuf_sleb128(packed, ord_vals[ii + jj]);
             break;
         }
+        case BK_RICE:
+            fail_and_exit("split-Rice block in SOCD encoding");
         }
 
         ii += c.len;
@@ -1190,6 +1943,343 @@ static size_t write_socd_chunk(struct mmbuf *mm,
     return offset;
 }
 
+/* ---- Write SOC2 chunk ---- */
+
+/** Rice-DP scratch view of the converter's scratch buffers. */
+static struct rice_scratch enc_rice_scratch(struct rnx2srnx_scratch *scratch)
+{
+    struct rice_scratch rs;
+    rs.dp = scratch->dp;
+    rs.psum = scratch->psum_arr;
+    rs.usum = scratch->usum;
+    rs.rice_q = scratch->rice_q;
+    rs.stride = scratch->cap + 1;
+    return rs;
+}
+
+/** Select the delta order minimizing the split-Rice cost of the \a count
+ * values whose delta matrix is \a delta_matrix; like select_delta_order(),
+ * \a *out_choices receives the chosen order's block choices. */
+static int select_delta_order_rice(struct rnx2srnx_scratch *scratch,
+    const int64_t *delta_matrix, int count, struct block_choice **out_choices)
+{
+    struct rice_scratch rs = enc_rice_scratch(scratch);
+    struct block_choice *best_buf = scratch->choices_a;
+    struct block_choice *cand_buf = scratch->choices_b;
+    int64_t best_cost;
+    int best_order = 0, ord, no_improve = 0;
+
+    best_cost = rice_dp(&rs, delta_matrix, count, rnx_rice_block_sizes,
+        RNX_N_BLOCK_SIZES, best_buf);
+    for (ord = 1; ord <= 7 && ord < count; ++ord)
+    {
+        int64_t cost = ord + rice_dp(&rs, delta_matrix + (size_t)ord * count,
+            count, rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, cand_buf);
+        if (cost < best_cost)
+        {
+            struct block_choice *tmp = best_buf;
+            best_buf = cand_buf;
+            cand_buf = tmp;
+            best_cost = cost;
+            best_order = ord;
+            no_improve = 0;
+        }
+        else if (++no_improve >= 2)
+            break;
+    }
+
+    *out_choices = best_buf;
+    return best_order;
+}
+
+/** Write a split-Rice block of \a m values with Rice parameter \a rr:
+ * the header byte, the transposed matrix of remainders, then the unary
+ * quotients padded to a byte boundary. */
+static void write_rice_block(struct wbuf *wb, const int64_t *vals, int m, int rr)
+{
+    int64_t rem[RNX_MAX_RICE_BLOCK];
+    uint64_t mask = rr ? ((uint64_t)1 << rr) - 1 : 0;
+    unsigned acc = 0;
+    int size_idx, nbits = 0, ii;
+
+    for (size_idx = 0; size_idx < RNX_N_BLOCK_SIZES - 1; ++size_idx)
+        if (rnx_rice_block_sizes[size_idx] == m)
+            break;
+    wbuf_byte(wb, (unsigned char)(size_idx << 5 | rr));
+
+    if (rr > 0)
+    {
+        for (ii = 0; ii < m; ++ii)
+        {
+            uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
+            rem[ii] = (int64_t)(uu & mask);
+        }
+        write_transposed_block(wb, rem, m, rr);
+    }
+
+    /* Quotients: q one bits then a zero bit, most significant bit first. */
+    for (ii = 0; ii < m; ++ii)
+    {
+        uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
+        uint64_t qq = uu >> rr;
+        for (; qq > 0; --qq)
+        {
+            acc = acc << 1 | 1;
+            if (++nbits == 8)
+            {
+                wbuf_byte(wb, (unsigned char)acc);
+                acc = 0;
+                nbits = 0;
+            }
+        }
+        acc <<= 1;
+        if (++nbits == 8)
+        {
+            wbuf_byte(wb, (unsigned char)acc);
+            acc = 0;
+            nbits = 0;
+        }
+    }
+    if (nbits > 0)
+        wbuf_byte(wb, (unsigned char)(acc << (8 - nbits)));
+}
+
+/** Emit SOC2 blocks for \a run_len values from \a ord_vals using \a choices. */
+static void emit_rice_blocks(struct wbuf *packed, const int64_t *ord_vals,
+    int run_len, const struct block_choice *choices)
+{
+    int ii = 0, jj;
+    while (ii < run_len)
+    {
+        struct block_choice cc = choices[ii];
+        switch (cc.kind)
+        {
+        case BK_RICE:
+            write_rice_block(packed, ord_vals + ii, cc.len, cc.bw);
+            break;
+        case BK_ZERO:
+            wbuf_byte(packed, 0xFE);
+            wbuf_uleb128(packed, cc.len - 1);
+            break;
+        case BK_SLEB:
+            wbuf_byte(packed, 0xFF);
+            wbuf_uleb128(packed, cc.len - 1);
+            for (jj = 0; jj < cc.len; ++jj)
+                wbuf_sleb128(packed, ord_vals[ii + jj]);
+            break;
+        case BK_BLOCK:
+            fail_and_exit("bit-matrix block in SOC2 encoding");
+        }
+        ii += cc.len;
+    }
+}
+
+/** Encode SOC2 packed observation data for \a seq[] (scaled residuals or
+ * SOC2_ABSENT / SOC2_UNPRED markers; \a obs[] supplies unpredicted
+ * values) into \a out, with its ULEB128 length prefix. */
+static void encode_soc2_packed(struct wbuf *out, struct rnx2srnx_scratch *scratch,
+    const int64_t *seq, const int64_t *obs, int count, int64_t scale)
+{
+    struct wbuf packed;
+    struct block_choice *cached_choices = NULL;
+    const int64_t *ord_vals = NULL;
+    int64_t *coded = scratch->present_scaled;
+    int ii, pi, n_coded = 0, order = 0;
+
+    for (ii = 0; ii < count; ++ii)
+        if (seq[ii] > SOC2_UNPRED)
+            coded[n_coded++] = seq[ii];
+    if (n_coded > 0)
+    {
+        compute_delta_matrix(scratch->delta_matrix, coded, n_coded);
+        order = select_delta_order_rice(scratch, scratch->delta_matrix,
+            n_coded, &cached_choices);
+        ord_vals = scratch->delta_matrix + (size_t)order * n_coded;
+    }
+
+    wbuf_init(&packed);
+    if (scale > 1)
+    {
+        wbuf_uleb128(&packed, order + 8);
+        wbuf_uleb128(&packed, scale);
+    }
+    else
+        wbuf_uleb128(&packed, order);
+    for (ii = 0; ii < order; ++ii)
+        wbuf_sleb128(&packed, 0);
+
+    for (ii = 0, pi = 0; ii < count; )
+    {
+        int run = 1, jj;
+        if (seq[ii] == SOC2_ABSENT || seq[ii] == SOC2_UNPRED)
+        {
+            while (ii + run < count && seq[ii + run] == seq[ii])
+                run++;
+            wbuf_byte(&packed, seq[ii] == SOC2_ABSENT ? 0xFD : SRNX_BLOCK_UNPRED);
+            wbuf_uleb128(&packed, run - 1);
+            if (seq[ii] == SOC2_UNPRED)
+                for (jj = ii; jj < ii + run; ++jj)
+                    wbuf_sleb128(&packed, obs[jj] / scale);
+        }
+        else
+        {
+            const struct block_choice *choices = cached_choices;
+            while (ii + run < count && seq[ii + run] > SOC2_UNPRED)
+                run++;
+            /* Whole-sequence choices are valid only for a single run. */
+            if (!(pi == 0 && run == n_coded))
+            {
+                struct rice_scratch rs = enc_rice_scratch(scratch);
+                rice_dp(&rs, ord_vals + pi, run, rnx_rice_block_sizes,
+                    RNX_N_BLOCK_SIZES, scratch->choices_b);
+                choices = scratch->choices_b;
+            }
+            emit_rice_blocks(&packed, ord_vals + pi, run, choices);
+            pi += run;
+        }
+        ii += run;
+    }
+
+    wbuf_uleb128(out, packed.used);
+    wbuf_append(out, packed.data, packed.used);
+    wbuf_free(&packed);
+}
+
+/** Write a ULEB128-length-prefixed RLE of \a sym[] over \a n_sym symbols. */
+static void wbuf_rle_symbols(struct wbuf *wb, const unsigned char *sym,
+    int count, int n_sym)
+{
+    struct wbuf rle;
+    int ii = 0;
+
+    wbuf_init(&rle);
+    while (count > 0 && sym[count - 1] == 0)
+        count--;
+    while (ii < count)
+    {
+        int run_start = ii;
+        while (ii < count && sym[ii] == sym[run_start])
+            ii++;
+        wbuf_uleb128(&rle, (uint64_t)(ii - run_start - 1) * n_sym + sym[run_start]);
+    }
+    wbuf_uleb128(wb, rle.used);
+    wbuf_append(wb, rle.data, rle.used);
+    wbuf_free(&rle);
+}
+
+/** Write a SOC2 chunk for one (satellite, signal) pair, using the planned
+ * predictor and SSI reference only where they make the chunk smaller.
+ * Returns the offset (within \a mm) where the chunk starts.
+ */
+static size_t write_soc2_chunk(struct mmbuf *mm,
+    struct rnx2srnx_scratch *scratch,
+    const struct rinex_data *data,
+    const struct rinex_satellite_data *sv, int sig_idx,
+    const struct rinex_system_data *p_sys,
+    const struct soc2_plan *plan, const int64_t *t7,
+    const char *filename)
+{
+    static const struct soc2_pred none = {0, 0, 0, 1, 0, 0};
+    struct wbuf payload, packed[2];
+    const struct soc2_pred *pred[2];
+    char obs_name[8];
+    const int64_t *obs_arr;
+    const char *lli_arr, *ssi_arr;
+    unsigned char *sym;
+    size_t offset, ssi_plain, ssi_pred = SIZE_MAX, cost[2];
+    int obs_count, ii, bad, n_cand, best, ssi_ref = 0;
+    int64_t obs_gcd;
+
+    if (sv->start[sig_idx] < 0)
+        return 0;
+    obs_arr = data->obs + sv->start[sig_idx];
+    lli_arr = data->lli + sv->start[sig_idx];
+    ssi_arr = data->ssi + sv->start[sig_idx];
+    obs_count = sv->obs_used;
+    scratch_reserve(scratch, (size_t)obs_count);
+
+    memset(obs_name, 0, 8);
+    memcpy(obs_name, sv->id, 3);
+    memcpy(obs_name + 4, p_sys->obs[sig_idx], 3);
+
+    obs_gcd = 0;
+    for (ii = 0; ii < obs_count; ++ii)
+        if (obs_arr[ii] != INT64_MIN)
+            obs_gcd = gcd(obs_gcd, obs_arr[ii]);
+    if (obs_gcd <= 0 || obs_gcd > 1000000)
+        obs_gcd = 1;
+
+    /* SSI coding: plain, or against the planned S observation. */
+    sym = (unsigned char *)xrealloc(NULL, (size_t)obs_count);
+    bad = soc2_ssi_symbols(sym, ssi_arr, NULL, obs_count);
+    if (bad >= 0)
+    {
+        fail_and_exit("%s: %s_%s SSI byte 0x%02X not in alphabet (%d/%d)",
+            filename, obs_name, obs_name + 4, (unsigned char)ssi_arr[bad],
+            bad, obs_count);
+    }
+    ssi_plain = 1 + rle_symbols_bytes(sym, obs_count, 11);
+    if (plan->s_ref >= 0)
+    {
+        soc2_ssi_symbols(sym, ssi_arr, data->obs + sv->start[plan->s_ref], obs_count);
+        ssi_pred = (size_t)uleb128_len(((uint64_t)plan->s_ref + 1) << 2)
+            + rle_symbols_bytes(sym, obs_count, 12);
+        if (ssi_pred < ssi_plain)
+            ssi_ref = plan->s_ref + 1;
+    }
+
+    /* Code the values without and (if planned) with the predictor, and
+     * keep the smaller. */
+    pred[0] = &none;
+    pred[1] = &plan->pred;
+    n_cand = plan->pred.kind != SRNX_PRED_NONE ? 2 : 1;
+    best = 0;
+    for (ii = 0; ii < n_cand; ++ii)
+    {
+        int64_t *seq = scratch->seq + (size_t)ii * scratch->cap;
+        soc2_build_seq(seq, obs_arr, obs_count, obs_gcd, pred[ii],
+            ii ? data->obs + sv->start[pred[ii]->ref] : NULL, t7);
+        wbuf_init(&packed[ii]);
+        encode_soc2_packed(&packed[ii], scratch, seq, obs_arr, obs_count, obs_gcd);
+        cost[ii] = soc2_pred_bytes(pred[ii]) + packed[ii].used;
+        if (cost[ii] < cost[best])
+            best = ii;
+    }
+
+    wbuf_init(&payload);
+    wbuf_append(&payload, obs_name, 8);
+    wbuf_uleb128(&payload, obs_count - 1);
+    rle_encode_indicators(&payload, lli_arr, obs_count, filename, "LLI", obs_name);
+    wbuf_uleb128(&payload, (uint64_t)ssi_ref << 2 | (uint64_t)pred[best]->kind);
+    if (ssi_ref)
+        wbuf_rle_symbols(&payload, sym, obs_count, 12);
+    else
+    {
+        soc2_ssi_symbols(sym, ssi_arr, NULL, obs_count);
+        wbuf_rle_symbols(&payload, sym, obs_count, 11);
+    }
+    if (pred[best]->kind != SRNX_PRED_NONE)
+    {
+        wbuf_uleb128(&payload, (uint64_t)pred[best]->ref);
+        wbuf_sleb128(&payload, pred[best]->num);
+        wbuf_uleb128(&payload, pred[best]->den);
+        if (pred[best]->kind == SRNX_PRED_RATE)
+        {
+            wbuf_uleb128(&payload, (uint64_t)pred[best]->stencil);
+            wbuf_uleb128(&payload, pred[best]->max_span);
+        }
+    }
+    wbuf_append(&payload, packed[best].data, packed[best].used);
+
+    offset = mm->used;
+    write_chunk(mm, "SOC2", payload.data, payload.used);
+    wbuf_free(&payload);
+    for (ii = 0; ii < n_cand; ++ii)
+        wbuf_free(&packed[ii]);
+    free(sym);
+    return offset;
+}
+
 /* ---- Write SATE chunk ---- */
 
 static size_t write_sate_chunk(struct mmbuf *mm,
@@ -1388,12 +2478,12 @@ static size_t write_srnx_header(struct mmbuf *mm)
     memset(payload, 0, sizeof payload);
 
     /* Build payload into a fixed-size buffer.
-     * Fields: major=1, minor=0, chunk_digest=<g_chunk_digest_id>,
+     * Fields: major=1, minor=1 (0 with --socd), chunk_digest=<g_chunk_digest_id>,
      * file_digest=<g_file_digest_id>, sdir_offset=0 (patched later), padding.
      */
     wbuf_init(&tmp);
     wbuf_uleb128(&tmp, 1); /* major */
-    wbuf_uleb128(&tmp, 0); /* minor */
+    wbuf_uleb128(&tmp, g_use_socd ? 0 : 1); /* minor: 1 when using SOC2 */
     wbuf_uleb128(&tmp, (uint64_t)g_chunk_digest_id); /* chunk digest */
     wbuf_uleb128(&tmp, (uint64_t)g_file_digest_id); /* file digest */
     /* sdir_offset starts here; leave as zeros for patching */
@@ -1548,6 +2638,7 @@ static int rnx2srnx(const char input_name[], const char output_name[])
     const char *err;
     size_t sdir_field_offset, epoc_offset, evtf_offset, sdir_offset;
     struct sdir_entry *sdir_entries = NULL;
+    signed char glo_chan[100];
     int n_sdir = 0, sdir_alloc = 0;
     int sys_idx, status = 0;
 
@@ -1638,6 +2729,9 @@ static int rnx2srnx(const char input_name[], const char output_name[])
     mm.cap = cap;
     mm.used = 0;
 
+    /* GLONASS frequency channels for SOC2 predictors. */
+    soc2_parse_glo_chan(data.file_header, data.file_header_len, glo_chan);
+
     /* 1. Write SRNX header (with placeholder SDIR offset). */
     sdir_field_offset = write_srnx_header(&mm);
 
@@ -1683,8 +2777,48 @@ static int rnx2srnx(const char input_name[], const char output_name[])
                 fprintf(stderr, "Out of memory\n");
                 status = 1; goto done;
             }
-            for (jj = 0; jj < n_obs; ++jj)
-                socd_offsets[jj] = write_socd_chunk(&mm, &scratch, &data, p_sv, jj, p_sys, input_name);
+            if (g_use_socd)
+            {
+                for (jj = 0; jj < n_obs; ++jj)
+                    socd_offsets[jj] = write_socd_chunk(&mm, &scratch, &data,
+                        p_sv, jj, p_sys, input_name);
+            }
+            else
+            {
+                struct soc2_plan *plans;
+                int64_t *t7;
+                int pass;
+
+                plans = calloc((size_t)n_obs, sizeof *plans);
+                t7 = calloc((size_t)p_sv->obs_used, sizeof *t7);
+                if (!plans || !t7
+                    || soc2_plan_sv(&data, p_sv, p_sys, glo_chan, t7, plans) != 0)
+                {
+                    free(plans);
+                    free(t7);
+                    free(socd_offsets);
+                    fprintf(stderr, "Out of memory\n");
+                    status = 1; goto done;
+                }
+                /* Write referenced chunks first: unpredicted signals (the
+                 * reference phases), then predicted carrier phases, then
+                 * everything predicted from carrier phase. */
+                for (pass = 0; pass < 3; ++pass)
+                {
+                    for (jj = 0; jj < n_obs; ++jj)
+                    {
+                        int kind = plans[jj].pred.kind;
+                        int phase = p_sys->obs[jj][0] == 'L';
+                        if ((pass == 0) != (kind == SRNX_PRED_NONE)
+                            || (pass == 1 && !phase) || (pass == 2 && phase))
+                            continue;
+                        socd_offsets[jj] = write_soc2_chunk(&mm, &scratch,
+                            &data, p_sv, jj, p_sys, &plans[jj], t7, input_name);
+                    }
+                }
+                free(plans);
+                free(t7);
+            }
 
             /* Write SATE chunk. */
             sate_pos = mm.used;
@@ -1806,8 +2940,9 @@ static int run_check(const char *input, const char *output)
 static void usage(FILE *out, const char *argv0)
 {
     fprintf(out, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
-        "          [--max-sleb-run=<N>] [--check] [--] <input.rnx|-> [output.srnx]\n"
-        "'-' as input reads from stdin and requires an explicit output name.\n",
+        "          [--max-sleb-run=<N>] [--socd] [--check] [--] <input.rnx|-> [output.srnx]\n"
+        "'-' as input reads from stdin and requires an explicit output name.\n"
+        "--socd writes revision 1.0 SOCD chunks instead of SOC2.\n",
         argv0);
 }
 
@@ -1841,6 +2976,11 @@ int main(int argc, char *argv[])
         if (!strcmp(arg, "--check"))
         {
             do_check = 1;
+            continue;
+        }
+        if (!strcmp(arg, "--socd"))
+        {
+            g_use_socd = 1;
             continue;
         }
         if (!strcmp(arg, "--help"))
@@ -1986,12 +3126,6 @@ static void cbuf_skip(struct cbuf *wb, size_t len)
     wb->used += len;
 }
 
-static int sleb128_len(int64_t val)
-{
-    uint64_t uv = ((uint64_t)val << 1) ^ (uint64_t)(val >> 63);
-    return uleb128_len(uv);
-}
-
 static void cbuf_uleb128(struct cbuf *wb, uint64_t val)
 {
     wb->used += uleb128_len(val);
@@ -2019,12 +3153,9 @@ struct scratch
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a;
     struct block_choice *choices_b;
-    uint64_t *rice_q;        /**< (RICE_MAX_R + 1) * (cap + 1), --soc2 only : prefix sums of q+1 per Rice parameter */
+    uint64_t *rice_q;        /**< (RNX_RICE_MAX_R + 1) * (cap + 1), --soc2 only : prefix sums of q+1 per Rice parameter */
     uint64_t *usum;          /**< cap + 1, --soc2 only : prefix sums of capped zigzag values */
 };
-
-/* Largest Rice parameter a SOC2 split-Rice block header can hold. */
-#define RICE_MAX_R 31
 
 static void *xrealloc(void *p, size_t bytes)
 {
@@ -2075,7 +3206,7 @@ static void scratch_reserve(struct scratch *s, size_t need)
     if (g_soc2)
     {
         s->rice_q = xrealloc(s->rice_q,
-            (size_t)(RICE_MAX_R + 1) * (cap + 1) * sizeof *s->rice_q);
+            (size_t)(RNX_RICE_MAX_R + 1) * (cap + 1) * sizeof *s->rice_q);
         s->usum   = xrealloc(s->usum, (cap + 1) * sizeof *s->usum);
     }
     s->cap = cap;
@@ -2135,121 +3266,6 @@ static inline uint8_t spt_query(const uint8_t *spt, size_t cap, int ii, int m)
     uint8_t a = level[ii];
     uint8_t b = level[ii + m - (1 << k)];
     return a > b ? a : b;
-}
-
-/** Best SLEB128-run edge starting at \a ii.
- *
- * Minimises `2 + (psum[ii + L] - psum[ii]) + dp[ii + L]` over lengths
- * L in [1, max_L], storing the best L in \a *out_L.  Costs fit in int32
- * (dp < 30 MB; psum delta <= 160 bytes for 16 vals).  Processes 16-wide
- * SIMD chunks updating the running argmin; a scalar tail (starting at
- * chunk_start) handles any remainder. */
-static inline int64_t sleb_run_best(const int64_t *dp, const uint32_t *psum,
-    int ii, int max_L, int *out_L)
-{
-    uint32_t pii = psum[ii];
-    int64_t sleb_min = INT64_MAX;
-    int sleb_min_L = 0;
-    int chunk_start = 1, L;
-#if defined(__ARM_NEON)
-    for (; chunk_start + 15 <= max_L; chunk_start += 16)
-    {
-        const int64_t *dpv = dp + ii + chunk_start;
-        int32x4_t dp0 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 0)), vmovn_s64(vld1q_s64(dpv+ 2)));
-        int32x4_t dp1 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 4)), vmovn_s64(vld1q_s64(dpv+ 6)));
-        int32x4_t dp2 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+ 8)), vmovn_s64(vld1q_s64(dpv+10)));
-        int32x4_t dp3 = vcombine_s32(vmovn_s64(vld1q_s64(dpv+12)), vmovn_s64(vld1q_s64(dpv+14)));
-        uint32x4_t pii_v = vdupq_n_u32(pii);
-        const uint32_t *psv = psum + ii + chunk_start;
-        int32x4_t d0 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 0), pii_v));
-        int32x4_t d1 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 4), pii_v));
-        int32x4_t d2 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+ 8), pii_v));
-        int32x4_t d3 = vreinterpretq_s32_u32(vsubq_u32(vld1q_u32(psv+12), pii_v));
-        int32x4_t two = vdupq_n_s32(2);
-        int32x4_t c0 = vaddq_s32(vaddq_s32(d0, dp0), two);
-        int32x4_t c1 = vaddq_s32(vaddq_s32(d1, dp1), two);
-        int32x4_t c2 = vaddq_s32(vaddq_s32(d2, dp2), two);
-        int32x4_t c3 = vaddq_s32(vaddq_s32(d3, dp3), two);
-        int b = chunk_start;
-        int32x4_t i0 = (int32x4_t){b+ 0, b+ 1, b+ 2, b+ 3};
-        int32x4_t i1 = (int32x4_t){b+ 4, b+ 5, b+ 6, b+ 7};
-        int32x4_t i2 = (int32x4_t){b+ 8, b+ 9, b+10, b+11};
-        int32x4_t i3 = (int32x4_t){b+12, b+13, b+14, b+15};
-        uint32x4_t gt;
-        gt = vcgtq_s32(c0, c1); c0 = vbslq_s32(gt, c1, c0); i0 = vbslq_s32(gt, i1, i0);
-        gt = vcgtq_s32(c2, c3); c2 = vbslq_s32(gt, c3, c2); i2 = vbslq_s32(gt, i3, i2);
-        gt = vcgtq_s32(c0, c2); c0 = vbslq_s32(gt, c2, c0); i0 = vbslq_s32(gt, i2, i0);
-        int32x2_t c_lo = vget_low_s32(c0), c_hi = vget_high_s32(c0);
-        int32x2_t i_lo = vget_low_s32(i0), i_hi = vget_high_s32(i0);
-        uint32x2_t gt2 = vcgt_s32(c_lo, c_hi);
-        c_lo = vbsl_s32(gt2, c_hi, c_lo);
-        i_lo = vbsl_s32(gt2, i_hi, i_lo);
-        int32_t ca = vget_lane_s32(c_lo, 0), ia = vget_lane_s32(i_lo, 0);
-        int32_t cb = vget_lane_s32(c_lo, 1), ib = vget_lane_s32(i_lo, 1);
-        int32_t chunk_min = (ca <= cb) ? ca : cb;
-        int chunk_min_L = (ca <= cb) ? ia : ib;
-        if (chunk_min < sleb_min) { sleb_min = chunk_min; sleb_min_L = chunk_min_L; }
-    }
-#elif defined(__AVX2__)
-    for (; chunk_start + 15 <= max_L; chunk_start += 16)
-    {
-        const int64_t *dpv = dp + ii + chunk_start;
-        __m128i n03 = _mm_unpacklo_epi64(
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 0)), 0x08),
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 2)), 0x08));
-        __m128i n47 = _mm_unpacklo_epi64(
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 4)), 0x08),
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 6)), 0x08));
-        __m128i n8b = _mm_unpacklo_epi64(
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+ 8)), 0x08),
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+10)), 0x08));
-        __m128i ncf = _mm_unpacklo_epi64(
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+12)), 0x08),
-            _mm_shuffle_epi32(_mm_loadu_si128((__m128i*)(dpv+14)), 0x08));
-        __m256i dp0 = _mm256_set_m128i(n47, n03);
-        __m256i dp1 = _mm256_set_m128i(ncf, n8b);
-        __m256i pii_v = _mm256_set1_epi32((int)pii);
-        const uint32_t *psv = psum + ii + chunk_start;
-        __m256i d0 = _mm256_sub_epi32(_mm256_loadu_si256((__m256i*)(psv+ 0)), pii_v);
-        __m256i d1 = _mm256_sub_epi32(_mm256_loadu_si256((__m256i*)(psv+ 8)), pii_v);
-        __m256i two = _mm256_set1_epi32(2);
-        __m256i c0 = _mm256_add_epi32(_mm256_add_epi32(d0, dp0), two);
-        __m256i c1 = _mm256_add_epi32(_mm256_add_epi32(d1, dp1), two);
-        int b = chunk_start;
-        __m256i i0 = _mm256_set_epi32(b+7, b+6, b+5, b+4, b+3, b+2, b+1, b+0);
-        __m256i i1 = _mm256_set_epi32(b+15, b+14, b+13, b+12, b+11, b+10, b+9, b+8);
-        __m256i gt = _mm256_cmpgt_epi32(c0, c1);
-        __m256i cv = _mm256_blendv_epi8(c0, c1, gt);
-        __m256i iv = _mm256_blendv_epi8(i0, i1, gt);
-        __m128i cv_lo = _mm256_castsi256_si128(cv);
-        __m128i cv_hi = _mm256_extracti128_si256(cv, 1);
-        __m128i iv_lo = _mm256_castsi256_si128(iv);
-        __m128i iv_hi = _mm256_extracti128_si256(iv, 1);
-        __m128i gt2 = _mm_cmpgt_epi32(cv_lo, cv_hi);
-        cv_lo = _mm_blendv_epi8(cv_lo, cv_hi, gt2);
-        iv_lo = _mm_blendv_epi8(iv_lo, iv_hi, gt2);
-        __m128i cv_r = _mm_shuffle_epi32(cv_lo, 0x4E);
-        __m128i iv_r = _mm_shuffle_epi32(iv_lo, 0x4E);
-        __m128i gt3 = _mm_cmpgt_epi32(cv_lo, cv_r);
-        cv_lo = _mm_blendv_epi8(cv_lo, cv_r, gt3);
-        iv_lo = _mm_blendv_epi8(iv_lo, iv_r, gt3);
-        cv_r = _mm_shuffle_epi32(cv_lo, 0xB1);
-        iv_r = _mm_shuffle_epi32(iv_lo, 0xB1);
-        __m128i gt4 = _mm_cmpgt_epi32(cv_lo, cv_r);
-        cv_lo = _mm_blendv_epi8(cv_lo, cv_r, gt4);
-        iv_lo = _mm_blendv_epi8(iv_lo, iv_r, gt4);
-        int32_t chunk_min = _mm_cvtsi128_si32(cv_lo);
-        int chunk_min_L = _mm_cvtsi128_si32(iv_lo);
-        if (chunk_min < sleb_min) { sleb_min = chunk_min; sleb_min_L = chunk_min_L; }
-    }
-#endif /* __ARM_NEON || __AVX2__ */
-    for (L = chunk_start; L <= max_L; ++L)
-    {
-        int64_t c = 2 + (int64_t)(psum[ii + L] - pii) + dp[ii + L];
-        if (c < sleb_min) { sleb_min = c; sleb_min_L = L; }
-    }
-    *out_L = sleb_min_L;
-    return sleb_min;
 }
 
 /** Core DP: walk right-to-left choosing the best block edge per position.
@@ -2345,121 +3361,19 @@ static int64_t dp_core(struct scratch *scratch,
     return dp[0];
 }
 
-/* Quotients above this are capped when summing; such a block costs far
- * more than an SLEB128 run, so the DP never selects it. */
-#define RICE_Q_CAP ((uint64_t)1 << 32)
-
-/* Zigzag values above this are capped when estimating a block's mean. */
-#define RICE_U_CAP ((uint64_t)1 << 40)
-
-/** SOC2 split-Rice DP: the same shortest-path search as dp_core(), but
- * each candidate block of m values is a split-Rice block costing
- * 1 + r*m/8 + ceil(sum(q + 1) / 8) bytes for its best Rice parameter r.
- *
- * The best r lies in [0, floor(log2(mean u)) + 1]; values above the mean
- * (outliers) can pull it lower, so the search starts at zero.  Zero-run
- * and SLEB128-run edges are as in SOCD.  Requires scratch reserved for
- * at least \a count values. */
+/** SOC2 split-Rice DP over the runtime tuple; see rice_dp().  Requires
+ * scratch reserved for at least \a count values. */
 static int64_t dp_core_rice(struct scratch *scratch, const int64_t *vals,
     int count)
 {
-    size_t stride = scratch->cap + 1;
-    uint64_t *rice_q = scratch->rice_q;
-    uint64_t *usum = scratch->usum;
-    uint32_t *psum = scratch->psum_arr;
-    int64_t *dp = scratch->dp;
-    uint64_t u_max = 0;
-    int ii, rr, ci, zlen_next, r_max;
+    struct rice_scratch rs;
 
-    /* The search below never exceeds r = bitlen(mean u) <= bitlen(max u),
-     * so only those prefix rows are needed. */
-    for (ii = 0; ii < count; ++ii)
-    {
-        uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
-        if (uu > u_max)
-            u_max = uu;
-    }
-    if (u_max > RICE_U_CAP)
-        u_max = RICE_U_CAP;
-    r_max = u_max ? 64 - __builtin_clzll(u_max) : 1;
-    if (r_max > RICE_MAX_R)
-        r_max = RICE_MAX_R;
-
-    usum[0] = 0;
-    psum[0] = 0;
-    for (rr = 0; rr <= r_max; ++rr)
-        rice_q[rr * stride] = 0;
-    for (ii = 0; ii < count; ++ii)
-    {
-        uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
-        uint8_t bw = twos_comp_bw(vals[ii]);
-        usum[ii + 1] = usum[ii] + (uu < RICE_U_CAP ? uu : RICE_U_CAP);
-        psum[ii + 1] = psum[ii] + sleb128_len_from_bw[bw > 64 ? 64 : bw];
-        for (rr = 0; rr <= r_max; ++rr)
-        {
-            uint64_t qq = uu >> rr;
-            uint64_t *row = rice_q + rr * stride;
-            row[ii + 1] = row[ii] + (qq < RICE_Q_CAP ? qq : RICE_Q_CAP) + 1;
-        }
-    }
-
-    dp[count] = 0;
-    zlen_next = 0;
-    for (ii = count - 1; ii >= 0; --ii)
-    {
-        int remaining = count - ii, max_L, sleb_L, zlen;
-        int64_t best = INT64_MAX, cost;
-
-        zlen = (vals[ii] == 0) ? zlen_next + 1 : 0;
-        zlen_next = zlen;
-        if (zlen > 0)
-        {
-            cost = 1 + uleb128_len((uint64_t)(zlen - 1)) + dp[ii + zlen];
-            if (cost < best)
-                best = cost;
-        }
-
-        for (ci = 0; ci < g_n_cand; ++ci)
-        {
-            int m = g_cand[ci], r_hi;
-            uint64_t usum_m, mean, best_block = UINT64_MAX;
-
-            if (remaining < m)
-                break;
-            usum_m = usum[ii + m] - usum[ii];
-            mean = usum_m / (uint64_t)m;
-            r_hi = mean ? 64 - __builtin_clzll(mean) : 1;
-            if (r_hi > r_max)
-                r_hi = r_max;
-            /* Search r downward.  Below r_hi, a block's bit count is at
-             * least 8 + r*m + (usum_m >> r), which grows as r shrinks, so
-             * stop once that bound cannot beat the best block so far. */
-            for (rr = r_hi; rr >= 0; --rr)
-            {
-                const uint64_t *row = rice_q + rr * stride;
-                uint64_t qbits, block;
-                if (rr < r_hi && 8 + (uint64_t)rr * m + (usum_m >> rr)
-                    >= 8 * best_block)
-                    break;
-                qbits = row[ii + m] - row[ii];
-                block = 1 + (uint64_t)rr * m / 8 + (qbits + 7) / 8;
-                if (block < best_block)
-                    best_block = block;
-            }
-            cost = (int64_t)best_block + dp[ii + m];
-            if (cost < best)
-                best = cost;
-        }
-
-        max_L = remaining < g_max_sleb_run ? remaining : g_max_sleb_run;
-        cost = sleb_run_best(dp, psum, ii, max_L, &sleb_L);
-        if (cost < best)
-            best = cost;
-
-        dp[ii] = best;
-    }
-
-    return dp[0];
+    rs.dp = scratch->dp;
+    rs.psum = scratch->psum_arr;
+    rs.usum = scratch->usum;
+    rs.rice_q = scratch->rice_q;
+    rs.stride = scratch->cap + 1;
+    return rice_dp(&rs, vals, count, g_cand, g_n_cand, NULL);
 }
 
 /** Select the delta order minimizing the split-Rice cost of the whole
@@ -2922,10 +3836,6 @@ static size_t sdir_payload_bytes(size_t epoc_offset, size_t evtf_offset,
 
 /* ---- Per-file context: parse-once data ---- */
 
-/* Markers in a SOC2 candidate's value sequence. */
-#define SOC2_ABSENT INT64_MIN        /* no observation at this satellite epoch */
-#define SOC2_UNPRED (INT64_MIN + 1)  /* observation in an unpredicted-values block */
-
 /* One way to code a SOC2 chunk's observations: without a predictor, or
  * with one.  Everything here is independent of the block-size tuple. */
 struct soc2_cand
@@ -2997,7 +3907,6 @@ struct file_ctx
     signed char glo_chan[100];
 };
 
-#define GLO_CHAN_UNKNOWN 127
 
 static void sig_cache_free(struct sig_cache *sc)
 {
@@ -3035,515 +3944,87 @@ static void ctx_free(struct file_ctx *ctx)
     memset(ctx, 0, sizeof *ctx);
 }
 
-/* ---- SOC2 preparation (--soc2) ----
- *
- * Following the SOC2 encoder guidance in Succinct_RINEX.md: each
- * satellite's reference carrier phase (the one present at the most
- * epochs) is coded without prediction; other carrier phases are
- * predicted from it, and pseudoranges and Doppler from the carrier phase
- * on their own band (or the reference).  Whether a predictor pays off
- * depends on the block-size tuple, so both codings are kept and the
- * cheaper one is chosen per tuple.
- */
+/* ---- SOC2 preparation (--soc2) ---- */
 
-/* Doppler predictor max_span: 300 seconds, in units of 1e-7 s. */
-#define SOC2_DOPPLER_MAX_SPAN 3000000000ULL
-
-struct soc2_pred
-{
-    int      kind;     /* 0 (none), 1 (reference value), 2 (reference rate) */
-    int      ref;      /* reference observation index */
-    int64_t  num;
-    uint64_t den;
-    int      stencil;  /* kind 2: 0 backward, 1 central, 2 forward */
-    uint64_t max_span; /* kind 2: 1e-7 s units, 0 = unlimited */
-};
-
-/** Carrier frequency in Hz of band \a band of system \a sys, or 0 if
- * unknown.  \a glo_chan is the GLONASS FDMA frequency channel. */
-static int64_t soc2_freq_hz(char sys, char band, int glo_chan)
-{
-    switch (sys)
-    {
-    case 'G': case 'J': case 'S': case 'I':
-        if (band == '1') return 1575420000;
-        if (band == '2' && (sys == 'G' || sys == 'J')) return 1227600000;
-        if (band == '5') return 1176450000;
-        if (band == '6' && sys == 'J') return 1278750000;
-        if (band == '9' && sys == 'I') return 2492028000;
-        return 0;
-    case 'E':
-        switch (band)
-        {
-        case '1': return 1575420000;
-        case '5': return 1176450000;
-        case '6': return 1278750000;
-        case '7': return 1207140000;
-        case '8': return 1191795000;
-        }
-        return 0;
-    case 'C':
-        switch (band)
-        {
-        case '1': return 1575420000;
-        case '2': return 1561098000;
-        case '5': return 1176450000;
-        case '6': return 1268520000;
-        case '7': return 1207140000;
-        case '8': return 1191795000;
-        }
-        return 0;
-    case 'R':
-        switch (band)
-        {
-        case '1': return 1602000000 + (int64_t)glo_chan * 562500;
-        case '2': return 1246000000 + (int64_t)glo_chan * 437500;
-        case '3': return 1202025000;
-        case '4': return 1600995000;
-        case '6': return 1248060000;
-        }
-        return 0;
-    }
-    return 0;
-}
-
-/** Divide, rounding to the nearest integer with ties away from zero. */
-static int64_t soc2_rdiv(__int128 num, __int128 den)
-{
-    if (den < 0)
-    {
-        num = -num;
-        den = -den;
-    }
-    if (num >= 0)
-        return (int64_t)((num + den / 2) / den);
-    return (int64_t)-((-num + den / 2) / den);
-}
-
-/** Days since 1970-01-01 of a proleptic Gregorian date. */
-static int64_t days_from_civil(int yy, int mm, int dd)
-{
-    int era, yoe, doy, doe;
-    yy -= mm <= 2;
-    era = (yy >= 0 ? yy : yy - 399) / 400;
-    yoe = yy - era * 400;
-    doy = (153 * (mm + (mm > 2 ? -3 : 9)) + 2) / 5 + dd - 1;
-    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return (int64_t)era * 146097 + doe - 719468;
-}
-
-/** Byte count of a ULEB128-length-prefixed RLE of \a sym[] over an
- * alphabet of \a n_sym symbols, omitting trailing runs of symbol 0
- * (space), as rle_indicator_bytes() does for the SOCD alphabet. */
-static size_t rle_symbols_bytes(const unsigned char *sym, int count, int n_sym)
-{
-    size_t rle_used = 0;
-    int ii = 0;
-
-    while (count > 0 && sym[count - 1] == 0)
-        count--;
-    while (ii < count)
-    {
-        int run_start = ii;
-        while (ii < count && sym[ii] == sym[run_start])
-            ii++;
-        rle_used += (size_t)uleb128_len((uint64_t)(ii - run_start - 1) * n_sym
-            + sym[run_start]);
-    }
-    return (size_t)uleb128_len((uint64_t)rle_used) + rle_used;
-}
-
-/** Bytes of the predictor fields.  The kind itself (0 through 2) is in
- * the mode value, which the SSI coding counts. */
-static size_t soc2_pred_bytes(const struct soc2_pred *pr)
-{
-    size_t nn = 0;
-    if (pr->kind == 0)
-        return nn;
-    nn += (size_t)uleb128_len((uint64_t)pr->ref);
-    nn += (size_t)sleb128_len(pr->num);
-    nn += (size_t)uleb128_len(pr->den);
-    if (pr->kind == 2)
-    {
-        nn += (size_t)uleb128_len((uint64_t)pr->stencil);
-        nn += (size_t)uleb128_len(pr->max_span);
-    }
-    return nn;
-}
-
-/** Set \a pr's multiplier to num / den in lowest terms. */
-static void soc2_set_ratio(struct soc2_pred *pr, int64_t num, int64_t den)
-{
-    int64_t div = gcd(num, den);
-    if (div > 1)
-    {
-        num /= div;
-        den /= div;
-    }
-    pr->num = num;
-    pr->den = (uint64_t)den;
-}
-
-/** Parse GLONASS SLOT / FRQ # header records into ctx->glo_chan. */
-static void soc2_parse_glo_chan(struct file_ctx *ctx)
-{
-    const char *hdr = ctx->data.file_header;
-    const char *end = hdr + ctx->data.file_header_len;
-    const char *line;
-
-    memset(ctx->glo_chan, GLO_CHAN_UNKNOWN, sizeof ctx->glo_chan);
-    for (line = hdr; line < end; )
-    {
-        const char *eol = memchr(line, '\n', (size_t)(end - line));
-        size_t len = eol ? (size_t)(eol - line) : (size_t)(end - line);
-        if (len >= 80 && !memcmp(line + 60, "GLONASS SLOT / FRQ #", 20))
-        {
-            int ii;
-            for (ii = 0; ii + 3 <= 60; ++ii)
-            {
-                if (line[ii] == 'R' && isdigit((unsigned char)line[ii + 1])
-                    && isdigit((unsigned char)line[ii + 2]))
-                {
-                    char field[8];
-                    int slot = (line[ii + 1] - '0') * 10 + (line[ii + 2] - '0');
-                    long chan;
-                    char *endp;
-                    memcpy(field, line + ii + 3, 4);
-                    field[4] = '\0';
-                    chan = strtol(field, &endp, 10);
-                    if (endp != field && chan >= -7 && chan <= 13)
-                        ctx->glo_chan[slot] = (signed char)chan;
-                    ii += 6;
-                }
-            }
-        }
-        line += len + 1;
-    }
-}
-
-/** Estimate a GLONASS FDMA channel as the one making the band-1
- * code-minus-carrier sequence smoothest (least total |second difference|). */
-static int soc2_estimate_glo_chan(const int64_t *code, const int64_t *phase,
-    int count)
-{
-    int best_chan = 0, chan, kk;
-    double best_sum = -1;
-
-    for (chan = -7; chan <= 6; ++chan)
-    {
-        int64_t freq = soc2_freq_hz('R', '1', chan);
-        int64_t prev1 = INT64_MIN, prev2 = INT64_MIN;
-        double sum = 0;
-        for (kk = 0; kk < count; ++kk)
-        {
-            int64_t cmc;
-            if (code[kk] == INT64_MIN || phase[kk] == INT64_MIN)
-            {
-                prev1 = prev2 = INT64_MIN;
-                continue;
-            }
-            cmc = code[kk] - soc2_rdiv((__int128)phase[kk] * 299792458, freq);
-            if (prev1 != INT64_MIN && prev2 != INT64_MIN)
-            {
-                int64_t d2 = cmc - 2 * prev1 + prev2;
-                sum += (double)(d2 < 0 ? -d2 : d2);
-            }
-            prev2 = prev1;
-            prev1 = cmc;
-        }
-        if (best_sum < 0 || sum < best_sum)
-        {
-            best_sum = sum;
-            best_chan = chan;
-        }
-    }
-    return best_chan;
-}
-
-/** Fill \a cand for observations \a obs[] (\a count satellite epochs) at
- * \a scale, using predictor \a pr with reference values \a ref_vals and
- * satellite epoch times \a t7 (1e-7 s). */
-static int soc2_build_cand(struct soc2_cand *cand, const int64_t *obs,
-    int count, int64_t scale, const struct soc2_pred *pr,
-    const int64_t *ref_vals, const int64_t *t7)
-{
-    int kk, run;
-
-    cand->seq = malloc((size_t)count * sizeof *cand->seq);
-    if (!cand->seq)
-        return -1;
-    cand->coded_count = 0;
-    cand->pred_bytes = soc2_pred_bytes(pr);
-    cand->marker_bytes = 0;
-
-    for (kk = 0; kk < count; ++kk)
-    {
-        int64_t pp = 0;
-        int avail = 0;
-
-        if (obs[kk] == INT64_MIN)
-        {
-            cand->seq[kk] = SOC2_ABSENT;
-            continue;
-        }
-        if (pr->kind == 1 && ref_vals[kk] != INT64_MIN)
-        {
-            pp = soc2_rdiv((__int128)ref_vals[kk] * pr->num, (__int128)pr->den);
-            avail = 1;
-        }
-        else if (pr->kind == 2)
-        {
-            int aa = pr->stencil == 2 ? kk : kk - 1;
-            int bb = pr->stencil == 0 ? kk : kk + 1;
-            if (aa >= 0 && bb < count && ref_vals[aa] != INT64_MIN
-                && ref_vals[bb] != INT64_MIN)
-            {
-                int64_t dt = t7[bb] - t7[aa];
-                if (dt > 0 && (pr->max_span == 0 || (uint64_t)dt <= pr->max_span))
-                {
-                    pp = soc2_rdiv((__int128)(ref_vals[bb] - ref_vals[aa])
-                        * 10000000 * pr->num, (__int128)dt * pr->den);
-                    avail = 1;
-                }
-            }
-        }
-
-        if (pr->kind == 0)
-        {
-            cand->seq[kk] = obs[kk] / scale;
-            cand->coded_count++;
-        }
-        else if (avail)
-        {
-            cand->seq[kk] = obs[kk] / scale - soc2_rdiv(pp, scale);
-            cand->coded_count++;
-        }
-        else
-            cand->seq[kk] = SOC2_UNPRED;
-    }
-
-    /* Absent-value (0xFD) and unpredicted-value (0xFC) blocks. */
-    for (kk = 0; kk < count; kk += run)
-    {
-        int64_t marker = cand->seq[kk];
-        run = 1;
-        if (marker != SOC2_ABSENT && marker != SOC2_UNPRED)
-            continue;
-        while (kk + run < count && cand->seq[kk + run] == marker)
-            run++;
-        cand->marker_bytes += 1 + (size_t)uleb128_len((uint64_t)(run - 1));
-        if (marker == SOC2_UNPRED)
-        {
-            int jj;
-            for (jj = kk; jj < kk + run; ++jj)
-                cand->marker_bytes += (size_t)sleb128_len(obs[jj] / scale);
-        }
-    }
-    return 0;
-}
-
-/** Index of the observation of type \a type on the band of \a code,
- * preferring the same tracking attribute, else the most-present one;
- * -1 if none. */
-static int soc2_same_band(const struct rinex_system_data *p_sys,
-    const struct rinex_satellite_data *sv, const int *present, char type,
-    const char *code)
-{
-    int jj, best = -1;
-    for (jj = 0; jj < p_sys->n_obs; ++jj)
-    {
-        const char *oc = p_sys->obs[jj];
-        if (oc[0] != type || oc[1] != code[1] || sv->start[jj] < 0)
-            continue;
-        if (oc[2] == code[2])
-            return jj;
-        if (best < 0 || present[jj] > present[best])
-            best = jj;
-    }
-    return best;
-}
-
-/** Prepare SOC2 candidates and SSI coding for every signal of \a svc. */
+/** Prepare SOC2 candidates and SSI coding for every signal of \a svc,
+ * using the shared soc2_plan_sv(). */
 static int soc2_prepare_sv(struct file_ctx *ctx, struct sv_cache *svc,
     const struct rinex_system_data *p_sys)
 {
     const struct rinex_data *data = &ctx->data;
     const struct rinex_satellite_data *sv = svc->sv;
     int count = sv->obs_used, n_obs = svc->n_obs;
-    char sys = sv->id[0];
+    struct soc2_plan *plans;
     int64_t *t7;
-    int *present;
-    unsigned char *sym11, *sym12;
-    int jj, kk, ref = -1, glo_chan = 0;
+    unsigned char *sym;
+    int jj;
 
     t7 = malloc((size_t)count * sizeof *t7);
-    present = calloc((size_t)n_obs, sizeof *present);
-    sym11 = malloc((size_t)count);
-    sym12 = malloc((size_t)count);
-    if (!t7 || !present || !sym11 || !sym12)
+    plans = malloc((size_t)n_obs * sizeof *plans);
+    sym = malloc((size_t)count);
+    if (!t7 || !plans || !sym
+        || soc2_plan_sv(data, sv, p_sys, ctx->glo_chan, t7, plans) != 0)
     {
         fprintf(stderr, "Out of memory\n");
-        free(t7); free(present); free(sym11); free(sym12);
+        free(t7); free(plans); free(sym);
         return -1;
-    }
-
-    /* Satellite epoch timestamps. */
-    kk = 0;
-    for (jj = 0; jj < sv->when_used; ++jj)
-    {
-        int ei;
-        for (ei = sv->when[jj].start; ei < sv->when[jj].end; ++ei)
-        {
-            const struct rinex_epoch *ep = &data->epoch[ei];
-            int ymd = ep->yyyy_mm_dd;
-            t7[kk++] = (days_from_civil(ymd / 10000, ymd / 100 % 100, ymd % 100) * 86400
-                + (ep->hh_mm / 100) * 3600 + (ep->hh_mm % 100) * 60) * 10000000LL
-                + ep->sec_e7;
-        }
-    }
-
-    for (jj = 0; jj < n_obs; ++jj)
-    {
-        const int64_t *obs;
-        if (sv->start[jj] < 0)
-            continue;
-        obs = data->obs + sv->start[jj];
-        for (kk = 0; kk < count; ++kk)
-            present[jj] += obs[kk] != INT64_MIN;
-    }
-
-    if (sys == 'R')
-    {
-        int slot = atoi(sv->id + 1);
-        if (slot > 0 && slot < 100 && ctx->glo_chan[slot] != GLO_CHAN_UNKNOWN)
-            glo_chan = ctx->glo_chan[slot];
-        else
-        {
-            int cj = -1, lj = -1;
-            for (jj = 0; jj < n_obs; ++jj)
-            {
-                const char *oc = p_sys->obs[jj];
-                if (sv->start[jj] < 0 || oc[1] != '1')
-                    continue;
-                if ((oc[0] == 'C' || oc[0] == 'P') && cj < 0)
-                    cj = jj;
-                if (oc[0] == 'L' && lj < 0)
-                    lj = jj;
-            }
-            if (cj >= 0 && lj >= 0)
-                glo_chan = soc2_estimate_glo_chan(data->obs + sv->start[cj],
-                    data->obs + sv->start[lj], count);
-        }
-    }
-
-    /* Reference carrier phase: the one present at the most epochs. */
-    for (jj = 0; jj < n_obs; ++jj)
-    {
-        const char *oc = p_sys->obs[jj];
-        if (sv->start[jj] < 0 || oc[0] != 'L'
-            || !soc2_freq_hz(sys, oc[1], glo_chan))
-            continue;
-        if (ref < 0 || present[jj] > present[ref])
-            ref = jj;
     }
 
     for (jj = 0; jj < n_obs; ++jj)
     {
         struct sig_cache *sc = &svc->sigs[jj];
-        const char *code = p_sys->obs[jj];
+        const struct soc2_plan *plan = &plans[jj];
         const int64_t *obs;
-        const char *lli_arr, *ssi_arr;
-        struct soc2_pred none = {0, 0, 0, 1, 0, 0}, pred = none;
-        int64_t f_tgt;
-        int s_ref, src;
+        const char *ssi_arr;
+        struct soc2_pred none = {0, 0, 0, 1, 0, 0};
         size_t ssi_plain, ssi_pred;
+        int cc;
 
         if (sv->start[jj] < 0)
             continue;
         obs = data->obs + sv->start[jj];
-        lli_arr = data->lli + sv->start[jj];
         ssi_arr = data->ssi + sv->start[jj];
 
         /* Mode value plus SSIs: a plain eleven-symbol RLE, or a
          * twelve-symbol RLE against an S observation on the same band.
          * The predictor kind occupies the mode's low two bits, so it never
          * changes the mode's ULEB128 length. */
-        for (kk = 0; kk < count; ++kk)
-        {
-            int idx = indicator_idx((unsigned char)ssi_arr[kk]);
-            sym11[kk] = sym12[kk] = (unsigned char)(idx < 0 ? 0 : idx);
-        }
-        ssi_plain = 1 + rle_symbols_bytes(sym11, count, 11);
+        soc2_ssi_symbols(sym, ssi_arr, NULL, count);
+        ssi_plain = 1 + rle_symbols_bytes(sym, count, 11);
         ssi_pred = ssi_plain;
-        s_ref = soc2_same_band(p_sys, sv, present, 'S', code);
-        if (s_ref >= 0)
+        if (plan->s_ref >= 0)
         {
-            const int64_t *svals = data->obs + sv->start[s_ref];
-            for (kk = 0; kk < count; ++kk)
-            {
-                int64_t digit;
-                if (svals[kk] == INT64_MIN)
-                    continue;
-                digit = svals[kk] < 0 ? 1 : svals[kk] / 6000;
-                digit = digit < 1 ? 1 : digit > 9 ? 9 : digit;
-                if (ssi_arr[kk] == '0' + digit)
-                    sym12[kk] = 11;
-            }
-            ssi_pred = (size_t)uleb128_len(((uint64_t)s_ref + 1) << 2)
-                + rle_symbols_bytes(sym12, count, 12);
+            soc2_ssi_symbols(sym, ssi_arr, data->obs + sv->start[plan->s_ref], count);
+            ssi_pred = (size_t)uleb128_len(((uint64_t)plan->s_ref + 1) << 2)
+                + rle_symbols_bytes(sym, count, 12);
         }
         sc->soc2_prefix_bytes = 8 + (size_t)uleb128_len((uint64_t)(count - 1))
-            + rle_indicator_bytes(lli_arr, count)
+            + rle_indicator_bytes(data->lli + sv->start[jj], count)
             + (ssi_pred < ssi_plain ? ssi_pred : ssi_plain);
 
-        /* Predictor, per the SOC2 encoder guidance. */
-        f_tgt = soc2_freq_hz(sys, code[1], glo_chan);
-        src = soc2_same_band(p_sys, sv, present, 'L', code);
-        if (src < 0 || !soc2_freq_hz(sys, p_sys->obs[src][1], glo_chan))
-            src = ref;
-        if (ref >= 0 && f_tgt)
+        sc->n_soc2 = plan->pred.kind != SRNX_PRED_NONE ? 2 : 1;
+        for (cc = 0; cc < sc->n_soc2; ++cc)
         {
-            int64_t f_src = soc2_freq_hz(sys, p_sys->obs[src][1], glo_chan);
-            if (code[0] == 'L' && jj != ref)
+            struct soc2_cand *cand = &sc->soc2[cc];
+            const struct soc2_pred *pr = cc ? &plan->pred : &none;
+            cand->seq = malloc((size_t)count * sizeof *cand->seq);
+            if (!cand->seq)
             {
-                int64_t f_ref = soc2_freq_hz(sys, p_sys->obs[ref][1], glo_chan);
-                pred.kind = 1;
-                pred.ref = ref;
-                soc2_set_ratio(&pred, f_tgt, f_ref);
+                fprintf(stderr, "Out of memory\n");
+                free(t7); free(plans); free(sym);
+                return -1;
             }
-            else if (code[0] == 'C' || code[0] == 'P')
-            {
-                pred.kind = 1;
-                pred.ref = src;
-                soc2_set_ratio(&pred, 299792458, f_src);
-            }
-            else if (code[0] == 'D')
-            {
-                pred.kind = 2;
-                pred.ref = src;
-                pred.stencil = 1;
-                pred.max_span = SOC2_DOPPLER_MAX_SPAN;
-                soc2_set_ratio(&pred, -f_tgt, f_src);
-            }
-        }
-
-        sc->n_soc2 = 0;
-        if (soc2_build_cand(&sc->soc2[sc->n_soc2++], obs, count, sc->obs_gcd,
-                &none, NULL, t7) != 0
-            || (pred.kind != 0
-                && soc2_build_cand(&sc->soc2[sc->n_soc2++], obs, count,
-                    sc->obs_gcd, &pred, data->obs + sv->start[pred.ref], t7) != 0))
-        {
-            fprintf(stderr, "Out of memory\n");
-            free(t7); free(present); free(sym11); free(sym12);
-            return -1;
+            cand->coded_count = soc2_build_seq(cand->seq, obs, count,
+                sc->obs_gcd, pr, cc ? data->obs + sv->start[pr->ref] : NULL, t7);
+            cand->pred_bytes = soc2_pred_bytes(pr);
+            cand->marker_bytes = soc2_marker_bytes(cand->seq, obs, count,
+                sc->obs_gcd);
         }
     }
 
     free(t7);
-    free(present);
-    free(sym11);
-    free(sym12);
+    free(plans);
+    free(sym);
     return 0;
 }
 
@@ -3573,7 +4054,8 @@ static int ctx_load(struct file_ctx *ctx, const char *filename)
     ctx->file_digest_len  = rnx_digest_length(g_file_digest_id);
     if (ctx->file_digest_len < 0)  ctx->file_digest_len = 0;
     if (g_soc2)
-        soc2_parse_glo_chan(ctx);
+        soc2_parse_glo_chan(ctx->data.file_header,
+            ctx->data.file_header_len, ctx->glo_chan);
 
     /* Count active satellites. */
     for (sys_idx = 0; sys_idx < 32; ++sys_idx)

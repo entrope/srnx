@@ -50,7 +50,7 @@ static int is_missing(int64_t obs, char lli)
     return (obs < RINEX_MIN_OBS) || (obs == 0 && lli == ' ');
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
     char cmd[1024];
     const char *srnx_path = "test_srnx_parser.srnx";
@@ -59,7 +59,9 @@ int main(void)
     const char *err;
     int res, ii, epoch_no;
 
-    snprintf(cmd, sizeof cmd, "%s %s %s", RNX2SRNX_PATH, FIXTURE_PATH, srnx_path);
+    /* An optional argument passes extra options (such as --socd) to rnx2srnx. */
+    snprintf(cmd, sizeof cmd, "%s %s %s %s", RNX2SRNX_PATH,
+        argc > 1 ? argv[1] : "", FIXTURE_PATH, srnx_path);
     res = system(cmd);
     ok(res == 0, "rnx2srnx converted %s", FIXTURE_PATH);
     if (res != 0)
