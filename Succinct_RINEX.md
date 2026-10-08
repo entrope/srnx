@@ -4,7 +4,14 @@
 
 ### Format Version
 
-This file describes revision 1 of the Succinct RINEX (SRNX) file format.
+This file describes revision 1.1 of the Succinct RINEX (SRNX) file
+format.
+Revision 1.1 adds the [`SOC2`](#soc2) chunk, an alternative to `SOCD`
+that adds cross-signal prediction, signal-strength indicators predicted
+from signal-strength observations, delta-coder resets, and split
+Golomb-Rice coding of observation values.
+A file that uses only the chunks of revision 1.0 remains a valid
+revision 1.0 file.
 
 ### Introduction
 
@@ -68,13 +75,15 @@ occur in a single SRNX file.
 | [EPOC](#epoc) | 0..1 | Epoch record information |
 | [EVTF](#evtf) | Any | Special event flag and data |
 | [SOCD](#socd) | Any | Satellite observation code data |
+| [SOC2](#soc2) | Any | Satellite observation code data, version 2 |
 | [SATE](#sate) | Any | Satellite observation metadata |
 | [SDIR](#sdir) | 0..1 | Satellite directory |
 
 The first chunk of an SRNX file MUST be `SRNX`.
 The second chunk of an SRNX file MUST be `RHDR`.
 If an `EPOC` chunk is not present, the file MUST NOT have any `EVTF`,
-`SATE` or `SOCD` chunks (it has no special events or observations).
+`SATE`, `SOCD` or `SOC2` chunks (it has no special events or
+observations).
 
 Additional chunks, if any are present, MAY appear in any order, but:
 
@@ -93,7 +102,8 @@ The `SRNX` payload consists of five ULEB128 values and optional padding,
 in this order:
 
 1. A major version identifier, currently 1.
-1. A minor version identifier, currently 0.
+1. A minor version identifier: 0 if the file uses only revision 1.0
+   chunks, or 1 if it contains any `SOC2` chunk.
 1. A per-chunk digest identifier, from [below](#digests).
 1. A file-level digest identifier.
 1. The file offset of the `SDIR` chunk, or zero if there is no such chunk.
@@ -106,6 +116,10 @@ calculated over file from the start of the SRNX FOURCC until just before
 the file-level digest.
 (The length of the file for the file-level digest should be derived from
 an external source, such as the file system that holds the SRNX file.)
+
+A reader MUST reject a file whose minor version is greater than the
+greatest minor version it supports, because the file may contain
+observation chunks that the reader cannot decode.
 
 When creating the SRNX file, the offset of the SDIR chunk might be
 unknown until all the other chunks are written.
@@ -140,9 +154,10 @@ observation or cycle-slip fields follow, including continuation lines,
 receiver clock offset, LLI and SSI fields. CRINEX input MUST be decoded
 to RINEX text before storing it here.
 
-A flag-1 or flag-6 record MUST NOT also be represented in EPOC, SATE or
-SOCD. Its values do not participate in SOCD scaling, delta encoding or
-predictor state updates. Reading EVTF does not reset a SOCD predictor.
+A flag-1 or flag-6 record MUST NOT also be represented in EPOC, SATE,
+SOCD or SOC2. Its values do not participate in SOCD or SOC2 scaling,
+delta encoding, cross-signal prediction or predictor state updates.
+Reading EVTF does not reset a SOCD or SOC2 predictor.
 
 The epoch index is a ULEB128 indication of where the event record
 exists relative to flag-0 observation epochs: 0 indicates before the
@@ -199,11 +214,13 @@ represented in the SRNX file.
 The `SATE` payload lists the observation times and codes for a single
 satellite.
 It consists of the satellite name with a trailing '\0' byte, SLEB128
-file offsets for each observation code's `SOCD` chunk (relative to the
-start of the `SATE` chunk's FOURCC), and epoch presence data, in that
-order.
+file offsets for each observation code's `SOCD` or `SOC2` chunk
+(relative to the start of the `SATE` chunk's FOURCC), and epoch presence
+data, in that order.
 The number of signals is controlled by the `RHDR` chunk payload.
 A zero file offset means that signal was never observed.
+A reader distinguishes `SOCD` from `SOC2` by the FOURCC at the offset;
+one satellite MAY use both chunk types.
 
 A given satellite name MUST be used in at most one `SATE` chunk.
 
@@ -357,6 +374,240 @@ Recommended encoding procedure for each (satellite, observation code):
    If a region has `max_bw` > 32, or contains only a few values that
    would not fill an 8-element block (including at the end of the
    sequence), use zero-run (`0xFE`) or SLEB128-run (`0xFF`) blocks instead.
+
+### <a name="soc2"></a>SOC2: Satellite observation code data, version 2
+
+The `SOC2` payload holds the observations for a single combination of
+satellite and observation code, like `SOCD`, but it can predict its
+values from another observation code of the same satellite, predict
+its signal-strength indicators from a signal-strength observation, and
+code observation values with split Golomb-Rice blocks.
+
+It consists of the following, in this order:
+
+1. The observation name, exactly as in `SOCD`.
+1. A ULEB128 count-minus-1 of observations, exactly as in `SOCD`.
+1. Loss-of-lock indicators, exactly as in `SOCD`.
+1. A ULEB128 [mode](#soc2-mode) value, which selects the SSI reference
+   and the predictor kind.
+1. [Signal-strength indicators](#soc2-ssi).
+1. The [predictor](#soc2-predictor) fields, if any.
+1. [Packed observation data](#soc2-packed).
+
+In this section, the *satellite epochs* are the epochs in which the
+satellite is present according to its `SATE` epoch presence data, in
+time order; `k` indexes them from zero.
+A *reference* is another observation code of the same satellite,
+identified by its zero-based index in the `RHDR` list of observation
+codes for the satellite's system (the same order as the `SATE` file
+offsets).
+Reference values are the reference's decoded observation values in
+milli-units, after scaling and after any prediction of its own.
+
+#### <a name="soc2-mode"></a>Mode
+
+The mode value is `(s << 2) | k`:
+
+- `s` selects the SSI reference: zero means there is none, and a
+  nonzero value `j + 1` names reference `j`, which MUST be a
+  signal-strength (`S`) observation code.
+- `k` is the predictor kind (0, 1 or 2) described
+  [below](#soc2-predictor).
+  The value 3 means a ULEB128 predictor kind follows the mode value;
+  every kind it can name (3 and above) is currently reserved.
+
+The common cases, including an SSI reference to any of the first 31
+observation codes, fit in one byte.
+
+#### <a name="soc2-ssi"></a>SSI coding
+
+- Without an SSI reference, the SSIs are coded as in `SOCD`: an
+  eleven-symbol RLE, with each run encoded as `(count - 1) * 11 + idx`.
+- With an SSI reference, the SSIs are a twelve-symbol RLE, with each
+  run encoded as `(count - 1) * 12 + idx`.
+  Symbols 0 through 10 are as in `SOCD`.
+  Symbol 11 means the *predicted SSI* at that satellite epoch: the digit
+  `max(1, min(9, floor(s / 6000)))`, where `s` is the reference value
+  in milli-units (thousandths of dB-Hz for RINEX 3).
+  Symbol 11 MUST NOT be used at a satellite epoch where the reference
+  value is absent.
+
+In both cases, the RLE is preceded by its ULEB128 length in bytes, and
+SSIs beyond the encoded runs are spaces, exactly as in `SOCD`.
+
+The predicted SSI follows the RINEX 3 definition of signal strength
+indicators in steps of 6 dB-Hz.
+Receivers that use a different mapping simply do not benefit from an
+SSI reference; an encoder SHOULD use one only when it is smaller.
+
+#### <a name="soc2-predictor"></a>Predictor
+
+The predictor kind comes from the mode value, and its fields follow the
+signal-strength indicators.
+
+| Kind | Fields | Prediction `p[k]` |
+| :--: | :----------------- | :---------------- |
+| 0 | none | none: every present value is coded directly |
+| 1 | ULEB128 reference `j`, SLEB128 `num`, ULEB128 `den` | `R[k] * num / den` |
+| 2 | ULEB128 reference `j`, SLEB128 `num`, ULEB128 `den`, ULEB128 stencil, ULEB128 `max_span` | `(R[b] - R[a]) * 10^7 * num / ((t[b] - t[a]) * den)` |
+| 3 and above | reserved | |
+
+`R[k]` is the value of reference `j` at satellite epoch `k`.
+`den` MUST be at least 1.
+Kind 1 predicts from the reference's value; kind 2 predicts from the
+reference's rate of change.
+
+For kind 2, the stencil selects satellite epochs `a` and `b`: 0 means
+`a = k - 1, b = k` (backward difference), 1 means `a = k - 1, b = k + 1`
+(central difference), and 2 means `a = k, b = k + 1` (forward
+difference); other stencil values are reserved.
+`t[k]` is the timestamp of satellite epoch `k` from the `EPOC` chunk, in
+units of 1e-7 seconds, counted continuously across day boundaries.
+`max_span` is in units of 1e-7 seconds; zero means unlimited.
+
+A prediction is *available* at satellite epoch `k` when:
+
+- for kind 1, `R[k]` is present;
+- for kind 2, `a` and `b` are both satellite epochs, `R[a]` and `R[b]`
+  are both present, `t[b] > t[a]`, and either `max_span` is zero or
+  `t[b] - t[a] <= max_span`.
+
+Predictions MUST be computed exactly, with intermediate products held in
+at least 128-bit signed integers, and the division rounded to the
+nearest integer, with ties rounded away from zero.
+The prediction is then reduced to the observation's scale (see below):
+`q[k] = p[k] / scale`, rounded the same way.
+
+The reference MUST NOT be the observation code of this chunk.
+If the reference's own chunk is a `SOC2` chunk with a nonzero predictor
+kind, that chunk's reference MUST have predictor kind 0 (or be a `SOCD`
+chunk), so a prediction chain is at most two steps long and cannot be
+cyclic.
+An SSI reference is not part of the prediction chain, because it does
+not affect observation values.
+
+The intended uses are carrier-phase observations predicted from a
+reference carrier phase on another frequency (kind 1, `num / den` equal
+to the frequency ratio), pseudoranges predicted from carrier phase
+(kind 1, `num / den` equal to the reference's wavelength in metres per
+cycle), and Doppler predicted from the rate of a carrier phase (kind 2,
+`num / den` equal to minus the frequency ratio).
+See the [encoder guidance](#soc2-guidance) below.
+
+#### <a name="soc2-packed"></a>Packed observation data and split-Rice blocks
+
+Packed observation data in `SOC2` begins exactly as in `SOCD`: a
+ULEB128 length of the remaining packed data, a ULEB128 encoding schema
+(delta order `n` plus 8 if an explicit scale is present), the optional
+ULEB128 scale, and `n` SLEB128 values of initial delta decoder state.
+Blocks follow, each beginning with a one-byte header, and together
+cover the satellite epochs in order.
+
+Split-Rice, zero-value and SLEB128-value blocks hold last-level deltas.
+Through the same delta decoder as `SOCD`, they yield one value `y` for
+each present observation that is not in an unpredicted-values block.
+With a nonzero predictor kind, a prediction is available for each of
+these, and the observation is `(y + q[k]) * scale`.
+With predictor kind 0, the observation is `y * scale`, as in `SOCD`.
+
+| Block Header | Description |
+| :----------: | :---------- |
+| `000rrrrr` | split-Rice block of 8 values, Rice parameter `r` |
+| `001rrrrr` | split-Rice block of 24 values |
+| `010rrrrr` | split-Rice block of 56 values |
+| `011rrrrr` | split-Rice block of 144 values |
+| `100rrrrr` | split-Rice block of 240 values |
+| `101rrrrr` | split-Rice block of 640 values |
+| `110rrrrr` | split-Rice block of 2048 values |
+| `111xxxxx` through `11111010` | reserved |
+| `11111011` | delta decoder reset |
+| `11111100` | ULEB128 count-minus-1 of unpredicted SLEB128 values |
+| `11111101` | ULEB128 count-minus-1 of absent values |
+| `11111110` | ULEB128 count-minus-1 of zero values |
+| `11111111` | ULEB128 count-minus-1 of SLEB128 values |
+
+Absent-value, zero-value and SLEB128-value blocks have the same meaning
+as in `SOCD`.
+
+The split-Rice block sizes differ from the `SOCD` bit-matrix sizes.
+A split-Rice block's fixed cost (its header byte and quotient padding)
+is small and does not grow with the block's largest value, so long
+blocks pay off, especially for 1 Hz data.
+These sizes minimized the total size of a corpus of 1,703 daily files,
+mostly 1 Hz, among sets of seven sizes up to 2048.
+
+A split-Rice block of `m` values with parameter `r` contains:
+
+1. If `r > 0`, a bit matrix of `m` unsigned `r`-bit remainders, laid out
+   as the `SOCD` bit matrix (`r` rows of `m/8` bytes, most significant
+   row first, big-endian bit and byte order) but without sign extension.
+1. The quotients: for each of the `m` values in order, `q` one bits
+   followed by a zero bit, packed most significant bit first, and then
+   zero bits up to the next byte boundary.
+
+Each value is `u = q * 2^r + remainder`, which MUST be less than 2^64,
+and the last-level delta is `u` decoded as in SLEB128 (ZigZag): `u / 2`
+if `u` is even, or `-(u + 1) / 2` if `u` is odd.
+
+A delta decoder reset block (`0xFB`) is followed by a ULEB128 new delta
+order `n'` (0 through 7) and `n'` SLEB128 values.
+The decoder discards its state and continues exactly as at the start of
+the packed data with order `n'` and those initial state values.
+The scale does not change, and the block itself contains no
+observations.
+
+An unpredicted-values block (`0xFC`) holds observations at satellite
+epochs where this chunk's prediction is not available.
+Each value is the scaled observation itself (the observation divided by
+the scale), not a delta.
+Like absent values, unpredicted values do not advance the delta decoder.
+With a nonzero predictor kind, every present observation at a satellite
+epoch without an available prediction MUST be coded in an
+unpredicted-values block, and only those observations may be.
+With predictor kind 0, unpredicted-values blocks MUST NOT be used.
+
+#### <a name="soc2-guidance"></a>Encoder and reader guidance
+
+The encoding procedure for `SOCD` applies, with these changes:
+
+1. Choose a reference carrier phase for each satellite, typically the
+   one present at the most epochs, and code it without prediction.
+   For each other observation code, compute the residual
+   `x[k] / scale - q[k]` at satellite epochs where a prediction is
+   available, and use the predictor only if the result is smaller.
+   The scale is the greatest common divisor of the observation values
+   themselves; rounding the prediction to that scale keeps the residuals
+   multiples of it.
+   (Some receivers quantize pseudoranges to 2 cm; omitting this rounding
+   destroys that common factor.)
+1. Suggested predictors, with frequencies in Hz:
+   - Carrier phase `L` on band `b` from reference phase on band `a`:
+     kind 1 with `num / den = f[b] / f[a]`.
+   - Pseudorange `C` or `P` on band `b` from carrier phase `L` on band
+     `b` (or the reference phase on band `a`): kind 1 with
+     `num / den = 299792458 / f`, where `f` is the frequency of that
+     phase.
+   - Doppler `D` on band `b` from carrier phase on band `a`: kind 2,
+     stencil 1 (central difference), with `num / den = -f[b] / f[a]`.
+   - For GLONASS FDMA signals, the frequencies depend on the
+     satellite's frequency channel (from the `GLONASS SLOT / FRQ #`
+     header record, or estimated from the data).
+     The G1/G2 frequency ratio is 9/7 for every channel.
+1. Choose the Rice parameter for each split-Rice block, and the block
+   sizes, with the same shortest-path search as for `SOCD` bit matrices.
+   Blocks whose values would need `r > 31` should use SLEB128-value
+   blocks instead.
+
+Decoding a `SOC2` chunk with a predictor requires its reference's
+decoded values (and, for a two-step chain, that reference's reference).
+Encoders SHOULD write a satellite's referenced chunks before the chunks
+that use them, so that a sequential reader can decode them in file
+order.
+Readers that decode one observation code at a time SHOULD cache each
+satellite's decoded reference columns (usually its carrier phases) and
+reuse them for that satellite's other observation codes.
+A reader that decodes epoch by epoch needs one satellite epoch of
+look-ahead on the reference for central-difference predictors.
 
 ## <a name="digests"></a>Digest Identifiers
 
