@@ -193,7 +193,9 @@ Compression-measurement clone of `rnx2srnx` used to evaluate which set
 of SRNX bit-transposed block sizes minimizes the encoded byte count for
 a corpus.  The format's block header byte affords up to seven distinct
 matrix-block sizes; this tool lets each candidate set (any ascending
-tuple of multiples of 8, up to length 7, must include 8) be measured.
+tuple of multiples of 8, must include 8) be measured.  Tuples longer
+than seven (up to 64 sizes) are not encodable, but give lower bounds
+and are the starting point for backward elimination (below).
 
 It parses each input file once and then, for every requested tuple,
 re-runs the block-selection DP and reports the would-be total file
@@ -210,6 +212,42 @@ rnx2srnx_search --tuple=8,16,32,64,128 \
 Output is tab-separated `<file>\t<tuple>\t<bytes>` on stdout.  Adding
 `--timing` prints a `# ...` line per file on stderr with parse and
 per-tuple evaluation times.
+
+With `--soc2`, observation chunks are costed as revision 1.1 `SOC2`
+chunks instead of `SOCD`: split-Rice blocks of the tuple's sizes,
+cross-signal prediction from carrier phase, and SSI references, following
+the `SOC2` encoder guidance in `Succinct_RINEX.md`.  For each signal it
+keeps both the unpredicted and the predicted coding and counts whichever
+is smaller under each tuple.  Costing `SOC2` is several times slower than
+`SOCD`, so run large corpora with one process per file.
+
+`--fixed-order` chooses each column's delta order once, under the first
+tuple in the list, and reuses it for the rest.  This makes each later
+tuple several times cheaper and rarely changes a result by more than a
+few bytes, so it suits searches; confirm the final candidates without it.
+
+### srnx_block_search
+
+`srnx_block_search` (Go, in `srnx_block_search/`) runs `rnx2srnx_search`
+over one or more corpus directories in parallel.  With `-tuples FILE`,
+it ranks the tuples in that file per corpus and overall.  With
+`-eliminate SIZES`, it searches for a good tuple by backward elimination:
+starting from all the candidate sizes, it repeatedly removes the size
+whose removal costs the fewest bytes until `-keep` sizes remain (8 is
+never removed), printing every size's removal penalty at each step, then
+tries single-size swaps until none helps, and finally compares the
+result with `-baseline`.
+
+```bash
+srnx_block_search -tool +release/rnx2srnx_search \
+    -tool-args "--soc2 --fixed-order" -sample 10 \
+    -eliminate 8,16,24,32,40,48,56,64,96,128,192,256 \
+    corpus_1hz/ corpus_30s/
+```
+
+`-sample N` uses every Nth file (by name) of each corpus, for faster
+searches whose results can then be confirmed on the whole corpus.  The
+objective is the total byte count over all the given corpora.
 
 ## Generating flame graphs
 
