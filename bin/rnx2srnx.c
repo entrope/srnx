@@ -363,22 +363,23 @@ static inline int64_t sleb_run_best(const int64_t *dp, const uint32_t *psum,
 
 /* ---- Split-Rice block DP (shared; SOC2) ---- */
 
-/* Quotients above this are capped when summing; such a block costs far
- * more than an SLEB128 run, so the DP never selects it. */
-#define RICE_Q_CAP ((uint64_t)1 << 32)
+/* Quotients above this are capped when summing (fewer for very long
+ * sequences, so 32-bit sums cannot overflow).  A 4096-bit quotient costs
+ * far more than coding its value any other way, so capping does not
+ * change the DP's choices in practice. */
+#define RICE_Q_CAP 4095u
 
 /* Zigzag values above this are capped when estimating a block's mean. */
 #define RICE_U_CAP ((uint64_t)1 << 40)
 
-/** Scratch arrays for rice_dp(), each with room for \a stride entries
- * (at least count + 1); rice_q has (RNX_RICE_MAX_R + 1) rows of them. */
+/** Scratch arrays for rice_dp(), each with room for at least count + 1
+ * entries; rice_q has (RNX_RICE_MAX_R + 1) * (count + 1) entries. */
 struct rice_scratch
 {
     int64_t  *dp;
     uint32_t *psum;
     uint64_t *usum;
-    uint64_t *rice_q;
-    size_t    stride;
+    uint32_t *rice_q;
 };
 
 /** SOC2 split-Rice DP: the same shortest-path search as the SOCD DP, but
@@ -394,16 +395,18 @@ struct rice_scratch
 static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
     int count, const int *cand, int n_cand, struct block_choice *choices)
 {
-    size_t stride = rs->stride;
-    uint64_t *rice_q = rs->rice_q;
+    uint32_t *rice_q = rs->rice_q;
     uint64_t *usum = rs->usum;
     uint32_t *psum = rs->psum;
     int64_t *dp = rs->dp;
     uint64_t u_max = 0;
-    int ii, rr, ci, zlen_next, r_max;
+    uint32_t q_cap;
+    int ii, rr, ci, zlen_next, r_max, width, r_start;
 
     /* The search never exceeds r = bitlen(mean u) <= bitlen(max u), so
-     * only those prefix rows are needed. */
+     * only those prefix sums are needed.  They are stored position-major:
+     * rice_q[ii * width + rr] = sum over the first ii values of q + 1 for
+     * Rice parameter rr, so one position's sums share cache lines. */
     for (ii = 0; ii < count; ++ii)
     {
         uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
@@ -415,22 +418,27 @@ static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
     r_max = u_max ? 64 - __builtin_clzll(u_max) : 1;
     if (r_max > RNX_RICE_MAX_R)
         r_max = RNX_RICE_MAX_R;
+    width = r_max + 1;
+    q_cap = UINT32_MAX / (uint32_t)(count + 1) - 1;
+    if (q_cap > RICE_Q_CAP)
+        q_cap = RICE_Q_CAP;
 
     usum[0] = 0;
     psum[0] = 0;
-    for (rr = 0; rr <= r_max; ++rr)
-        rice_q[rr * stride] = 0;
+    for (rr = 0; rr < width; ++rr)
+        rice_q[rr] = 0;
     for (ii = 0; ii < count; ++ii)
     {
         uint64_t uu = ((uint64_t)vals[ii] << 1) ^ (uint64_t)(vals[ii] >> 63);
         uint8_t bw = twos_comp_bw(vals[ii]);
+        const uint32_t *prev = rice_q + (size_t)ii * width;
+        uint32_t *next = rice_q + (size_t)(ii + 1) * width;
         usum[ii + 1] = usum[ii] + (uu < RICE_U_CAP ? uu : RICE_U_CAP);
         psum[ii + 1] = psum[ii] + sleb128_len_from_bw[bw > 64 ? 64 : bw];
-        for (rr = 0; rr <= r_max; ++rr)
+        for (rr = 0; rr < width; ++rr)
         {
             uint64_t qq = uu >> rr;
-            uint64_t *row = rice_q + rr * stride;
-            row[ii + 1] = row[ii] + (qq < RICE_Q_CAP ? qq : RICE_Q_CAP) + 1;
+            next[rr] = prev[rr] + (qq < q_cap ? (uint32_t)qq : q_cap) + 1;
         }
     }
 
@@ -456,10 +464,11 @@ static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
             }
         }
 
-        for (ci = 0; ci < n_cand; ++ci)
+        for (ci = 0, r_start = -1; ci < n_cand; ++ci)
         {
-            int m = cand[ci], r_hi, best_r = 0;
-            uint64_t usum_m, mean, best_block = UINT64_MAX;
+            int m = cand[ci], r_hi, best_r;
+            uint64_t usum_m, mean, best_bits, best_block;
+            const uint32_t *qa, *qb;
 
             if (remaining < m)
                 break;
@@ -468,21 +477,38 @@ static int64_t rice_dp(const struct rice_scratch *rs, const int64_t *vals,
             r_hi = mean ? 64 - __builtin_clzll(mean) : 1;
             if (r_hi > r_max)
                 r_hi = r_max;
-            for (rr = r_hi; rr >= 0; --rr)
+
+            /* A block's bit count, r*m + sum(q + 1), is convex in r, and
+             * its byte count is that rounded up, so walk downhill over
+             * [0, r_hi] from the previous block size's best r. */
+            qa = rice_q + (size_t)ii * width;
+            qb = rice_q + (size_t)(ii + m) * width;
+            best_r = r_start < 0 ? r_hi : r_start > r_hi ? r_hi : r_start;
+            best_bits = (uint64_t)best_r * m + (qb[best_r] - qa[best_r]);
+            while (best_r > 0)
             {
-                const uint64_t *row = rice_q + rr * stride;
-                uint64_t qbits, block;
-                if (rr < r_hi && 8 + (uint64_t)rr * m + (usum_m >> rr)
-                    >= 8 * best_block)
+                uint64_t bits = (uint64_t)(best_r - 1) * m
+                    + (qb[best_r - 1] - qa[best_r - 1]);
+                if (bits >= best_bits)
                     break;
-                qbits = row[ii + m] - row[ii];
-                block = 1 + (uint64_t)rr * m / 8 + (qbits + 7) / 8;
-                if (block < best_block)
+                best_bits = bits;
+                best_r--;
+            }
+            if (best_r == (r_start < 0 ? r_hi : r_start > r_hi ? r_hi : r_start))
+            {
+                while (best_r < r_hi)
                 {
-                    best_block = block;
-                    best_r = rr;
+                    uint64_t bits = (uint64_t)(best_r + 1) * m
+                        + (qb[best_r + 1] - qa[best_r + 1]);
+                    if (bits >= best_bits)
+                        break;
+                    best_bits = bits;
+                    best_r++;
                 }
             }
+            /* Another parameter may tie in bytes; any is equally good. */
+            best_block = 1 + (best_bits + 7) / 8;
+            r_start = best_r;
             cost = (int64_t)best_block + dp[ii + m];
             if (cost < best)
             {
@@ -567,10 +593,12 @@ static int rice_order_guess(const int64_t *delta_matrix, int count)
 /** Chooses a delta order for \a count values with delta matrix
  * \a delta_matrix, per g_order_search.  \a eval(ctx, ord) returns the
  * byte cost of coding with delta order \a ord, excluding its initial
- * state.  Stores the chosen order's cost (excluding initial state) in
- * \a *out_cost and returns the order. */
+ * state.  If \a accept is not NULL, it is called right after each
+ * evaluation that becomes the best so far.  Stores the chosen order's
+ * cost (excluding initial state) in \a *out_cost and returns the order. */
 static int rice_select_order(const int64_t *delta_matrix, int count,
-    int64_t (*eval)(void *ctx, int ord), void *ctx, int64_t *out_cost)
+    int64_t (*eval)(void *ctx, int ord), void (*accept)(void *ctx),
+    void *ctx, int64_t *out_cost)
 {
     int64_t best_total, best_cost;
     int best_order, ord, dir, no_improve;
@@ -579,6 +607,8 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
     {
         best_order = 0;
         best_cost = best_total = eval(ctx, 0);
+        if (accept)
+            accept(ctx);
         no_improve = 0;
         for (ord = 1; ord <= 7 && ord < count; ++ord)
         {
@@ -589,6 +619,8 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
                 best_cost = cost;
                 best_order = ord;
                 no_improve = 0;
+                if (accept)
+                    accept(ctx);
             }
             else if (++no_improve >= 2)
                 break;
@@ -600,6 +632,8 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
         best_order = guess;
         best_cost = eval(ctx, guess);
         best_total = guess + best_cost;
+        if (accept)
+            accept(ctx);
         for (dir = -1; dir <= 1; dir += 2)
         {
             for (ord = guess + dir; ord >= 0 && ord <= 7 && ord < count; ord += dir)
@@ -610,6 +644,8 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
                 best_total = ord + cost;
                 best_cost = cost;
                 best_order = ord;
+                if (accept)
+                    accept(ctx);
             }
         }
     }
@@ -1323,7 +1359,7 @@ struct rnx2srnx_scratch
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a; /**< cap; "best so far" */
     struct block_choice *choices_b; /**< cap; "candidate" */
-    uint64_t *rice_q;        /**< (RNX_RICE_MAX_R + 1) * (cap + 1) : SOC2 prefix sums of q+1 per Rice parameter */
+    uint32_t *rice_q;        /**< (RNX_RICE_MAX_R + 1) * (cap + 1) : SOC2 prefix sums of q+1 per Rice parameter */
     uint64_t *usum;          /**< cap + 1 : SOC2 prefix sums of capped zigzag values */
     int64_t *seq;            /**< 2 * cap : SOC2 candidate value sequences */
 };
@@ -2060,16 +2096,19 @@ static struct rice_scratch enc_rice_scratch(struct rnx2srnx_scratch *scratch)
     rs.psum = scratch->psum_arr;
     rs.usum = scratch->usum;
     rs.rice_q = scratch->rice_q;
-    rs.stride = scratch->cap + 1;
     return rs;
 }
 
-/* Context for select_delta_order_rice()'s order evaluations. */
+/* Context for select_delta_order_rice()'s order evaluations.  Each
+ * evaluation writes its block choices to #cand; accepting it swaps #cand
+ * and #best, as select_delta_order() does for SOCD. */
 struct rice_order_ctx
 {
     struct rnx2srnx_scratch *scratch;
     const int64_t *delta_matrix;
     int count;
+    struct block_choice *best;
+    struct block_choice *cand;
 };
 
 static int64_t rice_order_eval(void *ctx, int ord)
@@ -2077,7 +2116,15 @@ static int64_t rice_order_eval(void *ctx, int ord)
     struct rice_order_ctx *oc = ctx;
     struct rice_scratch rs = enc_rice_scratch(oc->scratch);
     return rice_dp(&rs, oc->delta_matrix + (size_t)ord * oc->count, oc->count,
-        rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, NULL);
+        rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, oc->cand);
+}
+
+static void rice_order_accept(void *ctx)
+{
+    struct rice_order_ctx *oc = ctx;
+    struct block_choice *tmp = oc->best;
+    oc->best = oc->cand;
+    oc->cand = tmp;
 }
 
 /** Select the delta order for the split-Rice coding of the \a count values
@@ -2086,14 +2133,13 @@ static int64_t rice_order_eval(void *ctx, int ord)
 static int select_delta_order_rice(struct rnx2srnx_scratch *scratch,
     const int64_t *delta_matrix, int count, struct block_choice **out_choices)
 {
-    struct rice_order_ctx oc = { scratch, delta_matrix, count };
-    struct rice_scratch rs = enc_rice_scratch(scratch);
+    struct rice_order_ctx oc = { scratch, delta_matrix, count,
+        scratch->choices_a, scratch->choices_b };
     int64_t cost;
-    int order = rice_select_order(delta_matrix, count, rice_order_eval, &oc, &cost);
+    int order = rice_select_order(delta_matrix, count, rice_order_eval,
+        rice_order_accept, &oc, &cost);
 
-    rice_dp(&rs, delta_matrix + (size_t)order * count, count,
-        rnx_rice_block_sizes, RNX_N_BLOCK_SIZES, scratch->choices_a);
-    *out_choices = scratch->choices_a;
+    *out_choices = oc.best;
     return order;
 }
 
@@ -3262,7 +3308,7 @@ struct scratch
     uint32_t *psum_arr;      /**< cap + 1 : prefix sums of sleb[] within dp_core */
     struct block_choice *choices_a;
     struct block_choice *choices_b;
-    uint64_t *rice_q;        /**< (RNX_RICE_MAX_R + 1) * (cap + 1), --soc2 only : prefix sums of q+1 per Rice parameter */
+    uint32_t *rice_q;        /**< (RNX_RICE_MAX_R + 1) * (cap + 1), --soc2 only : prefix sums of q+1 per Rice parameter */
     uint64_t *usum;          /**< cap + 1, --soc2 only : prefix sums of capped zigzag values */
 };
 
@@ -3481,7 +3527,6 @@ static int64_t dp_core_rice(struct scratch *scratch, const int64_t *vals,
     rs.psum = scratch->psum_arr;
     rs.usum = scratch->usum;
     rs.rice_q = scratch->rice_q;
-    rs.stride = scratch->cap + 1;
     return rice_dp(&rs, vals, count, g_cand, g_n_cand, NULL);
 }
 
@@ -3509,7 +3554,8 @@ static int select_delta_order_rice(struct scratch *scratch,
 {
     struct rice_order_ctx oc = { scratch, delta_matrix, count };
     int64_t cost;
-    int order = rice_select_order(delta_matrix, count, rice_order_eval, &oc, &cost);
+    int order = rice_select_order(delta_matrix, count, rice_order_eval, NULL,
+        &oc, &cost);
     if (out_best_dp_cost)
         *out_best_dp_cost = cost;
     return order;
