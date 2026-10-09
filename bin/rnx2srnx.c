@@ -3129,8 +3129,8 @@ static int is_rinex_file_name(const char name[], size_t len)
         return 0;
     if (!memcmp(end_name - 3, "rnx", 3))
         return 3;
-    if ((end_name[-1] == 'o' || end_name[-1] == 'd') && isdigit(end_name[-2]) && isdigit(end_name[-3]))
-        return 2;
+    if (!memcmp(end_name - 3, "crx", 3))
+        return 3;
     return 0;
 }
 
