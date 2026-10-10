@@ -191,6 +191,11 @@ target_link_libraries(test_empty_records rinex tap)
 add_test(NAME empty_records COMMAND test_empty_records)
 set_property(TEST empty_records PROPERTY LABELS function)
 
+add_executable(test_event_records test/test_event_records.c)
+target_link_libraries(test_event_records rinex tap)
+add_test(NAME event_records COMMAND test_event_records)
+set_property(TEST event_records PROPERTY LABELS function)
+
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)
 add_test(NAME parse_errors COMMAND test_parse_errors)

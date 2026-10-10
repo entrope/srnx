@@ -686,28 +686,19 @@ static int crx_v34_parse_epoch(struct crx_v23_parser *crx)
 {
     struct rnx_v234_parser *p = &crx->base;
     const char *line = crx->epoch_text;
-    int64_t sec;
-    int yy, mm, dd, hh, min, n_sats, line_len;
+    int n_sats, line_len;
 
     line_len = strlen(line);
     if (line_len < 35 || line[0] != '>'
         || line[31] < '0' || line[31] > '6'
-        || parse_uint(&yy, line + 2, 4)
-        || parse_uint(&mm, line + 7, 2)
-        || parse_uint(&dd, line + 10, 2)
-        || parse_uint(&hh, line + 13, 2)
-        || parse_uint(&min, line + 16, 2)
         || parse_uint(&n_sats, line + 32, 3)
-        || parse_fixed(&sec, line + 18, 11, 7))
+        || rnx_v34_parse_time(&p->base.epoch, line))
     {
         rnx_errorf(&crx->base.base, "failed to parse epoch line: %.*s",
             (line_len < 35) ? line_len : 35, line);
         return RINEX_ERR_BAD_FORMAT;
     }
 
-    p->base.epoch.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
-    p->base.epoch.hh_mm = hh * 100 + min;
-    p->base.epoch.sec_e7 = sec;
     p->base.epoch.flag = line[31];
     p->base.epoch.n_sats = n_sats;
 
@@ -718,6 +709,36 @@ static int crx_v34_parse_epoch(struct crx_v23_parser *crx)
     p->base.epoch.clock_offset = 0;
 
     return 0;
+}
+
+/** crx_copy_event copies a CRX v3 special event record into
+ * \a crx->base.base.buffer: the epoch line (from #epoch_text), then the
+ * event's own lines, from the stream at #parse_ofs up to \a eol_ofs.
+ * This matches what rnx_read_v34() leaves for the same record.
+ */
+static rinex_error_t crx_copy_event(struct crx_v23_parser *crx, int eol_ofs)
+{
+    struct rnx_v234_parser *p = &crx->base;
+    int head_len = strlen(crx->epoch_text);
+    int body_len = eol_ofs - (int)p->parse_ofs;
+    int len = head_len + 1 + body_len;
+
+    while (p->buffer_alloc < len)
+    {
+        p->buffer_alloc <<= 1;
+    }
+    p->base.buffer = realloc(p->base.buffer, p->buffer_alloc);
+    if (!p->base.buffer)
+    {
+        rnx_errorf(&p->base, "allocation failed for buffer of length %d", p->buffer_alloc);
+        return RINEX_ERR_SYSTEM;
+    }
+    memcpy(p->base.buffer, crx->epoch_text, head_len);
+    p->base.buffer[head_len] = '\n';
+    memcpy(p->base.buffer + head_len + 1,
+        p->base.stream->buffer + p->parse_ofs, body_len);
+    p->base.buffer_len = len;
+    return RINEX_SUCCESS;
 }
 
 /** crx_read_v34 reads an observation data record from \a p_. */
@@ -781,7 +802,9 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     n_sats = p_->epoch.n_sats;
     p->parse_ofs = res;
 
-    /* Handle special events (flag 2-5). */
+    /* Handle special events (flag 2-5).  As for rnx_read_v34(), the
+     * buffer holds the epoch line and then the event's n_sats lines.
+     */
     if (p_->epoch.flag >= '2' && p_->epoch.flag <= '5')
     {
         res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
@@ -789,7 +812,7 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        err = rnx_copy_text(p, res);
+        err = crx_copy_event(crx, res);
         p->parse_ofs = res;
         return err;
     }

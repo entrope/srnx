@@ -210,12 +210,45 @@ RNX_RESOLVE(rinex_error_t, read_v34_observations,
     avx2, neon)
 
 /* Doc comment in rnx_priv.h. */
+int rnx_v34_parse_time(struct rinex_epoch *epoch, const char *line)
+{
+    int64_t i64;
+    int yy, mm, dd, hh, min, ii;
+
+    /* Special events (flags 2-5) may leave the date and time blank. */
+    if (line[31] >= '2' && line[31] <= '5')
+    {
+        for (ii = 1; ii < 29 && line[ii] == ' '; ++ii)
+        {
+            /* no operation */
+        }
+        if (ii == 29)
+        {
+            epoch->yyyy_mm_dd = 0;
+            epoch->hh_mm = 0;
+            epoch->sec_e7 = 0;
+            return 0;
+        }
+    }
+
+    if (parse_uint(&yy, line+2, 4) || parse_uint(&mm, line+7, 2)
+        || parse_uint(&dd, line+10, 2) || parse_uint(&hh, line+13, 2)
+        || parse_uint(&min, line+16, 2) || parse_fixed(&i64, line+18, 11, 7))
+    {
+        return RINEX_ERR_BAD_FORMAT;
+    }
+    epoch->yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
+    epoch->hh_mm = hh * 100 + min;
+    epoch->sec_e7 = i64;
+    return 0;
+}
+
+/* Doc comment in rnx_priv.h. */
 rinex_error_t rnx_read_v34(struct rinex_parser *p_)
 {
     struct rnx_v234_parser *p = (struct rnx_v234_parser *)p_;
     const char *line;
-    int64_t i64;
-    int res, yy, mm, dd, hh, min, n_sats, line_len, body_ofs;
+    int res, n_sats, line_len, body_ofs;
     rinex_error_t err;
 
     /* Make sure we have an epoch to parse. */
@@ -235,18 +268,13 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
 
     /* Parse the timestamp, epoch flag and "number of satellites" field. */
     if ((line[0] != '>' || line[31] < '0' || line[31] > '6')
-        || parse_uint(&yy, line+2, 4) || parse_uint(&mm, line+7, 2)
-        || parse_uint(&dd, line+10, 2) || parse_uint(&hh, line+13, 2)
-        || parse_uint(&min, line+16, 2) || parse_uint(&n_sats, line+32, 3)
-        || parse_fixed(&i64, line+18, 11, 7))
+        || parse_uint(&n_sats, line+32, 3)
+        || rnx_v34_parse_time(&p->base.epoch, line))
     {
         rnx_errorf(p_, "failed to parse epoch header line: %.*s", line_len, line);
         p->parse_ofs = res;
         return RINEX_ERR_BAD_FORMAT;
     }
-    p->base.epoch.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
-    p->base.epoch.hh_mm = hh * 100 + min;
-    p->base.epoch.sec_e7 = i64;
     p->base.epoch.flag = line[31];
     p->base.epoch.n_sats = n_sats;
 

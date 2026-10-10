@@ -350,6 +350,14 @@ int rnx_copy_text(
  * \param[out] p Receives parsed header information.
  * \param[in] line Header line.
  */
+/** rnx_v34_parse_time parses the date and time fields of the RINEX 3/4
+ * epoch line \a line (at least 35 characters, with the epoch flag in
+ * column 32) into \a epoch.  For special events (flags 2-5) the date
+ * and time may be entirely blank, which gives a zero date and time.
+ * \returns 0 on success, RINEX_ERR_BAD_FORMAT if a field is malformed.
+ */
+int rnx_v34_parse_time(struct rinex_epoch *epoch, const char *line);
+
 int rnx_v2_parse_time(
     struct rnx_v234_parser *p,
     const char *line
