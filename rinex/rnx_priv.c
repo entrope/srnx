@@ -142,13 +142,18 @@ int rnx_get_newlines(
 {
     int ii = *p_whence, jj, res;
 
+    /* rnx_get_n_newlines() cannot find zero lines (it returns 0, the
+     * same as for too few), so a part with no lines (such as an epoch
+     * with no satellites, or an event with no records) ends where it
+     * starts.
+     */
     if (n_header > 0)
     {
         ii = rnx_get_n_newlines(p, ii, n_header);
         if (ii > 0)
         {
             *p_body_ofs = ii;
-            jj = rnx_get_n_newlines(p, ii, n_body);
+            jj = n_body > 0 ? rnx_get_n_newlines(p, ii, n_body) : ii;
         }
         else
         {
@@ -157,7 +162,7 @@ int rnx_get_newlines(
     }
     else
     {
-        jj = rnx_get_n_newlines(p, ii, n_body);
+        jj = n_body > 0 ? rnx_get_n_newlines(p, ii, n_body) : ii;
     }
     if (jj > 0)
     {

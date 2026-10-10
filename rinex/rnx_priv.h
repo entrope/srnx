@@ -311,6 +311,8 @@ rinex_error_t rnx_ensure_sats(struct rnx_v234_parser *p);
  * \param[in] n_body Number of "body" lines to fetch.
  * \returns Number of bytes in p->stream needed to get \a n_header +
  *   \a n_body newlines, or non-positive rinex_error_t value on failure.
+ *   Either count may be zero; if both are, the result is \a *p_whence,
+ *   which must then be positive.
  */
 int rnx_get_newlines(
     struct rinex_parser *p,

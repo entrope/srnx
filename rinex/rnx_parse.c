@@ -147,8 +147,11 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_)
         /* Get enough data. */
         nn = (p->base.n_obs[0] + 4) / 5; /* How many lines per satellite? */
         body_ofs = 0;
+        /* The epoch line lists up to 12 satellites, then continuation
+         * lines list 12 more each; with no satellites it is still one
+         * line. */
         res = rnx_get_newlines(p_, &p->parse_ofs, &body_ofs,
-            (n_sats + 11) / 12, n_sats * nn);
+            n_sats > 12 ? (n_sats + 11) / 12 : 1, n_sats * nn);
         if (res <= RINEX_EOF)
         {
             if (res == RINEX_EOF)
