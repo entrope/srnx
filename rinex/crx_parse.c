@@ -14,7 +14,8 @@
 /** crx_parse_int64 parses a signed decimal integer.
  * \param[out] p_out Receives the parsed value.
  * \param[in] s Input pointer, positioned at the first character.
- * \returns Pointer past the parsed number, or NULL on error.
+ * \returns Pointer past the parsed number, or NULL if there are no
+ *   digits or the value does not fit in 63 bits.
  */
 static const char *crx_parse_int64(int64_t *p_out, const char *s)
 {
@@ -24,7 +25,10 @@ static const char *crx_parse_int64(int64_t *p_out, const char *s)
     if (*s == '-') { neg = 1; s++; }
     if (*s < '0' || *s > '9') return NULL;
     while (*s >= '0' && *s <= '9')
+    {
+        if (val > (INT64_MAX - 9) / 10) return NULL;
         val = val * 10 + (*s++ - '0');
+    }
     *p_out = neg ? -val : val;
     return s;
 }
@@ -72,6 +76,98 @@ static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
     return RINEX_SUCCESS;
 }
 
+/** Return the length of \a s up to its line break, at most \a max, for
+ * quoting in error messages.
+ */
+static int crx_quote_len(const char *s, int max)
+{
+    int len;
+
+    for (len = 0; len < max && s[len] != '\n' && s[len] != '\0'; ++len)
+        continue;
+    return len;
+}
+
+/** crx_update_arc applies one CRX differential field, at \a s, to \a st.
+ *
+ * The field is either an arc initialization "N&value", with difference
+ * order N from 0 to 5, or a difference that continues the current arc.
+ * In an order-0 arc every value is absolute.  This is shared by the
+ * observations and the receiver clock offset.
+ *
+ * \param[in,out] p Parser, for error messages.
+ * \param[in,out] st Differential state for the field.
+ * \param[in] s Start of the field (not a blank).
+ * \returns Pointer past the field's digits, or NULL (with \a p->errmsg
+ *   set) if the field is malformed or continues an arc that was never
+ *   initialized; \a st is then unchanged.
+ */
+static const char *crx_update_arc(
+    struct rinex_parser *p,
+    struct obs_state *st,
+    const char *s)
+{
+    const char *end;
+    int64_t val;
+    int cur_order;
+
+    if (s[1] == '&')
+    {
+        end = crx_parse_int64(&val, s + 2);
+        if (s[0] < '0' || s[0] > '5' || !end)
+        {
+            rnx_errorf(p, "bad arc initialization: %.*s",
+                crx_quote_len(s, 24), s);
+            return NULL;
+        }
+        st->order = s[0] - '0';
+        st->used = 1;
+        st->value = val;
+        return end;
+    }
+
+    end = crx_parse_int64(&val, s);
+    if (!end)
+    {
+        rnx_errorf(p, "bad arc continuation: %.*s", crx_quote_len(s, 24), s);
+        return NULL;
+    }
+    if (st->used == 0)
+    {
+        rnx_errorf(p, "arc continuation without initialization: %.*s",
+            crx_quote_len(s, 24), s);
+        return NULL;
+    }
+    if (st->order == 0)
+    {
+        st->value = val;
+        return end;
+    }
+
+    /* Fill the differences up to the arc's order, then keep replacing
+     * the highest-order one; integrate back down to the value.
+     */
+    cur_order = st->used - 1;
+    if (cur_order < st->order)
+    {
+        st->diff[cur_order] = val;
+        st->used = cur_order + 2;
+    }
+    else
+    {
+        st->diff[st->order - 1] = val;
+    }
+    switch (st->used)
+    {
+    case 6: st->diff[3] += st->diff[4]; /* fall through */
+    case 5: st->diff[2] += st->diff[3]; /* fall through */
+    case 4: st->diff[1] += st->diff[2]; /* fall through */
+    case 3: st->diff[0] += st->diff[1]; /* fall through */
+    case 2: st->value += st->diff[0];
+    }
+    return end;
+}
+
 /** crx_decompress_obs decompresses one satellite's observation line.
  *
  * Splits the line into n_obs fields separated by spaces, then applies
@@ -94,8 +190,7 @@ static const char *crx_decompress_obs(
     int is_init)
 {
     struct rinex_parser *p = &crx->base.base;
-    int ii, d, arc_order, cur_order;
-    int64_t val;
+    int ii, d;
     const char *s = line;
 
     /* Split the line into n_obs fields using the reference convention:
@@ -113,58 +208,18 @@ static const char *crx_decompress_obs(
             crx->state[d].used = 0;
             p->obs[d] = 0;
         }
-        else if (s[1] == '&')
+        else
         {
-            /* Arc initialization: N&value */
-            arc_order = s[0] - '0';
-            s = crx_parse_int64(&val, s + 2);
-            if (!s || (arc_order > 5))
-            {
-                rnx_errorf(&crx->base.base, "bad arc initialization: %.16s", s);
-                return NULL;
-            }
-
-            if (crx->state[d].used == 0)
+            /* Arc initialization ("N&value") or continuation. */
+            if (s[1] == '&' && crx->state[d].used == 0)
             {
                 crx->state[d].lli = ' ';
                 crx->state[d].ssi = ' ';
             }
-            crx->state[d].order = arc_order;
-            crx->state[d].used = 1;
-            crx->state[d].value = val;
-            p->obs[d] = val;
-        }
-        else /* Continuation: delta value. */
-        {
-            s = crx_parse_int64(&val, s);
+            s = crx_update_arc(p, &crx->state[d], s);
             if (!s)
-            {
-                rnx_errorf(&crx->base.base, "bad arc continuation: %.16s", s);
                 return NULL;
-            }
-
-            cur_order = crx->state[d].used - 1;
-            arc_order = crx->state[d].order;
-
-            if (cur_order < arc_order)
-            {
-                crx->state[d].diff[cur_order] = val;
-                crx->state[d].used = cur_order + 2;
-            }
-            else
-            {
-                crx->state[d].diff[arc_order - 1] = val;
-            }
-
-            switch (crx->state[d].used)
-            {
-            case 6: crx->state[d].diff[3] += crx->state[d].diff[4]; /* fall through */
-            case 5: crx->state[d].diff[2] += crx->state[d].diff[3]; /* fall through */
-            case 4: crx->state[d].diff[1] += crx->state[d].diff[2]; /* fall through */
-            case 3: crx->state[d].diff[0] += crx->state[d].diff[1]; /* fall through */
-            case 2: crx->state[d].value += crx->state[d].diff[0]; /* fall through */
-            case 1: p->obs[d] = crx->state[d].value;
-            }
+            p->obs[d] = crx->state[d].value;
         }
 
         /* Advance past the field separator (space). */
@@ -409,55 +464,49 @@ static rinex_error_t crx_v2_read_obs(
     return RINEX_SUCCESS;
 }
 
-/** crx_v2_parse_clock parses the CRX v2 receiver clock offset line.
+/** crx_parse_clock parses a CRX receiver clock offset line.
  *
- * CRX v2 uses the same N&VALUE / delta format as individual observations:
- * an empty line means no clock offset (zero), N&VALUE is an arc init at
- * order N, and a bare integer is a differential update.
+ * The clock line uses the same N&VALUE / delta format as individual
+ * observations (see crx_update_arc()): an empty line means no clock
+ * offset (zero), N&VALUE is an arc init at order N, and a bare integer
+ * is a differential update.  The values count units of the last decimal
+ * place that RINEX prints for the clock offset: 1e-9 s (F12.9) for
+ * RINEX 2, so \a scale is 1000, and 1e-12 s (F15.12) for RINEX 3/4, so
+ * \a scale is 1.
+ *
+ * \returns 0 on success, RINEX_ERR_BAD_FORMAT (with an error message)
+ *   if the line is malformed.
  */
-static void crx_v2_parse_clock(struct crx_v23_parser *crx, const char *s)
+static int crx_parse_clock(
+    struct crx_v23_parser *crx,
+    const char *s,
+    int64_t scale
+)
 {
     struct rinex_parser *p_ = &crx->base.base;
     struct obs_state *clk = &crx->clk_state;
-    int64_t val;
-    int cur_order;
+    const char *end;
 
     if (*s == '\n' || *s == '\0' || *s == ' ')
     {
         clk->used = 0;
         p_->epoch.clock_offset = 0;
+        return 0;
     }
-    else if (s[1] == '&')
+
+    end = crx_update_arc(p_, clk, s);
+    if (!end)
     {
-        clk->order = s[0] - '0';
-        crx_parse_int64(&val, s + 2);
-        clk->value = val;
-        clk->used = 1;
-        p_->epoch.clock_offset = val * 1000;
+        return RINEX_ERR_BAD_FORMAT;
     }
-    else
+    if (*end != '\n' && *end != '\0')
     {
-        crx_parse_int64(&val, s);
-        cur_order = clk->used - 1;
-        if (cur_order < clk->order)
-        {
-            clk->diff[cur_order] = (int32_t)val;
-            clk->used = cur_order + 2;
-        }
-        else
-        {
-            clk->diff[clk->order - 1] = (int32_t)val;
-        }
-        switch (clk->used)
-        {
-        case 6: clk->diff[3] += clk->diff[4]; /* fall through */
-        case 5: clk->diff[2] += clk->diff[3]; /* fall through */
-        case 4: clk->diff[1] += clk->diff[2]; /* fall through */
-        case 3: clk->diff[0] += clk->diff[1]; /* fall through */
-        case 2: clk->value += clk->diff[0];   /* fall through */
-        case 1: p_->epoch.clock_offset = clk->value * 1000;
-        }
+        rnx_errorf(p_, "unexpected text in clock offset line: %.*s",
+            crx_quote_len(s, 24), s);
+        return RINEX_ERR_BAD_FORMAT;
     }
+    p_->epoch.clock_offset = clk->value * scale;
+    return 0;
 }
 
 /** crx_read_v2 reads an observation data record from \a p_. */
@@ -544,8 +593,12 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        crx_v2_parse_clock(crx, p_->stream->buffer + p->parse_ofs);
+        err = crx_parse_clock(crx, p_->stream->buffer + p->parse_ofs, 1000);
         p->parse_ofs = res;
+        if (err < 0)
+        {
+            return err;
+        }
 
         /* Read and decompress the observations. */
         return crx_v2_read_obs(crx, 0, crx->sattab);
@@ -577,8 +630,12 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
         {
             return RINEX_ERR_BAD_FORMAT;
         }
-        crx_v2_parse_clock(crx, p_->stream->buffer + p->parse_ofs);
+        err = crx_parse_clock(crx, p_->stream->buffer + p->parse_ofs, 1000);
         p->parse_ofs = res;
+        if (err < 0)
+        {
+            return err;
+        }
 
         /* Read and decompress observations (full initialization). */
         return crx_v2_read_obs(crx, 1, NULL);
@@ -654,25 +711,11 @@ static int crx_v34_parse_epoch(struct crx_v23_parser *crx)
     p->base.epoch.flag = line[31];
     p->base.epoch.n_sats = n_sats;
 
-    /* Clock offset from the epoch line (cols 41+). */
-    if (line_len <= 43)
-    {
-        p->base.epoch.clock_offset = 0;
-    }
-    else if (line_len <= 56)
-    {
-        if (parse_fixed(&p->base.epoch.clock_offset, line + 41,
-            line_len - 41, line_len - 44))
-        {
-            rnx_errorf(&crx->base.base, "failed to parse clock offset: %.*s",
-                line_len - 41, line + 41);
-            return RINEX_ERR_BAD_FORMAT;
-        }
-    }
-    else
-    {
-        p->base.epoch.clock_offset = 0;
-    }
+    /* Unlike a RINEX 3 epoch line, a CRX v3 epoch line holds the
+     * satellite list from column 42, and the receiver clock offset is on
+     * the following line (see crx_read_v34()).
+     */
+    p->base.epoch.clock_offset = 0;
 
     return 0;
 }
@@ -759,12 +802,16 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     }
     obs = p_->stream->buffer + p->parse_ofs;
 
-    /* Skip the clock offset line. */
+    /* Decode the clock offset line, then skip past it. */
+    if (crx_parse_clock(crx, obs, 1) < 0)
+    {
+        p->parse_ofs = res;
+        return RINEX_ERR_BAD_FORMAT;
+    }
     obs = memchr(obs, '\n', res - p->parse_ofs);
     if (!obs)
     {
-        rnx_errorf(p_, "missing EOL for clock offset line: %.*s",
-            res - p->parse_ofs, obs);
+        rnx_errorf(p_, "missing EOL for clock offset line");
         p->parse_ofs = res;
         return RINEX_ERR_BAD_FORMAT;
     }
