@@ -10,6 +10,25 @@
 
 static struct rinex_data data1, data2;
 static int had_diff;
+
+/** obs_pair matches one observation code between the two files. */
+struct obs_pair
+{
+    /** code is the NUL-padded observation code, such as "C1C". */
+    const char *code;
+
+    /** idx1 and idx2 index the code in each file's list for the
+     * satellite system, or are -1 if that file does not list it.
+     */
+    int idx1, idx2;
+};
+
+/** obs_pairs[sys] lists the union of both files' observation codes for
+ * the satellite system with index sys, so observations are compared by
+ * code rather than by position; n_obs_pairs[sys] is its length.
+ */
+static struct obs_pair *obs_pairs[32];
+static int n_obs_pairs[32];
 static int full_mode;
 static const char *file1_name, *file2_name;
 
@@ -96,6 +115,33 @@ static int cursor_obs_idx(
  * data1.epoch[i1] and data2.epoch[i2].  The files need not start at the
  * same epoch, so the indices can differ.
  */
+/** Compare one observation (value, LLI and SSI) between the files.  If
+ * they differ, report it, first printing a heading naming \a where and
+ * \a sat_id unless *\a diff shows one was printed already.
+ */
+static void compare_value(
+    const char *where,
+    const char *sat_id,
+    const struct obs_pair *pair,
+    int64_t o1, char l1, char ss1,
+    int64_t o2, char l2, char ss2,
+    int *diff
+)
+{
+    if (o1 == o2 && l1 == l2 && ss1 == ss2)
+        return;
+    if (!*diff)
+    {
+        printf("%s: %s sat %s obs differ:\n", file1_name, where, sat_id);
+        *diff = 1;
+    }
+    printf("  %.4s: %lld(lli='\\%o',ssi='\\%o') vs "
+        "%lld(lli='\\%o',ssi='\\%o')\n",
+        pair->code,
+        (long long)o1, (unsigned char)l1, (unsigned char)ss1,
+        (long long)o2, (unsigned char)l2, (unsigned char)ss2);
+}
+
 static void compare_epoch(
     int i1, struct sat_cursor *c1,
     int i2, struct sat_cursor *c2
@@ -171,45 +217,38 @@ static void compare_epoch(
                 continue;
             }
 
-            /* Both present -- compare observations. */
+            /* Both present -- compare observations, matched by code.
+             * A code that one file does not list (or never observed)
+             * is missing there.
+             */
             {
-                int n_obs = s1->n_obs < s2->n_obs ? s1->n_obs : s2->n_obs;
+                char where[48];
                 int jj, diff = 0;
 
-                for (jj = 0; jj < n_obs; ++jj)
+                snprintf(where, sizeof where, "epoch %s", ts);
+                for (jj = 0; jj < n_obs_pairs[sys]; ++jj)
                 {
+                    const struct obs_pair *pair = &obs_pairs[sys][jj];
+                    int st1 = pair->idx1 >= 0 ? sv1->start[pair->idx1] : -1;
+                    int st2 = pair->idx2 >= 0 ? sv2->start[pair->idx2] : -1;
                     int64_t o1, o2;
                     char l1 = ' ', l2 = ' ', ss1 = ' ', ss2 = ' ';
 
-                    o1 = (sv1->start[jj] >= 0)
-                        ? data1.obs[sv1->start[jj] + oi1] : INT64_MIN;
-                    o2 = (sv2->start[jj] >= 0)
-                        ? data2.obs[sv2->start[jj] + oi2] : INT64_MIN;
-                    if (sv1->start[jj] >= 0)
+                    o1 = (st1 >= 0) ? data1.obs[st1 + oi1] : INT64_MIN;
+                    o2 = (st2 >= 0) ? data2.obs[st2 + oi2] : INT64_MIN;
+                    if (st1 >= 0)
                     {
-                        l1 = data1.lli[sv1->start[jj] + oi1];
-                        ss1 = data1.ssi[sv1->start[jj] + oi1];
+                        l1 = data1.lli[st1 + oi1];
+                        ss1 = data1.ssi[st1 + oi1];
                     }
-                    if (sv2->start[jj] >= 0)
+                    if (st2 >= 0)
                     {
-                        l2 = data2.lli[sv2->start[jj] + oi2];
-                        ss2 = data2.ssi[sv2->start[jj] + oi2];
+                        l2 = data2.lli[st2 + oi2];
+                        ss2 = data2.ssi[st2 + oi2];
                     }
 
-                    if (o1 != o2 || l1 != l2 || ss1 != ss2)
-                    {
-                        if (!diff)
-                        {
-                            printf("%s: epoch %s sat %s obs differ:\n",
-                                file1_name, ts, sv1->id);
-                            diff = 1;
-                        }
-                        printf("  obs[%d]: %lld(lli='\\%o',ssi='\\%o') vs "
-                            "%lld(lli='\\%o',ssi='\\%o')\n",
-                            jj,
-                            (long long)o1, (unsigned char)l1, (unsigned char)ss1,
-                            (long long)o2, (unsigned char)l2, (unsigned char)ss2);
-                    }
+                    compare_value(where, sv1->id, pair, o1, l1, ss1,
+                        o2, l2, ss2, &diff);
                 }
                 if (diff)
                     found_mismatch();
@@ -226,6 +265,9 @@ struct event_key
      */
     int has_time;
     struct rinex_epoch time;
+
+    /** flag is the event's epoch flag ('1' to '6'), or ' ' if unknown. */
+    char flag;
 
     /** prev and next are the observation epochs just before and after
      * the event, or NULL at the start or end of the file.
@@ -293,6 +335,7 @@ static void event_key(
     int yy, mm, dd, hh, mi;
     int v2 = data->rinex_version == 2;
 
+    key->flag = len > (v2 ? 28 : 31) ? line[v2 ? 28 : 31] : ' ';
     key->prev = ev->epoch_index > 0
         ? &data->epoch[ev->epoch_index - 1] : NULL;
     key->next = ev->epoch_index < data->epoch_used
@@ -421,6 +464,156 @@ static int collect_events(
     return nn;
 }
 
+/** records[0] and records[1] parse flag-1 and flag-6 records from
+ * data1 and data2 respectively, so that their observations can be
+ * compared by code.  Each is created when first needed; records_failed[]
+ * notes a header that could not be used, so it is not tried again.
+ */
+static struct rinex_parser *records[2];
+static int records_failed[2];
+
+/** Parse event \a ev of \a data (file number \a which, 0 or 1), which
+ * should be a flag-1 or flag-6 record.  Returns the parser holding the
+ * record, or NULL if it cannot be parsed.
+ */
+static const struct rinex_parser *parse_obs_event(
+    int which,
+    const struct rinex_data *data,
+    const struct rinex_event *ev
+)
+{
+    struct rinex_parser *p;
+
+    if (!records[which] && !records_failed[which]
+        && rinex_open_records(&records[which], data->file_header,
+            data->file_header_len))
+    {
+        records_failed[which] = 1;
+    }
+    p = records[which];
+    if (!p || rinex_parse_record(p, ev->text, ev->text_len) != RINEX_SUCCESS
+        || (p->epoch.flag != '1' && p->epoch.flag != '6'))
+    {
+        return NULL;
+    }
+    return p;
+}
+
+/** Find satellite \a sv in the current record of \a p, or NULL. */
+static const struct rinex_sv_info *find_sat(
+    const struct rinex_parser *p,
+    const struct rinex_sv_info *sv
+)
+{
+    int ii;
+
+    for (ii = 0; ii < p->epoch.n_sats; ++ii)
+    {
+        if (p->sats[ii].system == sv->system && p->sats[ii].number == sv->number)
+            return &p->sats[ii];
+    }
+    return NULL;
+}
+
+/** Fetch observation \a idx of \a sv in the current record of \a p,
+ * using the parser's missing-value convention (0 with blank indicators)
+ * if \a idx is -1 (the file does not list that code).
+ */
+static void event_value(
+    const struct rinex_parser *p,
+    const struct rinex_sv_info *sv,
+    int idx,
+    int64_t *obs, char *lli, char *ssi
+)
+{
+    if (idx < 0 || idx >= p->n_obs[sv->system & 31])
+    {
+        *obs = 0;
+        *lli = *ssi = ' ';
+        return;
+    }
+    *obs = p->obs[sv->obs_0 + idx];
+    *lli = p->lli[sv->obs_0 + idx];
+    *ssi = p->ssi[sv->obs_0 + idx];
+}
+
+/** Compare matched flag-1 or flag-6 records \a e1 and \a e2 (described
+ * by \a desc) by their contents, matching observations by code.
+ * Returns 0 if either cannot be parsed, so the caller can compare their
+ * text instead; else 1.
+ */
+static int compare_obs_events(
+    const char *desc,
+    const struct rinex_event *e1,
+    const struct rinex_event *e2
+)
+{
+    const struct rinex_parser *p1, *p2;
+    char sat_id[4];
+    int ii, jj, diff, any_diff = 0;
+
+    p1 = parse_obs_event(0, &data1, e1);
+    p2 = parse_obs_event(1, &data2, e2);
+    if (!p1 || !p2)
+        return 0;
+
+    if (p1->epoch.flag != p2->epoch.flag)
+    {
+        printf("%s: %s flag %c vs %c\n", file1_name, desc,
+            p1->epoch.flag, p2->epoch.flag);
+        any_diff = 1;
+    }
+    if (p1->epoch.clock_offset != p2->epoch.clock_offset)
+    {
+        printf("%s: %s clock_offset %lld vs %lld\n", file1_name, desc,
+            (long long)p1->epoch.clock_offset,
+            (long long)p2->epoch.clock_offset);
+        any_diff = 1;
+    }
+
+    for (ii = 0; ii < p1->epoch.n_sats; ++ii)
+    {
+        const struct rinex_sv_info *sv1 = &p1->sats[ii];
+        const struct rinex_sv_info *sv2 = find_sat(p2, sv1);
+        int sys = sv1->system & 31;
+
+        snprintf(sat_id, sizeof sat_id, "%c%02d", sv1->system, sv1->number);
+        if (!sv2)
+        {
+            printf("%s: %s sat %s only in file1\n", file1_name, desc, sat_id);
+            any_diff = 1;
+            continue;
+        }
+
+        diff = 0;
+        for (jj = 0; jj < n_obs_pairs[sys]; ++jj)
+        {
+            const struct obs_pair *pair = &obs_pairs[sys][jj];
+            int64_t o1, o2;
+            char l1, l2, ss1, ss2;
+
+            event_value(p1, sv1, pair->idx1, &o1, &l1, &ss1);
+            event_value(p2, sv2, pair->idx2, &o2, &l2, &ss2);
+            compare_value(desc, sat_id, pair, o1, l1, ss1, o2, l2, ss2, &diff);
+        }
+        any_diff |= diff;
+    }
+    for (ii = 0; ii < p2->epoch.n_sats; ++ii)
+    {
+        const struct rinex_sv_info *sv2 = &p2->sats[ii];
+
+        if (find_sat(p1, sv2))
+            continue;
+        snprintf(sat_id, sizeof sat_id, "%c%02d", sv2->system, sv2->number);
+        printf("%s: %s sat %s only in file2\n", file1_name, desc, sat_id);
+        any_diff = 1;
+    }
+
+    if (any_diff)
+        found_mismatch();
+    return 1;
+}
+
 /** Match the events in \a r1 (from file1) against those in \a r2 (from
  * file2), both ordered consistently with \a cmp, and report events in
  * only one file or with different text.
@@ -460,11 +653,20 @@ static void match_events(
         else
         {
             const struct rinex_event *e1 = r1[i1].ev, *e2 = r2[i2].ev;
+            int is_obs1 = r1[i1].key.flag == '1' || r1[i1].key.flag == '6';
+            int is_obs2 = r2[i2].key.flag == '1' || r2[i2].key.flag == '6';
 
-            if (e1->text_len != e2->text_len
+            /* Observation records hold values in each file's own code
+             * order, so compare their contents rather than their text.
+             */
+            event_desc(&r1[i1].key, desc);
+            if (is_obs1 && is_obs2 && compare_obs_events(desc, e1, e2))
+            {
+                /* compared */
+            }
+            else if (e1->text_len != e2->text_len
                 || memcmp(e1->text, e2->text, (size_t)e1->text_len) != 0)
             {
-                event_desc(&r1[i1].key, desc);
                 printf("%s: %s text differs\n", file1_name, desc);
                 found_mismatch();
             }
@@ -501,13 +703,74 @@ static void compare_events(void)
     match_events(r1, n1, r2, n2, untimed_event_cmp);
     free(r1);
     free(r2);
+
+    for (n1 = 0; n1 < 2; ++n1)
+    {
+        if (records[n1])
+            records[n1]->destroy(records[n1]);
+        records[n1] = NULL;
+    }
+}
+
+/** Fill obs_pairs[] with the union of the two files' observation codes
+ * for each satellite system: file1's codes in its order, then any codes
+ * that only file2 lists.
+ */
+static void build_obs_pairs(void)
+{
+    int sys, jj, kk, nn;
+
+    for (sys = 0; sys < 32; ++sys)
+    {
+        const struct rinex_system_data *s1 = &data1.sys[sys];
+        const struct rinex_system_data *s2 = &data2.sys[sys];
+        char *used2;
+
+        n_obs_pairs[sys] = 0;
+        obs_pairs[sys] = malloc((s1->n_obs + s2->n_obs + 1) * sizeof **obs_pairs);
+        used2 = calloc(s2->n_obs + 1, 1);
+        if (!obs_pairs[sys] || !used2)
+        {
+            fprintf(stderr, "Unable to allocate observation code map\n");
+            exit(EXIT_FAILURE);
+        }
+
+        nn = 0;
+        for (jj = 0; jj < s1->n_obs; ++jj)
+        {
+            obs_pairs[sys][nn].code = s1->obs[jj];
+            obs_pairs[sys][nn].idx1 = jj;
+            obs_pairs[sys][nn].idx2 = -1;
+            for (kk = 0; kk < s2->n_obs; ++kk)
+            {
+                if (!used2[kk] && !strncmp(s1->obs[jj], s2->obs[kk], 4))
+                {
+                    obs_pairs[sys][nn].idx2 = kk;
+                    used2[kk] = 1;
+                    break;
+                }
+            }
+            ++nn;
+        }
+        for (kk = 0; kk < s2->n_obs; ++kk)
+        {
+            if (used2[kk])
+                continue;
+            obs_pairs[sys][nn].code = s2->obs[kk];
+            obs_pairs[sys][nn].idx1 = -1;
+            obs_pairs[sys][nn].idx2 = kk;
+            ++nn;
+        }
+        n_obs_pairs[sys] = nn;
+        free(used2);
+    }
 }
 
 static void compare_files(void)
 {
     struct sat_cursor *c1, *c2;
     char ts[32];
-    int i1, i2, n1, n2, n_sv1, n_sv2, cmp;
+    int i1, i2, n1, n2, n_sv1, n_sv2, cmp, ii;
 
     n1 = data1.epoch_used;
     n2 = data2.epoch_used;
@@ -524,6 +787,8 @@ static void compare_files(void)
             if (e2 > n_sv2) n_sv2 = e2;
         }
     }
+
+    build_obs_pairs();
 
     c1 = calloc(n_sv1 ? n_sv1 : 1, sizeof *c1);
     c2 = calloc(n_sv2 ? n_sv2 : 1, sizeof *c2);
@@ -583,6 +848,9 @@ static void compare_files(void)
     free(c2);
 
     compare_events();
+
+    for (ii = 0; ii < 32; ++ii)
+        free(obs_pairs[ii]);
 }
 
 static void usage(FILE *out, const char *argv0)

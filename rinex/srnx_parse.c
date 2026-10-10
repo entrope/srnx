@@ -123,6 +123,11 @@ struct srnx_v1_parser
      * #base.ssi.
      */
     int obs_alloc;
+
+    /** records parses observation-shaped EVTF records.  It is created
+     * by the first one read (from the RHDR header) and kept after that.
+     */
+    struct rinex_parser *records;
 };
 
 /** Parses the flag and n_sats fields out of a RINEX v2-style epoch
@@ -439,48 +444,38 @@ static rinex_error_t srnx_v1_read_observation_event(struct srnx_v1_parser *p,
     const struct rinex_event *ev)
 {
     const char *header, *error;
-    size_t header_len, length;
-    char *text;
-    struct rinex_stream *stream;
-    struct rinex_parser *event = NULL;
+    size_t header_len;
+    struct rinex_parser *event;
     rinex_error_t result;
     int ii, n_obs = 0;
 
-    if (srnx_get_header(p->srnx, &header, &header_len))
-        return RINEX_ERR_BAD_FORMAT;
-    if (ev->text_len < 0 || header_len > INT_MAX - (size_t)ev->text_len)
-        return RINEX_ERR_BAD_FORMAT;
-    length = header_len + ev->text_len;
-    text = calloc(length + RINEX_EXTRA, 1);
-    if (!text) return RINEX_ERR_SYSTEM;
-    memcpy(text, header, header_len);
-    memcpy(text + header_len, ev->text, ev->text_len);
-    stream = rinex_buffer_stream(text, (int)length);
-    if (!stream)
+    if (!p->records)
     {
-        free(text);
-        return RINEX_ERR_SYSTEM;
+        if (srnx_get_header(p->srnx, &header, &header_len))
+            return RINEX_ERR_BAD_FORMAT;
+        if (header_len > INT_MAX)
+            return RINEX_ERR_BAD_FORMAT;
+        error = rinex_open_records(&p->records, header, (int)header_len);
+        if (error)
+        {
+            rnx_errorf(&p->base, "invalid observation EVTF header: %s", error);
+            return RINEX_ERR_BAD_FORMAT;
+        }
     }
-    error = rinex_open(&event, stream);
-    if (error)
-    {
-        rnx_errorf(&p->base, "invalid observation EVTF header: %s", error);
-        result = RINEX_ERR_BAD_FORMAT;
-        goto done;
-    }
-    result = event->read(event);
+    event = p->records;
+
+    result = rinex_parse_record(event, ev->text, ev->text_len);
     if (result != RINEX_SUCCESS)
     {
         rnx_errorf(&p->base, "invalid observation EVTF: %s", event->errmsg);
-        result = RINEX_ERR_BAD_FORMAT;
-        goto done;
+        return result == RINEX_ERR_SYSTEM ? result : RINEX_ERR_BAD_FORMAT;
     }
     for (ii = 0; ii < event->epoch.n_sats; ++ii)
         n_obs += event->n_obs[p->rinex_version == 2 ? 0 : event->sats[ii].system & 31];
     result = srnx_v1_ensure_sats(p, event->epoch.n_sats);
-    if (result != RINEX_SUCCESS) goto done;
+    if (result != RINEX_SUCCESS) return result;
     result = srnx_v1_ensure_obs(p, n_obs);
-    if (result != RINEX_SUCCESS) goto done;
+    if (result != RINEX_SUCCESS) return result;
     p->base.epoch = event->epoch;
     if (event->epoch.n_sats)
         memcpy(p->base.sats, event->sats, event->epoch.n_sats * sizeof *event->sats);
@@ -490,16 +485,7 @@ static rinex_error_t srnx_v1_read_observation_event(struct srnx_v1_parser *p,
         memcpy(p->base.lli, event->lli, n_obs);
         memcpy(p->base.ssi, event->ssi, n_obs);
     }
-    if (event->read(event) != RINEX_EOF)
-    {
-        rnx_errorf(&p->base, "extra records in observation EVTF");
-        result = RINEX_ERR_BAD_FORMAT;
-    }
-done:
-    if (event) event->destroy(event);
-    stream->destroy(stream);
-    free(text);
-    return result;
+    return RINEX_SUCCESS;
 }
 
 static rinex_error_t srnx_v1_read(struct rinex_parser *p_)
@@ -687,6 +673,8 @@ static void srnx_v1_destroy(struct rinex_parser *p_)
     free(p_->buffer);
 
     srnx_close(p->srnx);
+    if (p->records)
+        p->records->destroy(p->records);
 
     /* Unlike srnx->data (an SRNX-owned mmap), #base.stream is owned by
      * the caller of rinex_open(), exactly as for the text/CRX parsers;

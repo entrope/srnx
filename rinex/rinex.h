@@ -227,6 +227,48 @@ struct rinex_parser
  */
 const char *rinex_open(struct rinex_parser **p_parser, struct rinex_stream *stream);
 
+/** rinex_open_records creates a parser for individual RINEX observation
+ * records that are kept apart from their file, such as the flag-1 and
+ * flag-6 records in rinex_data.event[] or in SRNX files.
+ *
+ * The observation types and other settings come from \a header, a
+ * RINEX observation header ending with "END OF HEADER" (CRINEX header
+ * lines before "RINEX VERSION / TYPE" are skipped; the records must be
+ * plain RINEX text).  Upon success, `(*p_parser)->buffer` holds that
+ * header.  Use rinex_parse_record(), not the parser's read function,
+ * to parse each record.
+ *
+ * \param[in,out] p_parser Receives a pointer to the created parser.  If
+ *   this is not null, rinex_open_records() first calls
+ *   rinex_parser.destroy() on the old parser.
+ * \param[in] header RINEX header text.
+ * \param[in] header_len Length of \a header.
+ * \returns NULL on success, else an explanation of the failure.
+ */
+const char *rinex_open_records(
+    struct rinex_parser **p_parser,
+    const char *header,
+    int header_len
+);
+
+/** rinex_parse_record parses one RINEX record into \a p.
+ *
+ * \a text must hold exactly one record: an epoch line and the lines
+ * that it says follow, each ending with '\n'.  On success, \a p holds
+ * the record as rinex_parser.read() would have left it.
+ *
+ * \param[in,out] p Parser created by rinex_open_records().
+ * \param[in] text Record text.  It is copied, so need not be padded.
+ * \param[in] text_len Length of \a text.
+ * \returns RINEX_SUCCESS, or an error code (with \a p->errmsg set) if
+ *   the record is malformed, incomplete or followed by other text.
+ */
+rinex_error_t rinex_parse_record(
+    struct rinex_parser *p,
+    const char *text,
+    int text_len
+);
+
 /** Finds the start of the first line with the given header label.
  *
  * \param[in] p RINEX parser with header in \a p->buffer.

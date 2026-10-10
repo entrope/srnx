@@ -25,6 +25,12 @@
  *    Events with timestamps must match by their own time, and events
  *    without one by a neighbouring epoch, even if an epoch next to them
  *    is missing from one file.
+ *
+ *  - rnxcmp must compare observations by code, not by position, so files
+ *    that list the same codes in a different order compare equal, and a
+ *    code that only one file lists is compared as missing in the other.
+ *    That includes flag-1 and flag-6 records, which the loader keeps as
+ *    event text rather than in the observation columns.
  */
 
 #include <stdio.h>
@@ -520,6 +526,202 @@ int main(void)
         remove("test_bin_uev_c.rnx");
         remove("test_bin_mix_a.rnx");
         remove("test_bin_mix_b.rnx");
+        remove(out_path);
+    }
+
+    /* --- rnxcmp: observation codes in different orders. --- */
+    {
+#define ORD_V3(types) \
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n", \
+    "test                                                        PGM / RUN BY / DATE\n", \
+    types, \
+    "                                                            END OF HEADER\n", \
+    "> 2020 07 07 00 00  0.0000000  0  1\n"
+#define ORD_V2(types) \
+    "     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE\n", \
+    "test                                                        PGM / RUN BY / DATE\n", \
+    types, \
+    "                                                            END OF HEADER\n", \
+    " 20  7  7  0  0  0.0000000  0  1G01\n"
+        static const char *const ord_a[] = { ORD_V3(
+            "G    2 C1C L1C                                              SYS / # / OBS TYPES\n"),
+            "G01  20000000.000 7 105000000.00017\n", NULL };
+        /* Same data, codes reversed. */
+        static const char *const ord_b[] = { ORD_V3(
+            "G    2 L1C C1C                                              SYS / # / OBS TYPES\n"),
+            "G01 105000000.00017  20000000.000 7\n", NULL };
+        /* Reversed, plus a code that is never observed. */
+        static const char *const ord_c[] = { ORD_V3(
+            "G    3 L1C S1C C1C                                          SYS / # / OBS TYPES\n"),
+            "G01 105000000.00017                  20000000.000 7\n", NULL };
+        /* Reversed, plus a code that is observed. */
+        static const char *const ord_d[] = { ORD_V3(
+            "G    3 L1C S1C C1C                                          SYS / # / OBS TYPES\n"),
+            "G01 105000000.00017        45.000    20000000.000 7\n", NULL };
+        /* Reversed, with a different C1C value. */
+        static const char *const ord_e[] = { ORD_V3(
+            "G    2 L1C C1C                                              SYS / # / OBS TYPES\n"),
+            "G01 105000000.00017  20000000.001 7\n", NULL };
+        static const char *const ord_v2a[] = { ORD_V2(
+            "     2    C1    L1                                          # / TYPES OF OBSERV\n"),
+            "  20000000.000 7 105000000.00017\n", NULL };
+        static const char *const ord_v2b[] = { ORD_V2(
+            "     2    L1    C1                                          # / TYPES OF OBSERV\n"),
+            " 105000000.00017  20000000.000 7\n", NULL };
+#undef ORD_V3
+#undef ORD_V2
+        const char *out_path = "test_bin_cmp_out.txt";
+        char *output;
+        int res;
+
+        write_lines("test_bin_ord_a.rnx", ord_a);
+        write_lines("test_bin_ord_b.rnx", ord_b);
+        write_lines("test_bin_ord_c.rnx", ord_c);
+        write_lines("test_bin_ord_d.rnx", ord_d);
+        write_lines("test_bin_ord_e.rnx", ord_e);
+        write_lines("test_bin_ord_v2a.rnx", ord_v2a);
+        write_lines("test_bin_ord_v2b.rnx", ord_v2b);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ord_a.rnx test_bin_ord_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res == 0 && output && !*output,
+            "rnxcmp: reordered observation codes compare equal");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ord_a.rnx test_bin_ord_c.rnx", out_path);
+        output = slurp(out_path);
+        ok(res == 0 && output && !*output,
+            "rnxcmp: an extra, never-observed code compares equal");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ord_a.rnx test_bin_ord_d.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 2
+            && count_lines_with(output, "  S1C: -9223372036854775808(") == 1
+            && count_lines_with(output, "vs 45000(") == 1,
+            "rnxcmp: observations of a code in only one file are reported");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ord_a.rnx test_bin_ord_e.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 2
+            && count_lines_with(output, "  C1C: 20000000000(") == 1
+            && count_lines_with(output, "vs 20000000001(") == 1,
+            "rnxcmp: a changed value is reported under its code");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ord_v2a.rnx test_bin_ord_v2b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res == 0 && output && !*output,
+            "rnxcmp: reordered RINEX 2 observation types compare equal");
+        free(output);
+
+        remove("test_bin_ord_a.rnx");
+        remove("test_bin_ord_b.rnx");
+        remove("test_bin_ord_c.rnx");
+        remove("test_bin_ord_d.rnx");
+        remove("test_bin_ord_e.rnx");
+        remove("test_bin_ord_v2a.rnx");
+        remove("test_bin_ord_v2b.rnx");
+        remove(out_path);
+    }
+
+    /* --- rnxcmp: flag-1 and flag-6 records with reordered codes. --- */
+    {
+#define OEV_V3(types) \
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n", \
+    "test                                                        PGM / RUN BY / DATE\n", \
+    types, \
+    "                                                            END OF HEADER\n"
+#define OEV_AB "G    2 C1C L1C                                              SYS / # / OBS TYPES\n"
+#define OEV_BA "G    2 L1C C1C                                              SYS / # / OBS TYPES\n"
+        static const char *const oev_a[] = { OEV_V3(OEV_AB),
+            "> 2020 07 07 00 00  0.0000000  0  1\n",
+            "G01  20000000.000 7 105000000.00017\n",
+            "> 2020 07 07 00 00 30.0000000  1  1\n",
+            "G01  20000030.000 7 105000030.00017\n",
+            "> 2020 07 07 00 01  0.0000000  0  1\n",
+            "G01  20000060.000 7 105000060.00017\n",
+            "> 2020 07 07 00 01  0.0000000  6  1\n",
+            "G01  20000060.000 7 105000060.00017\n", NULL };
+        /* Codes reversed, values reordered to match. */
+        static const char *const oev_b[] = { OEV_V3(OEV_BA),
+            "> 2020 07 07 00 00  0.0000000  0  1\n",
+            "G01 105000000.00017  20000000.000 7\n",
+            "> 2020 07 07 00 00 30.0000000  1  1\n",
+            "G01 105000030.00017  20000030.000 7\n",
+            "> 2020 07 07 00 01  0.0000000  0  1\n",
+            "G01 105000060.00017  20000060.000 7\n",
+            "> 2020 07 07 00 01  0.0000000  6  1\n",
+            "G01 105000060.00017  20000060.000 7\n", NULL };
+        /* Codes reversed, but the flag-1 and flag-6 values left in A's
+         * positions, so they now belong to the wrong codes. */
+        static const char *const oev_c[] = { OEV_V3(OEV_BA),
+            "> 2020 07 07 00 00  0.0000000  0  1\n",
+            "G01 105000000.00017  20000000.000 7\n",
+            "> 2020 07 07 00 00 30.0000000  1  1\n",
+            "G01  20000030.000 7 105000030.00017\n",
+            "> 2020 07 07 00 01  0.0000000  0  1\n",
+            "G01 105000060.00017  20000060.000 7\n",
+            "> 2020 07 07 00 01  0.0000000  6  1\n",
+            "G01  20000060.000 7 105000060.00017\n", NULL };
+#undef OEV_V3
+#undef OEV_AB
+#undef OEV_BA
+        const char *out_path = "test_bin_cmp_out.txt";
+        char cmd[1024];
+        char *output;
+        int res;
+
+        write_lines("test_bin_oev_a.rnx", oev_a);
+        write_lines("test_bin_oev_b.rnx", oev_b);
+        write_lines("test_bin_oev_c.rnx", oev_c);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_oev_a.rnx test_bin_oev_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res == 0 && output && !*output,
+            "rnxcmp: reordered flag-1/flag-6 records compare equal");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_oev_a.rnx test_bin_oev_c.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "obs differ") == 2
+            && count_lines_with(output, "event at 20200707 0000 30.0000000"
+                " sat G01 obs differ") == 1
+            && count_lines_with(output, "event at 20200707 0001 0.0000000"
+                " sat G01 obs differ") == 1
+            && count_lines_with(output, "  C1C: ") == 2
+            && count_lines_with(output, "  L1C: ") == 2
+            && count_lines_with(output, "text differs") == 0,
+            "rnxcmp: flag-1/flag-6 values under the wrong codes are reported");
+        free(output);
+
+        /* The same comparison with file1 loaded from SRNX. */
+        snprintf(cmd, sizeof cmd, "%s test_bin_oev_a.rnx test_bin_oev_a.srnx"
+            " >/dev/null 2>&1", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(res == 0, "rnx2srnx converts the flag-1/flag-6 file");
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_oev_a.srnx test_bin_oev_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res == 0 && output && !*output,
+            "rnxcmp: SRNX flag-1/flag-6 records compare by code");
+        free(output);
+
+        remove("test_bin_oev_a.rnx");
+        remove("test_bin_oev_b.rnx");
+        remove("test_bin_oev_c.rnx");
+        remove("test_bin_oev_a.srnx");
         remove(out_path);
     }
 
