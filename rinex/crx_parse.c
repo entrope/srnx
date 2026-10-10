@@ -42,7 +42,7 @@ static const char *crx_parse_int64(int64_t *p_out, const char *s)
 static rinex_error_t crx_ensure_obs(struct crx_v23_parser *crx, int n)
 {
     struct rnx_v234_parser *p = &crx->base;
-    int old_alloc, new_alloc, ii;
+    int old_alloc, new_alloc;
 
     if (n <= p->obs_alloc)
         return RINEX_SUCCESS;
@@ -99,17 +99,19 @@ static int crx_quote_len(const char *s, int max)
  * \param[in,out] st Differential state for the field.
  * \param[in] s Start of the field (not a blank).
  * \returns Pointer past the field's digits, or NULL (with \a p->errmsg
- *   set) if the field is malformed or continues an arc that was never
- *   initialized; \a st is then unchanged.
+ *   set) if the field is malformed, continues an arc that was never
+ *   initialized, or makes a difference or the value overflow; \a st is
+ *   then unchanged.
  */
 static const char *crx_update_arc(
     struct rinex_parser *p,
     struct obs_state *st,
     const char *s)
 {
+    struct obs_state next;
     const char *end;
     int64_t val;
-    int cur_order;
+    int cur_order, overflow = 0;
 
     if (s[1] == '&')
     {
@@ -145,26 +147,35 @@ static const char *crx_update_arc(
     }
 
     /* Fill the differences up to the arc's order, then keep replacing
-     * the highest-order one; integrate back down to the value.
+     * the highest-order one; integrate back down to the value.  Work on
+     * a copy, so that an overflow (only possible with values far beyond
+     * any real observation) leaves the state unchanged.
      */
-    cur_order = st->used - 1;
-    if (cur_order < st->order)
+    next = *st;
+    cur_order = next.used - 1;
+    if (cur_order < next.order)
     {
-        st->diff[cur_order] = val;
-        st->used = cur_order + 2;
+        next.diff[cur_order] = val;
+        next.used = cur_order + 2;
     }
     else
     {
-        st->diff[st->order - 1] = val;
+        next.diff[next.order - 1] = val;
     }
-    switch (st->used)
+    switch (next.used)
     {
-    case 6: st->diff[3] += st->diff[4]; /* fall through */
-    case 5: st->diff[2] += st->diff[3]; /* fall through */
-    case 4: st->diff[1] += st->diff[2]; /* fall through */
-    case 3: st->diff[0] += st->diff[1]; /* fall through */
-    case 2: st->value += st->diff[0];
+    case 6: overflow |= __builtin_add_overflow(next.diff[3], next.diff[4], &next.diff[3]); /* fall through */
+    case 5: overflow |= __builtin_add_overflow(next.diff[2], next.diff[3], &next.diff[2]); /* fall through */
+    case 4: overflow |= __builtin_add_overflow(next.diff[1], next.diff[2], &next.diff[1]); /* fall through */
+    case 3: overflow |= __builtin_add_overflow(next.diff[0], next.diff[1], &next.diff[0]); /* fall through */
+    case 2: overflow |= __builtin_add_overflow(next.value, next.diff[0], &next.value);
     }
+    if (overflow)
+    {
+        rnx_errorf(p, "arc value overflows: %.*s", crx_quote_len(s, 24), s);
+        return NULL;
+    }
+    *st = next;
     return end;
 }
 
@@ -505,7 +516,11 @@ static int crx_parse_clock(
             crx_quote_len(s, 24), s);
         return RINEX_ERR_BAD_FORMAT;
     }
-    p_->epoch.clock_offset = clk->value * scale;
+    if (__builtin_mul_overflow(clk->value, scale, &p_->epoch.clock_offset))
+    {
+        rnx_errorf(p_, "clock offset overflows: %.*s", crx_quote_len(s, 24), s);
+        return RINEX_ERR_BAD_FORMAT;
+    }
     return 0;
 }
 

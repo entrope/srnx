@@ -598,7 +598,6 @@ int main(int argc, char *argv[])
     const char *output_arg;
     char *output_name;
     struct rinex_data data;
-    const char *err;
     FILE *out;
 
     /* Parse positional arguments: <input.srnx> [output.rnx] */

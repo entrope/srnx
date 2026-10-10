@@ -195,21 +195,29 @@ void test_one_sat_crx(void)
     static const struct
     {
         const char *name, *from, *to, *error;
+        int n_good;
     } bad[] = {
         { "clock arc order 6", "3&123456789\n", "6&123456789\n",
-          "bad arc initialization" },
+          "bad arc initialization", 0 },
         { "non-numeric clock", "3&123456789\n", "3&x\n",
-          "bad arc initialization" },
+          "bad arc initialization", 0 },
         { "clock continuation without initialization", "3&123456789\n",
-          "1234\n", "without initialization" },
+          "1234\n", "without initialization", 0 },
         { "text after clock", "3&123456789\n", "3&123456789 x\n",
-          "unexpected text" },
+          "unexpected text", 0 },
         { "clock overflow", "3&123456789\n", "3&99999999999999999999\n",
-          "bad arc initialization" },
+          "bad arc initialization", 0 },
         { "observation arc order 6", "3&20000000000 ", "6&20000000000 ",
-          "bad arc initialization" },
+          "bad arc initialization", 0 },
         { "non-numeric arc order", "3&20000000000 ", "x&20000000000 ",
-          "bad arc initialization" },
+          "bad arc initialization", 0 },
+        /* Overflows need a second epoch, so the first one is read. */
+        { "observation value overflow", "\n30000 30000\n",
+          "\n9223372036000000000 30000\n", "arc value overflows", 1 },
+        { "clock value overflow", "\n3000000000\n",
+          "\n9223372036854775000\n", "arc value overflows", 1 },
+        { "difference overflow", "\n-2999998766\n",
+          "\n9223372036000000000\n", "arc value overflows", 2 },
     };
     int64_t got_clocks[3], got_c1c[3];
     char errmsg[160], *text;
@@ -253,7 +261,7 @@ void test_one_sat_crx(void)
     {
         text = replace_once(one_sat_crx, bad[ii].from, bad[ii].to);
         n_read = read_crx(text, got_clocks, got_c1c, &err, errmsg);
-        ok(n_read == 0 && err == RINEX_ERR_BAD_FORMAT
+        ok(n_read == bad[ii].n_good && err == RINEX_ERR_BAD_FORMAT
             && strstr(errmsg, bad[ii].error) != NULL,
             "one-satellite CRX: %s is rejected (%s)", bad[ii].name, errmsg);
         free(text);
@@ -262,7 +270,7 @@ void test_one_sat_crx(void)
 
 int main(int argc, char *argv[])
 {
-    plan(82);
+    plan(85);
 
     test_abmf00glp_crx();
     test_one_sat_crx();

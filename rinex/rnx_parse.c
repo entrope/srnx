@@ -453,7 +453,7 @@ static const char *rnx_open_v34(struct rnx_v234_parser *p)
         eol = memchr(line, '\n', end - line);
         if (!eol)
             return "Unterminated header line";
-        if (eol - line < 60 + sizeof(sys_n_obs) - 1
+        if ((size_t)(eol - line) < 60 + sizeof(sys_n_obs) - 1
             || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
             break;
         /* How many observations for this system? */
@@ -470,7 +470,7 @@ static const char *rnx_open_v34(struct rnx_v234_parser *p)
         {
             line = eol + 1;
             eol = memchr(line, '\n', end - line);
-            if (!eol || eol - line < 60 + sizeof(sys_n_obs) - 1
+            if (!eol || (size_t)(eol - line) < 60 + sizeof(sys_n_obs) - 1
                 || (line[0] != ' ')
                 || memcmp(line + 60, sys_n_obs, sizeof(sys_n_obs) - 1))
             {

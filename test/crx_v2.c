@@ -5,6 +5,7 @@
 
 #include "rinex/rinex.h"
 #include <stdlib.h>
+#include <string.h>
 #include <tap.h>
 
 /* Generated from rnx2crx output of at012000.20o (first 3 epochs). */
@@ -87,11 +88,62 @@ void test_at012000_crx(void)
     crx->destroy(crx);
 }
 
+/** Read the first epoch of a one-satellite CRINEX 1 file whose receiver
+ * clock offset line is \a clock (counting nanoseconds).  Returns the
+ * read() status; *\a p_clock gets the clock offset (in picoseconds).
+ */
+static rinex_error_t read_v2_clock(const char *clock, int64_t *p_clock,
+    char errmsg[160])
+{
+    static const char header[] =
+        "1.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n"
+        "RNX2CRX ver.4.2.0                       10-Oct-26 01:27     CRINEX PROG / DATE\n"
+        "     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE\n"
+        "test                                                        PGM / RUN BY / DATE\n"
+        "     1    C1                                                # / TYPES OF OBSERV\n"
+        "                                                            END OF HEADER\n"
+        "&20  7  7  0  0  0.0000000  0  1G01\n";
+    struct rinex_stream *stream;
+    struct rinex_parser *p = NULL;
+    rinex_error_t err;
+    char *text = calloc(1, sizeof header + strlen(clock) + 100);
+
+    sprintf(text, "%s%s\n3&20000000000\n", header, clock);
+    stream = rinex_buffer_stream(text, (int)strlen(text));
+    if (rinex_open(&p, stream))
+        BAIL_OUT("rinex_open() failed for a CRINEX 1 clock test");
+    err = p->read(p);
+    *p_clock = p->epoch.clock_offset;
+    strcpy(errmsg, p->errmsg);
+    p->destroy(p);
+    stream->destroy(stream);
+    free(text);
+    return err;
+}
+
+void test_v2_clock(void)
+{
+    char errmsg[160];
+    int64_t clock;
+    rinex_error_t err;
+
+    err = read_v2_clock("3&123456789", &clock, errmsg);
+    ok(err == RINEX_SUCCESS && clock == 123456789000LL,
+        "CRINEX 1 clock offset is scaled from ns to ps");
+
+    /* 9.3e15 ns fits in 64 bits, but 9.3e18 ps does not. */
+    err = read_v2_clock("3&9300000000000000", &clock, errmsg);
+    ok(err == RINEX_ERR_BAD_FORMAT && strstr(errmsg, "clock offset overflows"),
+        "CRINEX 1 clock offset that overflows when scaled is rejected (%s)",
+        errmsg);
+}
+
 int main(int argc, char *argv[])
 {
-    plan(64);
+    plan(66);
 
     test_at012000_crx();
+    test_v2_clock();
 
     done_testing(); (void)argc; (void)argv;
 }
