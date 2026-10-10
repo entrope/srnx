@@ -157,7 +157,7 @@ static void test_filter(const char *name, const char *input,
             char *out;
 
             inner = trickle_stream(data, in_len, chunks[ii]);
-            crlf = rnx_crlf_stream(inner);
+            crlf = rnx_crlf_stream(inner, 0);
             out = drain(crlf, reqs[jj], &out_len);
             if (!out || out_len != exp_len || memcmp(out, expected, exp_len))
             {

@@ -216,6 +216,11 @@ struct rinex_parser
 
 /** rinex_open creates a parser that reads data from \a stream.
  *
+ * \a stream may hold RINEX, CRINEX or SRNX data, optionally compressed
+ * with gzip, compress, bzip2, bzip3, zstd or xz.  Compressed data is
+ * recognized by its signature and read through zcat, bzcat, bz3cat,
+ * zstdcat or xzcat (found in $PATH), run as a child process.
+ *
  * Upon success, `(*p_parser)->buffer` contains the RINEX file header,
  * with `'\n'` line delimiters (with a length stored in `buffer_len`).
  *

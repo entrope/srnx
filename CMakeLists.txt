@@ -49,6 +49,7 @@ add_library(rinex SHARED
     $<$<BOOL:${HAVE_AVX2}>:rinex/parse_avx2.c>
     rinex/rinex_buffer.c
     rinex/rinex_crlf.c
+    rinex/rinex_decomp.c
     rinex/rinex_load.c
     rinex/rinex_mmap.c
     rinex/rinex_record.c
@@ -180,6 +181,15 @@ add_executable(test_crlf test/test_crlf.c)
 target_link_libraries(test_crlf rinex tap)
 add_test(NAME crlf COMMAND test_crlf)
 set_property(TEST crlf PROPERTY LABELS function)
+
+add_executable(test_decomp test/test_decomp.c)
+target_link_libraries(test_decomp rinex tap)
+target_compile_definitions(test_decomp PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    FIXTURE_PATH="${TEST_V3_FIXTURE}")
+add_dependencies(test_decomp rnx2srnx test_fixtures)
+add_test(NAME decomp COMMAND test_decomp)
+set_property(TEST decomp PROPERTY LABELS function)
 
 add_executable(test_record test/test_record.c)
 target_link_libraries(test_record rinex tap)

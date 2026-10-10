@@ -128,6 +128,11 @@ struct srnx_v1_parser
      * by the first one read (from the RHDR header) and kept after that.
      */
     struct rinex_parser *records;
+
+    /** own_stream is a stream created by rinex_open() (to decompress
+     * the file), destroyed along with this parser.
+     */
+    struct rinex_stream *own_stream;
 };
 
 /** Parses the flag and n_sats fields out of a RINEX v2-style epoch
@@ -678,15 +683,18 @@ static void srnx_v1_destroy(struct rinex_parser *p_)
 
     /* Unlike srnx->data (an SRNX-owned mmap), #base.stream is owned by
      * the caller of rinex_open(), exactly as for the text/CRX parsers;
-     * it is not destroyed here.
+     * it is not destroyed here unless rinex_open() created it.
      */
+    if (p->own_stream)
+        p->own_stream->destroy(p->own_stream);
     free(p);
 }
 
 /* Doc comment in rnx_priv.h. */
 const char *srnx_open_parser(
     struct rinex_parser **p_parser,
-    struct rinex_stream *stream
+    struct rinex_stream *stream,
+    struct rinex_stream *own_stream
 )
 {
     struct srnx_v1_parser *p;
@@ -698,6 +706,7 @@ const char *srnx_open_parser(
     p = calloc(1, sizeof *p);
     if (!p)
         return "Memory allocation failed";
+    p->own_stream = own_stream;
     p->base.stream = stream;
     p->base.read = srnx_v1_read;
     p->base.destroy = srnx_v1_destroy;

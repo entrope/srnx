@@ -620,8 +620,8 @@ const char *rinex_open
 )
 {
     static const char crx_version_type[]   = "CRINEX VERS   / TYPE";
-    struct rinex_stream *crlf = NULL;
-    const char *err;
+    struct rinex_stream *own = NULL, *crlf;
+    const char *err, *program;
     int res;
 
     if (*p_parser)
@@ -634,6 +634,26 @@ const char *rinex_open
     if (res)
     {
         return strerror(res);
+    }
+
+    /* Is it compressed?  If so, read it through the usual decompression
+     * program; the stream we create is the outermost one we own.
+     */
+    program = rnx_decompressor(stream);
+    if (program)
+    {
+        err = rnx_decomp_stream(&own, stream, program);
+        if (err)
+        {
+            return err;
+        }
+        stream = own;
+        res = stream->advance(stream, BLOCK_SIZE, 0);
+        if (res)
+        {
+            err = strerror(res);
+            goto check_err;
+        }
     }
 
     /* Is it an SRNX file?  Unlike the streaming text/CRX formats, SRNX
@@ -652,11 +672,12 @@ const char *rinex_open
             res = stream->advance(stream, req, 0);
             if (res)
             {
-                return strerror(res);
+                err = strerror(res);
+                goto check_err;
             }
         } while (stream->size > last_size);
 
-        err = srnx_open_parser(p_parser, stream);
+        err = srnx_open_parser(p_parser, stream, own);
         goto check_err;
     }
 
@@ -665,18 +686,20 @@ const char *rinex_open
      */
     if (rnx_has_crlf(stream))
     {
-        crlf = rnx_crlf_stream(stream);
+        crlf = rnx_crlf_stream(stream, own != NULL);
         if (!crlf)
         {
-            return "Memory allocation failed";
+            err = "Memory allocation failed";
+            goto check_err;
         }
-        res = crlf->advance(crlf, BLOCK_SIZE, 0);
+        own = crlf;
+        stream = crlf;
+        res = stream->advance(stream, BLOCK_SIZE, 0);
         if (res)
         {
-            crlf->destroy(crlf);
-            return strerror(res);
+            err = strerror(res);
+            goto check_err;
         }
-        stream = crlf;
     }
 
     if (stream->size < 80)
@@ -694,7 +717,7 @@ const char *rinex_open
             err = "Memory allocation failed";
             goto check_err;
         }
-        p->own_stream = crlf;
+        p->own_stream = own;
 
         p->base.lli = NULL;
         p->base.ssi = NULL;
@@ -717,7 +740,7 @@ const char *rinex_open
             goto check_err;
         }
         p = &crx->base;
-        p->own_stream = crlf;
+        p->own_stream = own;
         p->base.lli = NULL;
         p->base.ssi = NULL;
         p->base.obs = NULL;
@@ -734,10 +757,10 @@ const char *rinex_open
     }
 
 check_err:
-    /* Without a parser to own it, the CR LF filter must go now. */
-    if (err && !*p_parser && crlf)
+    /* Without a parser to own them, our filter streams must go now. */
+    if (err && !*p_parser && own)
     {
-        crlf->destroy(crlf);
+        own->destroy(own);
     }
     if (err && *p_parser)
     {

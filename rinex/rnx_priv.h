@@ -184,7 +184,8 @@ struct rnx_v234_parser
     int obs_alloc;
 
     /** own_stream is a stream created by rinex_open() (for example, to
-     * convert CR LF line endings), destroyed along with this parser.
+     * decompress the file or convert CR LF line endings), destroyed
+     * along with this parser.
      */
     struct rinex_stream *own_stream;
 };
@@ -375,10 +376,34 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_);
 int rnx_has_crlf(const struct rinex_stream *stream);
 
 /** rnx_crlf_stream creates a stream that reads from \a inner, dropping
- * the CR from each CR LF pair.  Destroying it does not destroy \a inner.
- * Returns NULL on allocation failure.
+ * the CR from each CR LF pair.  Destroying it also destroys \a inner
+ * if \a own_inner is nonzero.  Returns NULL on allocation failure.
  */
-struct rinex_stream *rnx_crlf_stream(struct rinex_stream *inner);
+struct rinex_stream *rnx_crlf_stream(struct rinex_stream *inner, int own_inner);
+
+/** rnx_decompressor checks whether \a stream's buffer starts with the
+ * signature of a compressed file format (gzip, compress, bzip2, bzip3,
+ * zstd or xz), returning the name of the program that decompresses it
+ * to standard output, or NULL if it does not.
+ */
+const char *rnx_decompressor(const struct rinex_stream *stream);
+
+/** rnx_decomp_stream creates a stream that pipes the contents of
+ * \a inner through \a program (searched for in $PATH), reading the
+ * program's standard output.  Destroying it does not destroy \a inner.
+ * The stream's advance function returns EIO once the program exits
+ * with a failure status (the program reports why on standard error).
+ *
+ * \param[out] p_stream Receives the new stream on success.
+ * \param[in] inner Stream with compressed data.
+ * \param[in] program Name of the decompression program to run.
+ * \returns NULL on success, else an explanation of the failure.
+ */
+const char *rnx_decomp_stream(
+    struct rinex_stream **p_stream,
+    struct rinex_stream *inner,
+    const char *program
+);
 
 /** rnx_free_v23 deallocates \a p_, which must be a rnx_v234_parser. */
 void rnx_free_v23(struct rinex_parser *p_);
@@ -474,11 +499,15 @@ void srnx_fill_n_obs(struct srnx_reader *srnx, unsigned char n_obs[32]);
  *
  * \param[in,out] p_parser Receives a pointer to the created parser.
  * \param[in] stream Input stream with the whole SRNX file buffered.
+ * \param[in] own_stream Stream created by rinex_open() (\a stream or one
+ *   it reads from), or NULL.  If the parser is created, even if opening
+ *   then fails, the parser owns it and destroys it along with itself.
  * \returns NULL on success, else an explanation of the failure.
  */
 const char *srnx_open_parser(
     struct rinex_parser **p_parser,
-    struct rinex_stream *stream
+    struct rinex_stream *stream,
+    struct rinex_stream *own_stream
 );
 
 /** Parses a fixed-point decimal field.

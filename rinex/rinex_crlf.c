@@ -19,10 +19,14 @@ struct rinex_stream_crlf
 {
     struct rinex_stream base;
 
-    /** inner is the underlying stream.  It is owned by the caller of
-     * rinex_open(), so destroying this stream does not touch it.
+    /** inner is the underlying stream.  It is usually owned by the
+     * caller of rinex_open(), so destroying this stream does not touch
+     * it unless #own_inner is set.
      */
     struct rinex_stream *inner;
+
+    /** own_inner is set if this stream owns #inner. */
+    int own_inner;
 
     /** in_ofs is how many bytes of \a inner->buffer have been consumed. */
     unsigned int in_ofs;
@@ -125,8 +129,14 @@ static int rnx_crlf_advance(
 
 static void rnx_crlf_destroy(struct rinex_stream *stream_base)
 {
-    free(stream_base->buffer);
-    free(stream_base);
+    struct rinex_stream_crlf *stream = (struct rinex_stream_crlf *)stream_base;
+
+    if (stream->own_inner)
+    {
+        stream->inner->destroy(stream->inner);
+    }
+    free(stream->base.buffer);
+    free(stream);
 }
 
 /* Doc comment is in rnx_priv.h. */
@@ -139,7 +149,7 @@ int rnx_has_crlf(const struct rinex_stream *stream)
 }
 
 /* Doc comment is in rnx_priv.h. */
-struct rinex_stream *rnx_crlf_stream(struct rinex_stream *inner)
+struct rinex_stream *rnx_crlf_stream(struct rinex_stream *inner, int own_inner)
 {
     struct rinex_stream_crlf *stream;
 
@@ -152,6 +162,7 @@ struct rinex_stream *rnx_crlf_stream(struct rinex_stream *inner)
     stream->base.advance = rnx_crlf_advance;
     stream->base.destroy = rnx_crlf_destroy;
     stream->inner = inner;
+    stream->own_inner = own_inner;
 
     return &stream->base;
 }
