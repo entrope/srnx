@@ -195,6 +195,15 @@ split Golomb-Rice blocks.  Referenced chunks are written before the
 chunks that use them.  `--socd` writes revision 1.0 `SOCD` chunks
 instead, for readers that do not support revision 1.1.
 
+SRNX input (plain, compressed or on stdin) is re-encoded if it is older
+than the version being written; an `input.srnx` is replaced in place by
+default (through a temporary file with the input's permissions, renamed
+only after any `--check` passes).  Input that is already that version or
+newer, including versions this library cannot decode, is left alone and
+`rnx2srnx` exits with status 2, so bulk conversions can treat it as
+done rather than failed.  `--recompress` re-encodes it anyway, for
+example to apply different compression options.
+
 The library reads both.  A `SOC2` column is decoded completely when it
 is opened (its blocks hold up to 2048 values, and predictions need the
 reference column), and each `srnx_reader` caches the reference columns

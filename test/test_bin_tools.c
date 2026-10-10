@@ -11,6 +11,11 @@
  *    conversion fails (previously it always returned success), and must
  *    exit zero and create the output file when it succeeds.
  *
+ *  - rnx2srnx must re-encode older SRNX input (in place by default,
+ *    keeping the file's permissions), but leave SRNX input that is
+ *    already the version it would write, or newer (even a version it
+ *    cannot decode), alone with exit status 2, unless given --recompress.
+ *
  *  - srnx2rnx's format_observation() must format observation values
  *    correctly at the F14.3 boundary.  The sign position is mandatory
  *    (space for positive, '-' for negative), so a legal value has at
@@ -218,6 +223,113 @@ int main(void)
         ok(file_size(out_path) > 0,
             "rnx2srnx creates a non-empty output file on success");
         remove(out_path);
+    }
+
+    /* --- rnx2srnx: SRNX input. --- */
+    {
+        static const char v12_header[] = "SRNX\x10\x01\x02";
+        char cmd[1024];
+        struct stat st;
+        long old_size;
+        FILE *f;
+        int res;
+
+        remove("test_bin_v10.srnx");
+        remove("test_bin_v11.srnx");
+        snprintf(cmd, sizeof cmd, "%s --socd %s test_bin_v10.srnx",
+            RNX2SRNX_PATH, FIXTURE_V3_PATH);
+        res = system(cmd);
+        ok(res == 0, "rnx2srnx --socd writes SRNX 1.0");
+
+        /* Already current: exit status 2, file untouched. */
+        old_size = file_size("test_bin_v10.srnx");
+        snprintf(cmd, sizeof cmd, "%s --socd test_bin_v10.srnx"
+            " 2>/dev/null", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(WIFEXITED(res) && WEXITSTATUS(res) == 2,
+            "rnx2srnx exits 2 for SRNX input of the version it writes");
+        ok(file_size("test_bin_v10.srnx") == old_size,
+            "rnx2srnx leaves an already-current SRNX input alone");
+
+        /* Older version: re-encoded to another name, then in place. */
+        snprintf(cmd, sizeof cmd, "%s --check test_bin_v10.srnx"
+            " test_bin_v11.srnx", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(res == 0 && file_size("test_bin_v11.srnx") > 0,
+            "rnx2srnx re-encodes SRNX 1.0 input to a named output");
+        chmod("test_bin_v10.srnx", 0600);
+        snprintf(cmd, sizeof cmd, "%s --check test_bin_v10.srnx",
+            RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(res == 0, "rnx2srnx re-encodes SRNX 1.0 input in place");
+        ok(file_size("test_bin_v10.srnx") == file_size("test_bin_v11.srnx"),
+            "rnx2srnx replaced the SRNX 1.0 input with SRNX 1.1");
+        ok(stat("test_bin_v10.srnx", &st) == 0
+            && (st.st_mode & 07777) == 0600,
+            "rnx2srnx keeps the permissions of a replaced input");
+        res = system("ls test_bin_v10.srnx.* >/dev/null 2>&1");
+        ok(res != 0, "rnx2srnx leaves no temporary file behind");
+        snprintf(cmd, sizeof cmd, "%s test_bin_v10.srnx 2>/dev/null",
+            RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(WIFEXITED(res) && WEXITSTATUS(res) == 2,
+            "rnx2srnx exits 2 for the re-encoded file");
+
+        /* Skipping creates no temporary file, so works read-only. */
+        mkdir("test_bin_ro", 0755);
+        snprintf(cmd, sizeof cmd, "cp test_bin_v10.srnx test_bin_ro/"
+            " && chmod 555 test_bin_ro && %s test_bin_ro/test_bin_v10.srnx"
+            " 2>/dev/null", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(geteuid() == 0 || (WIFEXITED(res) && WEXITSTATUS(res) == 2),
+            "rnx2srnx exits 2 for current SRNX in a read-only directory");
+        chmod("test_bin_ro", 0755);
+        remove("test_bin_ro/test_bin_v10.srnx");
+        rmdir("test_bin_ro");
+
+        /* Piped input is recognized as SRNX too. */
+        snprintf(cmd, sizeof cmd, "%s - test_bin_v11b.srnx"
+            " < test_bin_v11.srnx 2>/dev/null", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(WIFEXITED(res) && WEXITSTATUS(res) == 2
+            && file_size("test_bin_v11b.srnx") == -1,
+            "rnx2srnx exits 2 for current SRNX on stdin");
+
+        /* --recompress overrides the check. */
+        snprintf(cmd, sizeof cmd, "%s --recompress --check"
+            " test_bin_v10.srnx", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(res == 0, "rnx2srnx --recompress re-encodes current SRNX");
+        ok(file_size("test_bin_v10.srnx") == file_size("test_bin_v11.srnx"),
+            "rnx2srnx --recompress keeps the same encoding");
+
+        /* A newer version than the library decodes is still current. */
+        f = fopen("test_bin_v12.srnx", "wb");
+        if (f)
+        {
+            fwrite(v12_header, 1, sizeof v12_header - 1, f);
+            fclose(f);
+        }
+        snprintf(cmd, sizeof cmd, "%s test_bin_v12.srnx 2>/dev/null",
+            RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(WIFEXITED(res) && WEXITSTATUS(res) == 2,
+            "rnx2srnx exits 2 for SRNX newer than it decodes");
+        snprintf(cmd, sizeof cmd, "%s - test_bin_v12b.srnx"
+            " < test_bin_v12.srnx 2>/dev/null", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(WIFEXITED(res) && WEXITSTATUS(res) == 2,
+            "rnx2srnx exits 2 for newer SRNX on stdin");
+        snprintf(cmd, sizeof cmd, "%s --recompress test_bin_v12.srnx"
+            " 2>/dev/null", RNX2SRNX_PATH);
+        res = system(cmd);
+        ok(WIFEXITED(res) && WEXITSTATUS(res) == 1
+            && file_size("test_bin_v12.srnx") == sizeof v12_header - 1,
+            "rnx2srnx --recompress fails on newer SRNX, keeping the input");
+
+        remove("test_bin_v10.srnx");
+        remove("test_bin_v11.srnx");
+        remove("test_bin_v12.srnx");
     }
 
     /* --- srnx2rnx: format_observation() at the F14.3 boundary. --- */

@@ -96,6 +96,18 @@ const char *srnx_error(const struct srnx_reader *srnx);
  */
 int srnx_open(struct srnx_reader **p_srnx, const char *filename, int flags);
 
+/** Reads the version of an SRNX file from the start of its contents,
+ * without checking whether this library supports that version.
+ *
+ * \param[in] data Start of the file contents.
+ * \param[in] size Number of bytes available at \a data.
+ * \param[out] major Receives the SRNX major version number.
+ * \param[out] minor Receives the SRNX minor version number.
+ * \returns Zero on success, non-zero if \a data does not start with the
+ *   SRNX magic, chunk length and version numbers.
+ */
+int srnx_peek_version(const char *data, size_t size, int *major, int *minor);
+
 /** Releases a reader, including after a failed open.  NULL is allowed.
  * Free observation readers before closing or reopening their parent.
  * Caller-owned output arrays remain valid and must be freed separately.

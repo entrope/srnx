@@ -847,6 +847,26 @@ int srnx_open(struct srnx_reader **p_srnx, const char filename[], int flags)
 }
 
 /* Doc comment in srnx.h. */
+int srnx_peek_version(const char *data, size_t size, int *major, int *minor)
+{
+    const char *ptr, *end;
+    uint64_t payload_len, ul_major, ul_minor;
+
+    if (size < 4 || memcmp(data, "SRNX", 4))
+        return SRNX_NOT_SRNX;
+    ptr = data + 4;
+    end = data + size;
+    if (epoc_uleb128(&ptr, end, &payload_len)
+        || epoc_uleb128(&ptr, end, &ul_major)
+        || epoc_uleb128(&ptr, end, &ul_minor)
+        || ul_major > INT_MAX || ul_minor > INT_MAX)
+        return SRNX_CORRUPT;
+    *major = (int)ul_major;
+    *minor = (int)ul_minor;
+    return 0;
+}
+
+/* Doc comment in srnx.h. */
 int srnx_get_header(
     struct srnx_reader *srnx,
     const char **p_rhdr,

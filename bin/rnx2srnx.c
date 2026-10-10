@@ -1177,6 +1177,14 @@ static const char *g_output_name;
 /* Nonzero (--socd) to write revision 1.0 SOCD chunks instead of SOC2. */
 static int g_use_socd;
 
+/* Nonzero (--recompress) to re-encode SRNX input even if it is already
+ * the version that would be written. */
+static int g_recompress;
+
+/* Exit status when an SRNX input is not re-encoded because it is
+ * already the version that would be written (or newer). */
+#define EXIT_ALREADY_CURRENT 2
+
 /* ---- Memory-mapped output buffer ---- */
 
 struct mmbuf
@@ -2862,15 +2870,110 @@ static void append_file_digest(struct mmbuf *mm)
 
 /* ---- Main converter ---- */
 
-static int rnx2srnx(const char input_name[], const char output_name[])
+/** Decides whether to re-encode an SRNX input of version \a major.\a minor.
+ *
+ * \returns Non-zero, after reporting it, if the input is already at least
+ *   the version this run would write and --recompress was not given.
+ */
+static int srnx_already_current(const char input_name[], int major, int minor)
 {
-    struct rinex_data data;
+    int out_minor = g_use_socd ? 0 : 1;
+
+    if (g_recompress || major < 1 || (major == 1 && minor < out_minor))
+        return 0;
+    fprintf(stderr, "%s is already SRNX %d.%d; use --recompress to"
+        " re-encode it\n", strcmp(input_name, "-") ? input_name : "stdin",
+        major, minor);
+    return 1;
+}
+
+/** Loads \a input_name ("-" for stdin) into \a data, unless it is SRNX
+ * that should not be re-encoded.  The SRNX version is read from the
+ * start of the (decompressed) input, before decoding, so versions that
+ * this library cannot decode are recognized too.
+ *
+ * \param[out] is_srnx Set non-zero if the input is SRNX.
+ * \returns Zero on success, EXIT_ALREADY_CURRENT if the input is SRNX
+ *   that should not be re-encoded, or EXIT_FAILURE on error.
+ */
+static int load_input(const char input_name[], struct rinex_data *data,
+    int *is_srnx)
+{
+    struct rinex_stream *stream, *decomp = NULL, *input;
+    const char *err = NULL, *program;
+    int major, minor, res, status = 0;
+
+    *is_srnx = 0;
+    stream = strcmp(input_name, "-") ? rinex_mmap_stream(input_name)
+        : rinex_stdin_stream();
+    if (!stream)
+    {
+        fprintf(stderr, "Unable to open %s\n", input_name);
+        return EXIT_FAILURE;
+    }
+
+    /* Look past any compression for the SRNX header. */
+    input = stream;
+    res = stream->advance(stream, BLOCK_SIZE, 0);
+    program = res ? NULL : rnx_decompressor(stream);
+    if (program)
+    {
+        err = rnx_decomp_stream(&decomp, stream, program);
+        if (err)
+            goto out;
+        input = decomp;
+        res = input->advance(input, BLOCK_SIZE, 0);
+    }
+    if (res)
+    {
+        err = strerror(res);
+        goto out;
+    }
+    if (!srnx_peek_version(input->buffer, input->size, &major, &minor))
+    {
+        *is_srnx = 1;
+        if (srnx_already_current(input_name, major, minor))
+        {
+            status = EXIT_ALREADY_CURRENT;
+            goto out;
+        }
+    }
+
+    /* Uncompressed files load fastest by name (SRNX column by column). */
+    if (!decomp && strcmp(input_name, "-") != 0)
+        err = rinex_load_file(input_name, data);
+    else
+        err = rinex_load(input, data);
+
+out:
+    if (err)
+    {
+        fprintf(stderr, "Unable to load %s: %s\n", input_name, err);
+        status = EXIT_FAILURE;
+    }
+    if (decomp)
+        decomp->destroy(decomp);
+    stream->destroy(stream);
+    return status;
+}
+
+/** Converts \a data, loaded from \a input_name by load_input(), to SRNX
+ * in \a output_name, and frees it.
+ *
+ * \param[in] is_srnx Non-zero if \a input_name is SRNX.
+ * \param[in] out_fd Descriptor already open on \a output_name, or -1
+ *   to create it.  Either way, it is closed before returning.
+ * \returns Zero on success, or EXIT_FAILURE on error.
+ */
+static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
+    int is_srnx, const char output_name[], int out_fd)
+{
+    struct rinex_data data = *p_data;
     struct mmbuf mm = { NULL, 0, 0 };
     struct rnx2srnx_scratch scratch;
     struct stat st;
     size_t cap;
-    int fd = -1;
-    const char *err;
+    int fd = out_fd;
     size_t sdir_field_offset, epoc_offset, evtf_offset, sdir_offset;
     struct sdir_entry *sdir_entries = NULL;
     signed char glo_chan[100];
@@ -2880,41 +2983,20 @@ static int rnx2srnx(const char input_name[], const char output_name[])
     scratch_init(&scratch);
     g_output_name = output_name;
 
-    /* Load the input file. */
-    if (!strcmp(input_name, "-"))
-    {
-        struct rinex_stream *stream = rinex_stdin_stream();
-        if (!stream)
-        {
-            fprintf(stderr, "Unable to open stdin\n");
-            return 1;
-        }
-        err = rinex_load(stream, &data);
-        stream->destroy(stream);
-    }
-    else
-    {
-        err = rinex_load_file(input_name, &data);
-    }
-    if (err)
-    {
-        fprintf(stderr, "Unable to load %s: %s\n", input_name, err);
-        return 1;
-    }
-
     /* Pick an upper bound for the output size.  SRNX is compressed
      * relative to RINEX, so input_size + a small margin is a safe
-     * ceiling for all realistic observation files.
+     * ceiling for all realistic observation files.  SRNX input may
+     * grow when re-encoded (for example, from SOC2 to SOCD), so it
+     * gets the stdin bound of RINEX text size instead.
      */
-    if (!strcmp(input_name, "-"))
+    if (!strcmp(input_name, "-") || is_srnx)
     {
         cap = (size_t)(data.obs ? data.obs[0] : 0) * 16 + data.file_header_len + 65536;
     }
     else if (stat(input_name, &st) != 0)
     {
         fprintf(stderr, "Unable to stat %s\n", input_name);
-        free_rinex_data(&data);
-        return 1;
+        status = 1; goto done;
     }
     else
     {
@@ -2930,14 +3012,14 @@ static int rnx2srnx(const char input_name[], const char output_name[])
         if (extra > SIZE_MAX - cap)
         {
             fprintf(stderr, "Exceptional records exceed output size limit\n");
-            free_rinex_data(&data);
-            return 1;
+            status = 1; goto done;
         }
         cap += extra;
     }
 
     /* Open and size the output file. */
-    fd = open(output_name, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        fd = open(output_name, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
     {
         fprintf(stderr, "Unable to create %s\n", output_name);
@@ -3134,6 +3216,11 @@ static int is_rinex_file_name(const char name[], size_t len)
     return 0;
 }
 
+static int is_srnx_file_name(const char name[], size_t len)
+{
+    return len >= 6 && !memcmp(name + len - 5, ".srnx", 5);
+}
+
 /** Runs `rnxcmp <input> <output>` as a subprocess to verify that \a output
  * (the just-written SRNX file) round-trips to the same observations as
  * \a input.  rnxcmp's stdout/stderr are inherited so its output (if any)
@@ -3177,23 +3264,28 @@ static void usage(FILE *out, const char *argv0)
     fprintf(out, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
         "          [--max-sleb-run=<N>] [--socd] [--order-search=scan|guess]\n"
         "          [--order-margin=<percent|off>] [--pred-margin=<percent|off>] [--check]\n"
-        "          [--] <input.rnx|-> [output.srnx]\n"
+        "          [--recompress] [--] <input.rnx|input.srnx|-> [output.srnx]\n"
         "'-' as input reads from stdin and requires an explicit output name.\n"
+        "An input.srnx is replaced by default.  SRNX input that is already the\n"
+        "  version that would be written (or newer) is left alone, with exit\n"
+        "  status %d, unless --recompress is given.\n"
         "--socd writes revision 1.0 SOCD chunks instead of SOC2.\n"
         "--order-search chooses how SOC2 delta orders are searched (default: guess).\n"
         "--order-margin=<percent|off> and --pred-margin=<percent|off> (default: 5)\n"
         "  skip delta orders, or SOC2 codings with or without a predictor, whose\n"
         "  estimates are worse by more than that margin; off codes them all.\n",
-        argv0);
+        argv0, EXIT_ALREADY_CURRENT);
 }
 
 int main(int argc, char *argv[])
 {
     const char *input_name = NULL;
     const char *output_arg = NULL;
-    char *output_name;
+    char *output_name, *write_name;
+    struct rinex_data data;
+    struct stat in_st, out_st;
     size_t name_len;
-    int ii, do_check = 0;
+    int ii, res, is_srnx, out_fd = -1, do_check = 0;
 
     for (ii = 1; ii < argc; ++ii)
     {
@@ -3222,6 +3314,11 @@ int main(int argc, char *argv[])
         if (!strcmp(arg, "--socd"))
         {
             g_use_socd = 1;
+            continue;
+        }
+        if (!strcmp(arg, "--recompress"))
+        {
+            g_recompress = 1;
             continue;
         }
         if (parse_order_search(arg)
@@ -3268,42 +3365,78 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     name_len = strlen(input_name);
-    if (is_rinex_file_name(input_name, name_len))
+    if (output_name)
+        ; /* Explicit output name. */
+    else if (is_srnx_file_name(input_name, name_len))
+        output_name = strdup(input_name);
+    else if (is_rinex_file_name(input_name, name_len))
     {
-        if (!output_name)
-        {
-            output_name = malloc(name_len + 2);
-            memcpy(output_name, input_name, name_len - 4);
-            strcpy(output_name + name_len - 4, ".srnx");
-        }
+        output_name = malloc(name_len + 2);
+        memcpy(output_name, input_name, name_len - 4);
+        strcpy(output_name + name_len - 4, ".srnx");
     }
     else
     {
-        if (!output_name)
-        {
-            output_name = malloc(name_len + 6);
-            memcpy(output_name, input_name, name_len);
-            strcpy(output_name + name_len, ".srnx");
-        }
+        output_name = malloc(name_len + 6);
+        memcpy(output_name, input_name, name_len);
+        strcpy(output_name + name_len, ".srnx");
     }
 
-    if (rnx2srnx(input_name, output_name) != 0)
+    /* Load the input first: SRNX input that is already current must
+     * be skipped before any output (even a temporary file) is created. */
+    res = load_input(input_name, &data, &is_srnx);
+    if (res)
     {
         free(output_name);
-        return EXIT_FAILURE;
+        return res;
     }
 
-    if (do_check && strcmp(input_name, "-") != 0)
+    /* Replacing the input (re-encoding SRNX in place) writes a new
+     * temporary file, with the input's permissions, and renames it over
+     * the input once it is complete and, with --check, verified. */
+    write_name = output_name;
+    if (strcmp(input_name, "-") != 0
+        && !stat(input_name, &in_st) && !stat(output_name, &out_st)
+        && in_st.st_dev == out_st.st_dev && in_st.st_ino == out_st.st_ino)
     {
-        if (run_check(input_name, output_name))
+        size_t len = strlen(output_name) + 8;
+        write_name = malloc(len);
+        snprintf(write_name, len, "%s.XXXXXX", output_name);
+        out_fd = mkstemp(write_name);
+        if (out_fd < 0 || fchmod(out_fd, in_st.st_mode & 07777) != 0)
         {
+            fprintf(stderr, "Unable to create a temporary file for %s: %s\n",
+                output_name, strerror(errno));
+            if (out_fd >= 0)
+            {
+                close(out_fd);
+                unlink(write_name);
+            }
+            free(write_name);
             free(output_name);
+            free_rinex_data(&data);
             return EXIT_FAILURE;
         }
     }
 
+    res = rnx2srnx(input_name, &data, is_srnx, write_name, out_fd);
+    if (res == 0 && do_check && strcmp(input_name, "-") != 0
+        && run_check(input_name, write_name))
+        res = EXIT_FAILURE;
+    if (res == 0 && write_name != output_name
+        && rename(write_name, output_name) != 0)
+    {
+        fprintf(stderr, "Unable to rename %s to %s: %s\n", write_name,
+            output_name, strerror(errno));
+        res = EXIT_FAILURE;
+    }
+    if (res != 0 && write_name != output_name)
+        unlink(write_name);
+
+    if (write_name != output_name)
+        free(write_name);
     free(output_name);
-    return EXIT_SUCCESS;
+    return res ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 #else /* defined(RNX2SRNX_SEARCH) */
