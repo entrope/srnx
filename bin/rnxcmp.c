@@ -4,7 +4,6 @@
  */
 
 #include "rinex/rinex_load.h"
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,24 +92,26 @@ static int cursor_obs_idx(
     return c->obs_idx + (epoch_idx - sv->when[c->range_idx].start);
 }
 
-/** Compare satellite observations at a matched epoch. */
+/** Compare satellite observations at a matched epoch, which is
+ * data1.epoch[i1] and data2.epoch[i2].  The files need not start at the
+ * same epoch, so the indices can differ.
+ */
 static void compare_epoch(
-    int epoch_idx,
-    struct sat_cursor *c1, int n_sv1,
-    struct sat_cursor *c2, int n_sv2
+    int i1, struct sat_cursor *c1,
+    int i2, struct sat_cursor *c2
 )
 {
     char ts[32];
     int ii, n_sv_max, sys;
 
-    epoch_ts(&data1.epoch[epoch_idx], ts);
+    epoch_ts(&data1.epoch[i1], ts);
 
-    if (data1.epoch[epoch_idx].clock_offset != data2.epoch[epoch_idx].clock_offset)
+    if (data1.epoch[i1].clock_offset != data2.epoch[i2].clock_offset)
     {
         printf("%s: epoch %s clock_offset %lld vs %lld\n",
             file1_name, ts,
-            (long long)data1.epoch[epoch_idx].clock_offset,
-            (long long)data2.epoch[epoch_idx].clock_offset);
+            (long long)data1.epoch[i1].clock_offset,
+            (long long)data2.epoch[i2].clock_offset);
         found_mismatch();
     }
 
@@ -140,16 +141,16 @@ static void compare_epoch(
             if (sv1)
             {
                 int ci = s1->sv.start + ii;
-                present1 = cursor_at_epoch(&c1[ci], sv1, epoch_idx);
+                present1 = cursor_at_epoch(&c1[ci], sv1, i1);
                 if (present1)
-                    oi1 = cursor_obs_idx(&c1[ci], sv1, epoch_idx);
+                    oi1 = cursor_obs_idx(&c1[ci], sv1, i1);
             }
             if (sv2)
             {
                 int ci = s2->sv.start + ii;
-                present2 = cursor_at_epoch(&c2[ci], sv2, epoch_idx);
+                present2 = cursor_at_epoch(&c2[ci], sv2, i2);
                 if (present2)
-                    oi2 = cursor_obs_idx(&c2[ci], sv2, epoch_idx);
+                    oi2 = cursor_obs_idx(&c2[ci], sv2, i2);
             }
 
             if (!present1 && !present2)
@@ -217,56 +218,254 @@ static void compare_epoch(
     }
 }
 
-/** Format the timestamp of the observation epoch nearest to \a epoch_index.
- * epoch_index is the count of observation epochs before the event, so we
- * use epoch[epoch_index] (the first epoch after the event) when available,
- * falling back to epoch[epoch_index-1] when the event trails all epochs.
- */
-static void event_ts(int epoch_index, const struct rinex_data *data, char buf[32])
+/** event_key locates a special event record within its file. */
+struct event_key
 {
-    int ii = epoch_index < data->epoch_used ? epoch_index : data->epoch_used - 1;
-    if (ii >= 0)
-        epoch_ts(&data->epoch[ii], buf);
-    else
-        snprintf(buf, 32, "(no epochs)");
+    /** has_time is set if the event's own epoch line has a timestamp,
+     * which is then in #time.
+     */
+    int has_time;
+    struct rinex_epoch time;
+
+    /** prev and next are the observation epochs just before and after
+     * the event, or NULL at the start or end of the file.
+     */
+    const struct rinex_epoch *prev, *next;
+};
+
+/** Parse the unsigned, right-justified integer in \a line[start] to
+ * \a line[start+width-1].  Returns 0 on success, -1 if the field is
+ * blank, beyond \a len, or not a number.
+ */
+static int parse_field(const char *line, int len, int start, int width,
+    int *out)
+{
+    int ii, n_digits = 0;
+
+    if (start + width > len)
+        return -1;
+    *out = 0;
+    for (ii = start; ii < start + width; ++ii)
+    {
+        if (line[ii] >= '0' && line[ii] <= '9')
+        {
+            *out = *out * 10 + (line[ii] - '0');
+            ++n_digits;
+        }
+        else if (line[ii] != ' ' || n_digits)
+            return -1;
+    }
+    return n_digits ? 0 : -1;
 }
 
-/** Compare special event records between the two files. */
-static void compare_events(void)
+/** Parse the F11.7 seconds field at \a line[start] into \a *sec_e7.
+ * Returns 0 on success, -1 on failure.
+ */
+static int parse_seconds(const char *line, int len, int start, int *sec_e7)
 {
-    int i1 = 0, i2 = 0;
-    int n1 = data1.event_used, n2 = data2.event_used;
+    int whole, frac, ii;
+
+    if (start + 11 > len || line[start + 3] != '.'
+        || parse_field(line, len, start, 3, &whole))
+    {
+        return -1;
+    }
+    for (ii = start + 4, frac = 0; ii < start + 11; ++ii)
+    {
+        if (line[ii] < '0' || line[ii] > '9')
+            return -1;
+        frac = frac * 10 + (line[ii] - '0');
+    }
+    *sec_e7 = whole * 10000000 + frac;
+    return 0;
+}
+
+/** Fill \a key for event \a ev of \a data. */
+static void event_key(
+    struct event_key *key,
+    const struct rinex_event *ev,
+    const struct rinex_data *data
+)
+{
+    const char *line = ev->text;
+    const char *eol = memchr(line, '\n', ev->text_len);
+    int len = eol ? (int)(eol - line) : ev->text_len;
+    int yy, mm, dd, hh, mi;
+    int v2 = data->rinex_version == 2;
+
+    key->prev = ev->epoch_index > 0
+        ? &data->epoch[ev->epoch_index - 1] : NULL;
+    key->next = ev->epoch_index < data->epoch_used
+        ? &data->epoch[ev->epoch_index] : NULL;
+
+    /* The time fields are blank for some events (flags 2-5). */
+    key->has_time = v2
+        ? !parse_field(line, len, 1, 2, &yy) && !parse_field(line, len, 4, 2, &mm)
+          && !parse_field(line, len, 7, 2, &dd) && !parse_field(line, len, 10, 2, &hh)
+          && !parse_field(line, len, 13, 2, &mi)
+          && !parse_seconds(line, len, 15, &key->time.sec_e7)
+        : !parse_field(line, len, 2, 4, &yy) && !parse_field(line, len, 7, 2, &mm)
+          && !parse_field(line, len, 10, 2, &dd) && !parse_field(line, len, 13, 2, &hh)
+          && !parse_field(line, len, 16, 2, &mi)
+          && !parse_seconds(line, len, 18, &key->time.sec_e7);
+    if (!key->has_time)
+        return;
+    if (v2)
+        yy += (yy < 80) ? 2000 : 1900;
+    key->time.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
+    key->time.hh_mm = hh * 100 + mi;
+}
+
+/** Compare two optional epochs; NULL sorts first.  Returns -1, 0 or 1. */
+static int opt_epoch_cmp(const struct rinex_epoch *a, const struct rinex_epoch *b)
+{
+    if (!a || !b)
+        return (a != NULL) - (b != NULL);
+    return epoch_cmp(a, b);
+}
+
+/** Compare the positions of two events that have timestamps.
+ * Returns -1, 0 or 1.
+ */
+static int timed_event_cmp(const struct event_key *a, const struct event_key *b)
+{
+    return epoch_cmp(&a->time, &b->time);
+}
+
+/** Compare the positions of two events without timestamps.  Returns 0
+ * if they are at the same position, else -1 or 1 according to which
+ * comes first.
+ *
+ * Each such event lies between its neighbouring observation epochs, and
+ * two of them match if either neighbour is the same in both files, so
+ * that an epoch missing from one file does not stop them matching.
+ */
+static int untimed_event_cmp(const struct event_key *a, const struct event_key *b)
+{
+    if (!opt_epoch_cmp(a->prev, b->prev)
+        || (a->next && b->next && !epoch_cmp(a->next, b->next))
+        || (!a->next && !b->next))
+    {
+        return 0;
+    }
+    return opt_epoch_cmp(a->prev, b->prev);
+}
+
+/** Describe the position of an event with key \a key. */
+static void event_desc(const struct event_key *key, char buf[64])
+{
+    char ts[32];
+
+    if (key->has_time)
+    {
+        epoch_ts(&key->time, ts);
+        snprintf(buf, 64, "event at %s", ts);
+    }
+    else if (key->prev)
+    {
+        epoch_ts(key->prev, ts);
+        snprintf(buf, 64, "untimed event after %s", ts);
+    }
+    else
+    {
+        snprintf(buf, 64, "untimed event before the first epoch");
+    }
+}
+
+/** event_ref is an event, its position, and its index in its file. */
+struct event_ref
+{
+    struct event_key key;
+    const struct rinex_event *ev;
+    int idx;
+};
+
+/** qsort() comparator: order event_refs by timestamp, then file order. */
+static int event_ref_time_cmp(const void *va, const void *vb)
+{
+    const struct event_ref *a = va, *b = vb;
+    int res = epoch_cmp(&a->key.time, &b->key.time);
+
+    return res ? res : a->idx - b->idx;
+}
+
+/** Collect the events of \a data that do (if \a timed) or do not have
+ * timestamps, in file order.  Returns the number collected, and the
+ * malloc'd array in \a *out.
+ */
+static int collect_events(
+    const struct rinex_data *data,
+    int timed,
+    struct event_ref **out
+)
+{
+    int ii, nn;
+
+    *out = malloc((data->event_used ? data->event_used : 1) * sizeof **out);
+    if (!*out)
+    {
+        fprintf(stderr, "Unable to allocate event arrays\n");
+        exit(EXIT_FAILURE);
+    }
+    for (ii = nn = 0; ii < data->event_used; ++ii)
+    {
+        struct event_ref *ref = &(*out)[nn];
+
+        event_key(&ref->key, &data->event[ii], data);
+        if (!ref->key.has_time != !timed)
+            continue;
+        ref->ev = &data->event[ii];
+        ref->idx = ii;
+        ++nn;
+    }
+    return nn;
+}
+
+/** Match the events in \a r1 (from file1) against those in \a r2 (from
+ * file2), both ordered consistently with \a cmp, and report events in
+ * only one file or with different text.
+ */
+static void match_events(
+    const struct event_ref *r1, int n1,
+    const struct event_ref *r2, int n2,
+    int (*cmp)(const struct event_key *, const struct event_key *)
+)
+{
+    int i1 = 0, i2 = 0, res;
+    char desc[64];
 
     while (i1 < n1 || i2 < n2)
     {
-        const struct rinex_event *e1, *e2;
-        int idx1 = (i1 < n1) ? data1.event[i1].epoch_index : INT_MAX;
-        int idx2 = (i2 < n2) ? data2.event[i2].epoch_index : INT_MAX;
-        char ts[32];
+        if (i1 >= n1)
+            res = 1;
+        else if (i2 >= n2)
+            res = -1;
+        else
+            res = cmp(&r1[i1].key, &r2[i2].key);
 
-        if (idx1 < idx2)
+        if (res < 0)
         {
-            event_ts(idx1, &data1, ts);
-            printf("%s: event at %s only in file1\n", file1_name, ts);
+            event_desc(&r1[i1].key, desc);
+            printf("%s: %s only in file1\n", file1_name, desc);
             found_mismatch();
             i1++;
         }
-        else if (idx2 < idx1)
+        else if (res > 0)
         {
-            event_ts(idx2, &data2, ts);
-            printf("%s: event at %s only in file2\n", file1_name, ts);
+            event_desc(&r2[i2].key, desc);
+            printf("%s: %s only in file2\n", file1_name, desc);
             found_mismatch();
             i2++;
         }
         else
         {
-            e1 = &data1.event[i1];
-            e2 = &data2.event[i2];
+            const struct rinex_event *e1 = r1[i1].ev, *e2 = r2[i2].ev;
+
             if (e1->text_len != e2->text_len
                 || memcmp(e1->text, e2->text, (size_t)e1->text_len) != 0)
             {
-                event_ts(idx1, &data1, ts);
-                printf("%s: event at %s text differs\n", file1_name, ts);
+                event_desc(&r1[i1].key, desc);
+                printf("%s: %s text differs\n", file1_name, desc);
                 found_mismatch();
             }
             i1++;
@@ -275,11 +474,40 @@ static void compare_events(void)
     }
 }
 
+/** Compare special event records between the two files.
+ *
+ * Events with timestamps are matched by timestamp (sorted, so the files
+ * need not list them in order).  Events without timestamps are matched
+ * separately by their neighbouring epochs (see untimed_event_cmp()).
+ * The two kinds are matched independently because an untimed event
+ * cannot be ordered against timed events that share its interval, so
+ * the relative order of an untimed and a timed event is not compared.
+ */
+static void compare_events(void)
+{
+    struct event_ref *r1, *r2;
+    int n1, n2;
+
+    n1 = collect_events(&data1, 1, &r1);
+    n2 = collect_events(&data2, 1, &r2);
+    qsort(r1, n1, sizeof *r1, event_ref_time_cmp);
+    qsort(r2, n2, sizeof *r2, event_ref_time_cmp);
+    match_events(r1, n1, r2, n2, timed_event_cmp);
+    free(r1);
+    free(r2);
+
+    n1 = collect_events(&data1, 0, &r1);
+    n2 = collect_events(&data2, 0, &r2);
+    match_events(r1, n1, r2, n2, untimed_event_cmp);
+    free(r1);
+    free(r2);
+}
+
 static void compare_files(void)
 {
     struct sat_cursor *c1, *c2;
     char ts[32];
-    int i1, i2, n1, n2, n_sv1, n_sv2, cmp, epoch_idx;
+    int i1, i2, n1, n2, n_sv1, n_sv2, cmp;
 
     n1 = data1.epoch_used;
     n2 = data2.epoch_used;
@@ -326,10 +554,8 @@ static void compare_files(void)
         }
         else
         {
-            /* Both files have this epoch (use i1 as the canonical index
-             * for satellite cursor advancement).
-             */
-            compare_epoch(i1, c1, n_sv1, c2, n_sv2);
+            /* Both files have this epoch. */
+            compare_epoch(i1, c1, i2, c2);
             i1++;
             i2++;
         }

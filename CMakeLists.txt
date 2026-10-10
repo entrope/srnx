@@ -159,9 +159,10 @@ target_compile_definitions(test_bin_tools PRIVATE
     RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
     RINEX_N_OBS_PATH="$<TARGET_FILE:rinex_n_obs>"
     SRNX2RNX_PATH="$<TARGET_FILE:srnx2rnx>"
+    RNXCMP_PATH="$<TARGET_FILE:rnxcmp>"
     FIXTURE_V3_PATH="${TEST_V3_FIXTURE}"
     FIXTURE_BAD_PATH="${TEST_BAD_FIXTURE}")
-add_dependencies(test_bin_tools rnx2srnx srnx2rnx rinex_n_obs test_fixtures)
+add_dependencies(test_bin_tools rnx2srnx srnx2rnx rinex_n_obs rnxcmp test_fixtures)
 add_test(NAME bin_tools COMMAND test_bin_tools)
 set_property(TEST bin_tools PROPERTY LABELS function)
 

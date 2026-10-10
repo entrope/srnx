@@ -17,6 +17,14 @@
  *    most nine integer digits; the function right-justifies the value
  *    and places the sign at the leftmost digit.  The source is compiled
  *    in directly so its static helper can be unit-tested.
+ *
+ *  - rnxcmp must compare epochs and special events by timestamp when the
+ *    two files start at different epochs (previously it indexed the
+ *    second file's epochs, satellites and events with the first file's
+ *    epoch index, so every later epoch was compared with the wrong one).
+ *    Events with timestamps must match by their own time, and events
+ *    without one by a neighbouring epoch, even if an epoch next to them
+ *    is missing from one file.
  */
 
 #include <stdio.h>
@@ -37,6 +45,9 @@
 #endif
 #ifndef SRNX2RNX_PATH
 # define SRNX2RNX_PATH "srnx2rnx"
+#endif
+#ifndef RNXCMP_PATH
+# define RNXCMP_PATH "rnxcmp"
 #endif
 #ifndef FIXTURE_V3_PATH
 # define FIXTURE_V3_PATH "fixture_v3.rnx"
@@ -59,6 +70,42 @@ static int run_capture(const char *prog, const char *arg, const char *out)
 
     snprintf(cmd, sizeof cmd, "%s %s > %s 2>&1", prog, arg, out);
     return system(cmd);
+}
+
+/** Write the NULL-terminated list of \a lines to \a path. */
+static void write_lines(const char *path, const char *const *lines)
+{
+    FILE *f = fopen(path, "w");
+
+    if (!f)
+        BAIL_OUT("unable to create %s", path);
+    for (; *lines; ++lines)
+        fputs(*lines, f);
+    fclose(f);
+}
+
+/** Count the lines of \a text that contain \a needle. */
+static int count_lines_with(const char *text, const char *needle)
+{
+    const char *line, *eol;
+    int count = 0;
+    size_t len = strlen(needle);
+
+    for (line = text; *line; line = eol + 1)
+    {
+        eol = strchr(line, '\n');
+        if (!eol)
+            eol = line + strlen(line) - 1;
+        for (const char *pos = line; pos + len <= eol + 1; ++pos)
+        {
+            if (!memcmp(pos, needle, len))
+            {
+                ++count;
+                break;
+            }
+        }
+    }
+    return count;
 }
 
 /** Return the size of \a path in bytes, or -1 if it does not exist. */
@@ -242,6 +289,237 @@ int main(void)
 
         remove(rnx_path);
         remove(srnx_path);
+        remove(out_path);
+    }
+
+    /* --- rnxcmp: files that start at different epochs. --- */
+    {
+#define CMP_HEADER \
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n", \
+    "test                                                        PGM / RUN BY / DATE\n", \
+    "G    1 C1C                                                  SYS / # / OBS TYPES\n", \
+    "                                                            END OF HEADER\n"
+#define CMP_EPOCH_0 \
+    "> 2020 07 07 00 00  0.0000000  0  1\n", "G01  20000000.000  \n"
+#define CMP_EVENT \
+    "> 2020 07 07 00 00 30.0000000  4  1\n", \
+    "an event before the second epoch                            COMMENT\n"
+        static const char *const cmp_a[] = { CMP_HEADER, CMP_EPOCH_0,
+            CMP_EVENT,
+            "> 2020 07 07 00 00 30.0000000  0  1\n", "G01  20000030.000  \n",
+            "> 2020 07 07 00 01  0.0000000  0  1\n", "G01  20000060.000  \n",
+            NULL };
+        static const char *const cmp_b[] = { CMP_HEADER, CMP_EVENT,
+            "> 2020 07 07 00 00 30.0000000  0  1\n", "G01  20000030.000  \n",
+            "> 2020 07 07 00 01  0.0000000  0  1\n", "G01  20000060.000  \n",
+            NULL };
+        static const char *const cmp_c[] = { CMP_HEADER, CMP_EVENT,
+            "> 2020 07 07 00 00 30.0000000  0  1\n", "G01  20000031.000  \n",
+            "> 2020 07 07 00 01  0.0000000  0  1\n", "G01  20000060.000  \n",
+            NULL };
+#undef CMP_HEADER
+#undef CMP_EPOCH_0
+#undef CMP_EVENT
+        const char *out_path = "test_bin_cmp_out.txt";
+        char *output;
+        int res;
+
+        write_lines("test_bin_cmp_a.rnx", cmp_a);
+        write_lines("test_bin_cmp_b.rnx", cmp_b);
+        write_lines("test_bin_cmp_c.rnx", cmp_c);
+
+        /* B is A without its first epoch: only that epoch differs. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_cmp_a.rnx test_bin_cmp_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "0000 0.0000000 only in file1") == 1,
+            "rnxcmp: offset start reports only the missing epoch");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_cmp_b.rnx test_bin_cmp_a.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "0000 0.0000000 only in file2") == 1,
+            "rnxcmp: offset start, files swapped");
+        free(output);
+
+        /* C also changes the value at 00:00:30: that must be reported
+         * at the right epoch, comparing the right values. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_cmp_a.rnx test_bin_cmp_c.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "obs differ") == 1
+            && count_lines_with(output, "0000 30.0000000 sat G01 obs differ") == 1
+            && count_lines_with(output, "20000030000(") == 1
+            && count_lines_with(output, "vs 20000031000(") == 1
+            && count_lines_with(output, "event") == 0
+            && count_lines_with(output, "clock_offset") == 0,
+            "rnxcmp: offset start still finds a real difference");
+        free(output);
+
+        remove("test_bin_cmp_a.rnx");
+        remove("test_bin_cmp_b.rnx");
+        remove("test_bin_cmp_c.rnx");
+        remove(out_path);
+    }
+
+    /* --- rnxcmp: events next to an epoch missing from one file. --- */
+    {
+#define V3_HEADER \
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n", \
+    "test                                                        PGM / RUN BY / DATE\n", \
+    "G    1 C1C                                                  SYS / # / OBS TYPES\n", \
+    "                                                            END OF HEADER\n"
+#define V3_E0 "> 2020 07 07 00 00  0.0000000  0  1\n", "G01  20000000.000  \n"
+#define V3_E30 "> 2020 07 07 00 00 30.0000000  0  1\n", "G01  20000030.000  \n"
+#define V3_E60 "> 2020 07 07 00 01  0.0000000  0  1\n", "G01  20000060.000  \n"
+#define V3_EV15 "> 2020 07 07 00 00 15.0000000  4  1\n", \
+    "an event at 00:00:15                                        COMMENT\n"
+#define V2_HEADER \
+    "     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE\n", \
+    "test                                                        PGM / RUN BY / DATE\n", \
+    "     1    C1                                                # / TYPES OF OBSERV\n", \
+    "                                                            END OF HEADER\n"
+#define V2_E0 " 20  7  7  0  0  0.0000000  0  1G01\n", "  20000000.000\n"
+#define V2_E30 " 20  7  7  0  0 30.0000000  0  1G01\n", "  20000030.000\n"
+#define V2_E60 " 20  7  7  0  1  0.0000000  0  1G01\n", "  20000060.000\n"
+#define V2_E90 " 20  7  7  0  1 30.0000000  0  1G01\n", "  20000090.000\n"
+#define V2_UEV "                            4  1\n", \
+    "an untimed event                                            COMMENT\n"
+#define V2_EV10 " 20  7  7  0  0 10.0000000  4  1\n", \
+    "an event at 00:00:10                                        COMMENT\n"
+#define V2_EV15 " 20  7  7  0  0 15.0000000  4  1\n", \
+    "an event at 00:00:15                                        COMMENT\n"
+        static const char *const ev_a[] = { V3_HEADER, V3_E0, V3_EV15,
+            V3_E30, V3_E60, NULL };
+        static const char *const ev_b[] = { V3_HEADER, V3_E0, V3_EV15,
+            V3_E60, NULL };
+        static const char *const ev_c[] = { V3_HEADER, V3_E0,
+            "> 2020 07 07 00 00 15.0000000  4  1\n",
+            "a different event at 00:00:15                               COMMENT\n",
+            V3_E30, V3_E60, NULL };
+        static const char *const uev_a[] = { V2_HEADER, V2_E0, V2_E30,
+            V2_UEV, V2_E60, V2_E90, NULL };
+        static const char *const uev_b[] = { V2_HEADER, V2_E0,
+            V2_UEV, V2_E60, V2_E90, NULL };
+        static const char *const uev_c[] = { V2_HEADER, V2_E0, V2_E30,
+            V2_UEV, V2_E90, NULL };
+        static const char *const mix_a[] = { V2_HEADER, V2_E0, V2_EV10,
+            V2_UEV, V2_EV15, V2_E30, NULL };
+        static const char *const mix_b[] = { V2_HEADER, V2_E0,
+            V2_UEV, V2_EV15, V2_E30, NULL };
+#undef V3_HEADER
+#undef V3_E0
+#undef V3_E30
+#undef V3_E60
+#undef V3_EV15
+#undef V2_HEADER
+#undef V2_E0
+#undef V2_E30
+#undef V2_E60
+#undef V2_E90
+#undef V2_UEV
+#undef V2_EV10
+#undef V2_EV15
+        const char *out_path = "test_bin_cmp_out.txt";
+        char *output;
+        int res;
+
+        write_lines("test_bin_ev_a.rnx", ev_a);
+        write_lines("test_bin_ev_b.rnx", ev_b);
+        write_lines("test_bin_ev_c.rnx", ev_c);
+        write_lines("test_bin_uev_a.rnx", uev_a);
+        write_lines("test_bin_uev_b.rnx", uev_b);
+        write_lines("test_bin_uev_c.rnx", uev_c);
+        write_lines("test_bin_mix_a.rnx", mix_a);
+        write_lines("test_bin_mix_b.rnx", mix_b);
+
+        /* The event at 00:00:15 precedes 00:00:30 in A but 00:01:00 in
+         * B; it must still match by its own timestamp. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ev_a.rnx test_bin_ev_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "0000 30.0000000 only in file1") == 1,
+            "rnxcmp: timed event matches across a missing epoch");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ev_b.rnx test_bin_ev_a.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "0000 30.0000000 only in file2") == 1,
+            "rnxcmp: timed event matches across a missing epoch, swapped");
+        free(output);
+
+        /* Different event text at the same time is still reported. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_ev_a.rnx test_bin_ev_c.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "event at 20200707 0000 15.0000000"
+                " text differs") == 1,
+            "rnxcmp: timed event text difference is reported");
+        free(output);
+
+        /* An untimed event whose preceding epoch is missing in B. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_uev_a.rnx test_bin_uev_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "0000 30.0000000 only in file1") == 1,
+            "rnxcmp: untimed event matches by its following epoch");
+        free(output);
+
+        /* An untimed event whose following epoch is missing in C. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_uev_a.rnx test_bin_uev_c.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "0001 0.0000000 only in file1") == 1,
+            "rnxcmp: untimed event matches by its preceding epoch");
+        free(output);
+
+        remove("test_bin_ev_a.rnx");
+        remove("test_bin_ev_b.rnx");
+        remove("test_bin_ev_c.rnx");
+        remove("test_bin_uev_a.rnx");
+        remove("test_bin_uev_b.rnx");
+        /* Timed and untimed events in one interval, with one timed
+         * event missing from B: only that event differs. */
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_mix_a.rnx test_bin_mix_b.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "event at 20200707 0000 10.0000000"
+                " only in file1") == 1,
+            "rnxcmp: untimed event among timed events stays matched");
+        free(output);
+
+        res = run_capture(RNXCMP_PATH,
+            "--full test_bin_mix_b.rnx test_bin_mix_a.rnx", out_path);
+        output = slurp(out_path);
+        ok(res != 0 && output
+            && count_lines_with(output, "") == 1
+            && count_lines_with(output, "event at 20200707 0000 10.0000000"
+                " only in file2") == 1,
+            "rnxcmp: untimed event among timed events, swapped");
+        free(output);
+
+        remove("test_bin_uev_c.rnx");
+        remove("test_bin_mix_a.rnx");
+        remove("test_bin_mix_b.rnx");
         remove(out_path);
     }
 
