@@ -128,102 +128,6 @@ static int allow_gaps;
 
 /* ---- Input streams ---- */
 
-/** text_stream is an in-memory stream that owns its buffer. */
-struct text_stream
-{
-    struct rinex_stream base;
-    char *data;
-};
-
-static int text_stream_advance(
-    struct rinex_stream *stream,
-    unsigned int req_size,
-    unsigned int step
-)
-{
-    if (step > stream->size)
-        step = stream->size;
-    stream->buffer += step;
-    stream->size -= step;
-    (void)req_size;
-    return 0;
-}
-
-static void text_stream_destroy(struct rinex_stream *stream)
-{
-    free(((struct text_stream *)stream)->data);
-    free(stream);
-}
-
-/** Does the file \a name have a text first line that ends in CR LF? */
-static int has_crlf(const char *name)
-{
-    char line[84];
-    FILE *fin;
-    size_t len;
-    char *eol;
-
-    fin = fopen(name, "rb");
-    if (!fin)
-        return 0;
-    len = fread(line, 1, sizeof line - 1, fin);
-    fclose(fin);
-    line[len] = '\0';
-    if (len >= 4 && !memcmp(line, "SRNX", 4))
-        return 0;
-    eol = memchr(line, '\n', len);
-
-    return eol && eol > line && eol[-1] == '\r';
-}
-
-/** Load \a name into memory without the CR of each CR LF, because the
- * RINEX parsers expect bare LF line endings.  Returns NULL on failure,
- * with errno set.
- */
-static struct rinex_stream *crlf_stream(const char *name)
-{
-    struct text_stream *str;
-    size_t len, ii, jj;
-    FILE *fin;
-    long size;
-
-    fin = fopen(name, "rb");
-    if (!fin)
-        return NULL;
-    if (fseek(fin, 0, SEEK_END) || (size = ftell(fin)) < 0
-        || fseek(fin, 0, SEEK_SET))
-    {
-        fclose(fin);
-        return NULL;
-    }
-
-    str = calloc(1, sizeof *str);
-    if (str)
-        str->data = malloc((size_t)size + RINEX_EXTRA);
-    if (!str || !str->data)
-    {
-        free(str);
-        fclose(fin);
-        errno = ENOMEM;
-        return NULL;
-    }
-    len = fread(str->data, 1, (size_t)size, fin);
-    fclose(fin);
-
-    for (ii = jj = 0; ii < len; ++ii)
-    {
-        if (str->data[ii] != '\r' || ii + 1 >= len || str->data[ii+1] != '\n')
-            str->data[jj++] = str->data[ii];
-    }
-    memset(str->data + jj, 0, RINEX_EXTRA);
-
-    str->base.advance = text_stream_advance;
-    str->base.destroy = text_stream_destroy;
-    str->base.buffer = str->data;
-    str->base.size = jj;
-    return &str->base;
-}
-
 /** Open a parser for \a name.  Returns NULL (after reporting why) on
  * failure.  The caller destroys both the parser and *p_stream.
  */
@@ -235,7 +139,7 @@ static struct rinex_parser *open_input(
     struct rinex_parser *p = NULL;
     const char *err;
 
-    *p_stream = has_crlf(name) ? crlf_stream(name) : rinex_mmap_stream(name);
+    *p_stream = rinex_mmap_stream(name);
     if (!*p_stream)
     {
         fprintf(stderr, "%s: unable to open %s: %s\n", argv0, name,

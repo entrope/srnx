@@ -182,6 +182,11 @@ struct rnx_v234_parser
      * #base.obs.
      */
     int obs_alloc;
+
+    /** own_stream is a stream created by rinex_open() (for example, to
+     * convert CR LF line endings), destroyed along with this parser.
+     */
+    struct rinex_stream *own_stream;
 };
 
 /** obs_state holds the differential state and flags for a single observation. */
@@ -353,6 +358,17 @@ rinex_error_t rnx_read_v2(struct rinex_parser *p_);
 
 /** rnx_read_v34 reads an observation data record from \a p_. */
 rinex_error_t rnx_read_v34(struct rinex_parser *p_);
+
+/** rnx_has_crlf checks whether the first line in \a stream's buffer
+ * ends with CR LF.
+ */
+int rnx_has_crlf(const struct rinex_stream *stream);
+
+/** rnx_crlf_stream creates a stream that reads from \a inner, dropping
+ * the CR from each CR LF pair.  Destroying it does not destroy \a inner.
+ * Returns NULL on allocation failure.
+ */
+struct rinex_stream *rnx_crlf_stream(struct rinex_stream *inner);
 
 /** rnx_free_v23 deallocates \a p_, which must be a rnx_v234_parser. */
 void rnx_free_v23(struct rinex_parser *p_);

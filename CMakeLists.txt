@@ -48,6 +48,7 @@ add_library(rinex SHARED
     $<$<BOOL:${HAVE_NEON}>:rinex/parse_neon.c>
     $<$<BOOL:${HAVE_AVX2}>:rinex/parse_avx2.c>
     rinex/rinex_buffer.c
+    rinex/rinex_crlf.c
     rinex/rinex_load.c
     rinex/rinex_mmap.c
     rinex/rinex_stdio.c
@@ -172,6 +173,11 @@ target_compile_definitions(test_rinex_merge PRIVATE
 add_dependencies(test_rinex_merge rinex-merge test_fixtures)
 add_test(NAME rinex_merge COMMAND test_rinex_merge)
 set_property(TEST rinex_merge PROPERTY LABELS function)
+
+add_executable(test_crlf test/test_crlf.c)
+target_link_libraries(test_crlf rinex tap)
+add_test(NAME crlf COMMAND test_crlf)
+set_property(TEST crlf PROPERTY LABELS function)
 
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)

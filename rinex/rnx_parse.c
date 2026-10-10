@@ -318,6 +318,10 @@ void rnx_free_v23(struct rinex_parser *p_)
     free(p->base.ssi);
     free(p->base.obs);
     free(p->base.sats);
+    if (p->own_stream)
+    {
+        p->own_stream->destroy(p->own_stream);
+    }
     free(p);
 }
 
@@ -585,6 +589,7 @@ const char *rinex_open
 )
 {
     static const char crx_version_type[]   = "CRINEX VERS   / TYPE";
+    struct rinex_stream *crlf = NULL;
     const char *err;
     int res;
 
@@ -624,21 +629,41 @@ const char *rinex_open
         goto check_err;
     }
 
-    if (stream->size < 80)
+    /* The text parsers expect bare LF line endings, so read files with
+     * CR LF line endings through a filter that drops the CRs.
+     */
+    if (rnx_has_crlf(stream))
     {
-        return "Unrecognized file format";
+        crlf = rnx_crlf_stream(stream);
+        if (!crlf)
+        {
+            return "Memory allocation failed";
+        }
+        res = crlf->advance(crlf, BLOCK_SIZE, 0);
+        if (res)
+        {
+            crlf->destroy(crlf);
+            return strerror(res);
+        }
+        stream = crlf;
     }
 
+    if (stream->size < 80)
+    {
+        err = "Unrecognized file format";
+    }
     /* Is it an uncompressed RINEX file? */
-    if (!memcmp(rnx_version_type, stream->buffer + 60, 20))
+    else if (!memcmp(rnx_version_type, stream->buffer + 60, 20))
     {
         struct rnx_v234_parser *p;
 
         p = calloc(1, sizeof(struct rnx_v234_parser));
         if (!p)
         {
-            return "Memory allocation failed";
+            err = "Memory allocation failed";
+            goto check_err;
         }
+        p->own_stream = crlf;
 
         p->base.lli = NULL;
         p->base.ssi = NULL;
@@ -657,9 +682,11 @@ const char *rinex_open
         crx = calloc(1, sizeof(struct crx_v23_parser));
         if (!crx)
         {
-            return "Memory allocation failed";
+            err = "Memory allocation failed";
+            goto check_err;
         }
         p = &crx->base;
+        p->own_stream = crlf;
         p->base.lli = NULL;
         p->base.ssi = NULL;
         p->base.obs = NULL;
@@ -676,6 +703,11 @@ const char *rinex_open
     }
 
 check_err:
+    /* Without a parser to own it, the CR LF filter must go now. */
+    if (err && !*p_parser && crlf)
+    {
+        crlf->destroy(crlf);
+    }
     if (err && *p_parser)
     {
         /* If the error string lives inside the parser's errmsg buffer,
