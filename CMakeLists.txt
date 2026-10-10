@@ -73,6 +73,9 @@ target_link_libraries(rinex_analyze rinex)
 add_executable(rinex_maxima bin/rinex_maxima.c bin/driver.c)
 target_link_libraries(rinex_maxima rinex)
 
+add_executable(rinex-merge bin/rinex_merge.c)
+target_link_libraries(rinex-merge rinex)
+
 add_executable(rinex_n_obs bin/rinex_n_obs.c bin/driver.c)
 target_link_libraries(rinex_n_obs rinex)
 
@@ -160,6 +163,15 @@ target_compile_definitions(test_bin_tools PRIVATE
 add_dependencies(test_bin_tools rnx2srnx srnx2rnx rinex_n_obs test_fixtures)
 add_test(NAME bin_tools COMMAND test_bin_tools)
 set_property(TEST bin_tools PROPERTY LABELS function)
+
+add_executable(test_rinex_merge test/test_rinex_merge.c)
+target_link_libraries(test_rinex_merge tap)
+target_compile_definitions(test_rinex_merge PRIVATE
+    RINEX_MERGE_PATH="$<TARGET_FILE:rinex-merge>"
+    FIXTURE_V3_PATH="${TEST_V3_FIXTURE}")
+add_dependencies(test_rinex_merge rinex-merge test_fixtures)
+add_test(NAME rinex_merge COMMAND test_rinex_merge)
+set_property(TEST rinex_merge PROPERTY LABELS function)
 
 add_executable(test_parse_errors test/parse_errors.c)
 target_link_libraries(test_parse_errors rinex tap)
