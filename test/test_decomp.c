@@ -541,7 +541,7 @@ static void test_srnx(void)
 int main(void)
 {
     const char *samples[2] = { FIXTURE_PATH, crx_path };
-    char path[64], name[64];
+    char path[64], name[sizeof path + 16];
     unsigned int ii, jj;
     int n_tested = 0;
 

@@ -83,6 +83,31 @@ static int run_capture(const char *prog, const char *arg, const char *out)
     return system(cmd);
 }
 
+/** Put the directory of the rnxcmp just built at the front of $PATH, so
+ * "rnx2srnx --check" (which runs rnxcmp by name) uses it rather than an
+ * installed copy or none at all.
+ */
+static void prepend_rnxcmp_dir(void)
+{
+    const char *slash = strrchr(RNXCMP_PATH, '/');
+    const char *old_path = getenv("PATH");
+    char *new_path;
+    size_t dir_len, len;
+
+    if (!slash)
+        return;
+    dir_len = slash - RNXCMP_PATH;
+    len = dir_len + 2 + (old_path ? strlen(old_path) : 0);
+    new_path = malloc(len);
+    if (!new_path)
+        BAIL_OUT("out of memory");
+    snprintf(new_path, len, "%.*s%s%s", (int)dir_len, RNXCMP_PATH,
+        old_path ? ":" : "", old_path ? old_path : "");
+    if (setenv("PATH", new_path, 1))
+        BAIL_OUT("unable to set PATH");
+    free(new_path);
+}
+
 /** Write the NULL-terminated list of \a lines to \a path. */
 static void write_lines(const char *path, const char *const *lines)
 {
@@ -170,6 +195,8 @@ static char *slurp(const char *path)
 
 int main(void)
 {
+    prepend_rnxcmp_dir();
+
     /* --- rinex_n_obs: no SIGBUS on valid v3, correct maxima. --- */
     {
         char out_path[256];
@@ -295,8 +322,8 @@ int main(void)
             && file_size("test_bin_v11b.srnx") == -1,
             "rnx2srnx exits 2 for current SRNX on stdin");
 
-        /* --recompress overrides the check. */
-        snprintf(cmd, sizeof cmd, "%s --recompress --check"
+        /* --recompress overrides the check; "--" ends the options. */
+        snprintf(cmd, sizeof cmd, "%s --recompress --check --"
             " test_bin_v10.srnx", RNX2SRNX_PATH);
         res = system(cmd);
         ok(res == 0, "rnx2srnx --recompress re-encodes current SRNX");

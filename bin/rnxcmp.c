@@ -549,7 +549,7 @@ static int compare_obs_events(
 )
 {
     const struct rinex_parser *p1, *p2;
-    char sat_id[4];
+    char sat_id[5];
     int ii, jj, diff, any_diff = 0;
 
     p1 = parse_obs_event(0, &data1, e1);

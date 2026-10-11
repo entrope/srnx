@@ -466,19 +466,24 @@ static void write_header(FILE *out, const struct input *ref)
 
 /** Write \a value, scaled by 10^\a frac_digits, as a fixed-point
  * number right-justified in \a width columns (plus a NUL).
+ * Returns zero on success, or -1 if the value does not fit.
  */
-static void format_fixed(char *buf, int width, int64_t value, int frac_digits)
+static int format_fixed(char *buf, int width, int64_t value, int frac_digits)
 {
     char tmp[32];
     uint64_t mag = value < 0 ? -(uint64_t)value : (uint64_t)value;
     uint64_t scale = 1;
-    int ii;
+    int ii, len;
 
     for (ii = 0; ii < frac_digits; ++ii)
         scale *= 10;
-    snprintf(tmp, sizeof tmp, "%s%" PRIu64 ".%0*" PRIu64,
+    len = snprintf(tmp, sizeof tmp, "%s%" PRIu64 ".%0*" PRIu64,
         value < 0 ? "-" : "", mag / scale, frac_digits, mag % scale);
-    snprintf(buf, width + 1, "%*s", width, tmp);
+    if (len < 0 || len > width)
+        return -1;
+    memset(buf, ' ', width - len);
+    memcpy(buf + width - len, tmp, len + 1);
+    return 0;
 }
 
 /** Format one observation as a 16-character F14.3,A1,A1 record.
@@ -523,24 +528,29 @@ static void write_rtrim(FILE *out, const char *line, int len)
     fputc('\n', out);
 }
 
-/** Write \a p's current observation epoch in RINEX 3/4 format. */
-static void write_v34_epoch(FILE *out, const struct rinex_parser *p)
+/** Write \a p's current observation epoch in RINEX 3/4 format.
+ * Returns zero on success, or -1 (writing nothing) if the seconds or
+ * clock offset do not fit their fields.
+ */
+static int write_v34_epoch(FILE *out, const struct rinex_parser *p)
 {
     static char line[3 + 16 * 256];
     const struct rinex_epoch *ep = &p->epoch;
     char sec[16], clk[24];
     int ii, jj, len;
 
-    format_fixed(sec, 11, ep->sec_e7, 7);
+    if (format_fixed(sec, 11, ep->sec_e7, 7)
+        || (ep->clock_offset != 0
+            && format_fixed(clk, 15, ep->clock_offset, 12)))
+    {
+        return -1;
+    }
     fprintf(out, "> %04d %02d %02d %02d %02d%s  %c%3d",
         ep->yyyy_mm_dd / 10000, ep->yyyy_mm_dd / 100 % 100,
         ep->yyyy_mm_dd % 100, ep->hh_mm / 100, ep->hh_mm % 100, sec,
         ep->flag, ep->n_sats);
     if (ep->clock_offset != 0)
-    {
-        format_fixed(clk, 15, ep->clock_offset, 12);
         fprintf(out, "      %s", clk);
-    }
     fputc('\n', out);
 
     for (ii = 0; ii < ep->n_sats; ++ii)
@@ -559,17 +569,26 @@ static void write_v34_epoch(FILE *out, const struct rinex_parser *p)
         }
         write_rtrim(out, line, len);
     }
+    return 0;
 }
 
-/** Write \a p's current observation epoch in RINEX 2 format. */
-static void write_v2_epoch(FILE *out, const struct rinex_parser *p)
+/** Write \a p's current observation epoch in RINEX 2 format.
+ * Returns zero on success, or -1 (writing nothing) if the seconds or
+ * clock offset do not fit their fields.
+ */
+static int write_v2_epoch(FILE *out, const struct rinex_parser *p)
 {
     char line[5 * 16];
     const struct rinex_epoch *ep = &p->epoch;
     char sec[16], clk[24];
     int ii, jj, kk, n_first;
 
-    format_fixed(sec, 11, ep->sec_e7, 7);
+    if (format_fixed(sec, 11, ep->sec_e7, 7)
+        || (ep->clock_offset != 0
+            && format_fixed(clk, 12, ep->clock_offset / 1000, 9)))
+    {
+        return -1;
+    }
     fprintf(out, " %02d %2d %2d %2d %2d%s  %c%3d",
         ep->yyyy_mm_dd / 10000 % 100, ep->yyyy_mm_dd / 100 % 100,
         ep->yyyy_mm_dd % 100, ep->hh_mm / 100, ep->hh_mm % 100, sec,
@@ -582,10 +601,7 @@ static void write_v2_epoch(FILE *out, const struct rinex_parser *p)
     for (ii = 0; ii < n_first; ++ii)
         fprintf(out, "%c%02d", p->sats[ii].system, p->sats[ii].number);
     if (ep->clock_offset != 0)
-    {
-        format_fixed(clk, 12, ep->clock_offset / 1000, 9);
         fprintf(out, "%*s%s", 3 * (12 - n_first), "", clk);
-    }
     fputc('\n', out);
 
     /* Continuation lines, indented 32 columns. */
@@ -614,6 +630,7 @@ static void write_v2_epoch(FILE *out, const struct rinex_parser *p)
             write_rtrim(out, line, 16 * kk);
         }
     }
+    return 0;
 }
 
 /** Does special event record text \a text carry an epoch timestamp? */
@@ -709,7 +726,7 @@ static int merge_input(
     struct rinex_parser *p;
     rinex_error_t res;
     int64_t t_e7, cutoff = *last_e7;
-    int overlap = 0;
+    int overlap = 0, status = 0;
 
     p = open_input(in->name, &stream);
     if (!p)
@@ -726,10 +743,15 @@ static int merge_input(
                 ++in->n_dropped;
                 continue;
             }
-            if (version == 2)
-                write_v2_epoch(out, p);
-            else
-                write_v34_epoch(out, p);
+            if (version == 2 ? write_v2_epoch(out, p)
+                : write_v34_epoch(out, p))
+            {
+                fprintf(stderr, "%s: %s: epoch at %08d %04d has a time or"
+                    " clock offset too wide for RINEX %d\n", argv0, in->name,
+                    p->epoch.yyyy_mm_dd, p->epoch.hh_mm, version);
+                status = 1;
+                break;
+            }
             if (t_e7 > *last_e7)
                 *last_e7 = t_e7;
             ++in->n_written;
@@ -747,15 +769,16 @@ static int merge_input(
         }
         fwrite(p->buffer, 1, p->buffer_len, out);
     }
-    if (res != RINEX_EOF)
+    if (!status && res != RINEX_EOF)
     {
         fprintf(stderr, "%s: %s: read error: %s\n", argv0, in->name,
             p->errmsg[0] ? p->errmsg : "unknown error");
+        status = 1;
     }
 
     p->destroy(p);
     stream->destroy(stream);
-    return res != RINEX_EOF;
+    return status;
 }
 
 /** qsort() comparator: order inputs by first observation epoch, then
