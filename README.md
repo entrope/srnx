@@ -271,6 +271,23 @@ srnx_block_search -tool +release/rnx2srnx_search \
 searches whose results can then be confirmed on the whole corpus.  The
 objective is the total byte count over all the given corpora.
 
+### srnx_upgrade
+
+`srnx_upgrade` (Go, in `srnx_upgrade/`) walks directory trees (default
+`.`) and re-encodes every `*.srnx` file in place with `rnx2srnx`, running
+`-j` conversions at a time (default: the number of hardware threads).
+Files that `rnx2srnx` reports as already current (exit status 2) are
+counted, not treated as failures.  Symbolic links inside the trees are
+not followed or converted, though a directory named on the command line
+may be one.  `-tool-args` passes options such as `--recompress` (to
+re-encode current files with different compression options) or
+`--check` through to `rnx2srnx`; `-v` lists every file.  It ends with a
+summary line and exits non-zero if any file failed.
+
+```bash
+srnx_upgrade -tool +release/rnx2srnx -tool-args --check corpus_1hz/ corpus_30s/
+```
+
 ## Generating flame graphs
 
 ```bash

@@ -3285,11 +3285,24 @@ int main(int argc, char *argv[])
     struct rinex_data data;
     struct stat in_st, out_st;
     size_t name_len;
-    int ii, res, is_srnx, out_fd = -1, do_check = 0;
+    int ii, res, is_srnx, out_fd = -1, do_check = 0, opts_done = 0;
 
     for (ii = 1; ii < argc; ++ii)
     {
         const char *arg = argv[ii];
+        if (opts_done || arg[0] != '-' || arg[1] == '\0')
+        {
+            if (!input_name)
+                input_name = arg;
+            else if (!output_arg)
+                output_arg = arg;
+            else
+            {
+                fprintf(stderr, "Too many positional arguments\n");
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
         if (parse_digest_flag(arg, "--chunk-digest=", &g_chunk_digest_id))
             continue;
         if (parse_digest_flag(arg, "--file-digest=", &g_file_digest_id))
@@ -3330,26 +3343,14 @@ int main(int argc, char *argv[])
             usage(stdout, argv[0]);
             return EXIT_SUCCESS;
         }
-        if (arg[0] == '-' && arg[1] == '-' && arg[2] == '\0')
+        if (!strcmp(arg, "--"))
         {
             /* "--" ends option parsing. */
-            ii++;
-            break;
+            opts_done = 1;
+            continue;
         }
-        if (arg[0] == '-' && arg[1] != '\0')
-        {
-            fprintf(stderr, "Unknown option '%s'\n", arg);
-            return EXIT_FAILURE;
-        }
-        if (!input_name)
-            input_name = arg;
-        else if (!output_arg)
-            output_arg = arg;
-        else
-        {
-            fprintf(stderr, "Too many positional arguments\n");
-            return EXIT_FAILURE;
-        }
+        fprintf(stderr, "Unknown option '%s'\n", arg);
+        return EXIT_FAILURE;
     }
 
     if (!input_name)
