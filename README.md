@@ -250,7 +250,7 @@ few bytes, so it suits searches; confirm the final candidates without it.
 
 ### srnx_block_search
 
-`srnx_block_search` (Go, in `srnx_block_search/`) runs `rnx2srnx_search`
+`srnx_block_search` (Go, in `cmd/srnx_block_search/`) runs `rnx2srnx_search`
 over one or more corpus directories in parallel.  With `-tuples FILE`,
 it ranks the tuples in that file per corpus and overall.  With
 `-eliminate SIZES`, it searches for a good tuple by backward elimination:
@@ -273,7 +273,7 @@ objective is the total byte count over all the given corpora.
 
 ### srnx_upgrade
 
-`srnx_upgrade` (Go, in `srnx_upgrade/`) walks directory trees (default
+`srnx_upgrade` (Go, in `cmd/srnx_upgrade/`) walks directory trees (default
 `.`) and re-encodes every `*.srnx` file in place with `rnx2srnx`, running
 `-j` conversions at a time (default: the number of hardware threads).
 Files that `rnx2srnx` reports as already current (exit status 2) are
