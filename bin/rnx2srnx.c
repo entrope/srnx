@@ -45,7 +45,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -1185,7 +1184,12 @@ static int g_recompress;
  * already the version that would be written (or newer). */
 #define EXIT_ALREADY_CURRENT 2
 
-/* ---- Memory-mapped output buffer ---- */
+/* ---- Output buffer ----
+ *
+ * The output is built in memory and written to the file at the end.
+ * (Storing through a MAP_SHARED mapping of the file instead makes each
+ * page fault read the page first, which doubles network traffic on
+ * NFS.) */
 
 struct mmbuf
 {
@@ -1213,12 +1217,51 @@ _Noreturn static void fail_and_exit(const char *fmt, ...)
 
 static void mm_require(struct mmbuf *mm, size_t need)
 {
-    if (mm->used + need > mm->cap)
+    unsigned char *data;
+    size_t cap;
+
+    if (need <= mm->cap - mm->used)
+        return;
+    cap = mm->cap ? mm->cap : 1 << 20;
+    while (cap - mm->used < need)
     {
-        fail_and_exit("Output exceeds mmap capacity "
-            "(used=%zu need=%zu cap=%zu)",
-            mm->used, need, mm->cap);
+        if (cap > SIZE_MAX / 2)
+            fail_and_exit("Output too large (used=%zu need=%zu)",
+                mm->used, need);
+        cap *= 2;
     }
+    data = realloc(mm->data, cap);
+    if (!data)
+        fail_and_exit("Out of memory for %zu bytes of output", cap);
+    mm->data = data;
+    mm->cap = cap;
+}
+
+/** Writes the contents of \a mm to \a fd and flushes them to storage.
+ *
+ * \returns Zero on success, else an errno value.
+ */
+static int mm_write(const struct mmbuf *mm, int fd)
+{
+    size_t done = 0, len;
+    ssize_t res;
+
+    while (done < mm->used)
+    {
+        /* Bound each request: macOS rejects writes over INT_MAX bytes. */
+        len = mm->used - done;
+        if (len > 1 << 20)
+            len = 1 << 20;
+        res = write(fd, mm->data + done, len);
+        if (res < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return errno;
+        }
+        done += (size_t)res;
+    }
+    return fsync(fd) ? errno : 0;
 }
 
 static void mm_append(struct mmbuf *mm, const void *src, size_t len)
@@ -1315,7 +1358,7 @@ static void wbuf_sleb128(struct wbuf *wb, int64_t val)
     wbuf_uleb128(wb, uv);
 }
 
-/* ---- Write a chunk to the mmap buffer ---- */
+/* ---- Write a chunk to the output buffer ---- */
 
 /** Compute and write the trailing chunk digest for the current
  * chunk-digest algorithm.  The chunk's FOURCC + ULEB128(len) header
@@ -2892,18 +2935,15 @@ static int srnx_already_current(const char input_name[], int major, int minor)
  * start of the (decompressed) input, before decoding, so versions that
  * this library cannot decode are recognized too.
  *
- * \param[out] is_srnx Set non-zero if the input is SRNX.
  * \returns Zero on success, EXIT_ALREADY_CURRENT if the input is SRNX
  *   that should not be re-encoded, or EXIT_FAILURE on error.
  */
-static int load_input(const char input_name[], struct rinex_data *data,
-    int *is_srnx)
+static int load_input(const char input_name[], struct rinex_data *data)
 {
     struct rinex_stream *stream, *decomp = NULL, *input;
     const char *err = NULL, *program;
     int major, minor, res, status = 0;
 
-    *is_srnx = 0;
     stream = strcmp(input_name, "-") ? rinex_mmap_stream(input_name)
         : rinex_stdin_stream();
     if (!stream)
@@ -2929,14 +2969,11 @@ static int load_input(const char input_name[], struct rinex_data *data,
         err = strerror(res);
         goto out;
     }
-    if (!srnx_peek_version(input->buffer, input->size, &major, &minor))
+    if (!srnx_peek_version(input->buffer, input->size, &major, &minor)
+        && srnx_already_current(input_name, major, minor))
     {
-        *is_srnx = 1;
-        if (srnx_already_current(input_name, major, minor))
-        {
-            status = EXIT_ALREADY_CURRENT;
-            goto out;
-        }
+        status = EXIT_ALREADY_CURRENT;
+        goto out;
     }
 
     /* Uncompressed files load fastest by name (SRNX column by column). */
@@ -2960,91 +2997,34 @@ out:
 /** Converts \a data, loaded from \a input_name by load_input(), to SRNX
  * in \a output_name, and frees it.
  *
- * \param[in] is_srnx Non-zero if \a input_name is SRNX.
  * \param[in] out_fd Descriptor already open on \a output_name, or -1
  *   to create it.  Either way, it is closed before returning.
  * \returns Zero on success, or EXIT_FAILURE on error.
  */
 static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
-    int is_srnx, const char output_name[], int out_fd)
+    const char output_name[], int out_fd)
 {
     struct rinex_data data = *p_data;
     struct mmbuf mm = { NULL, 0, 0 };
     struct rnx2srnx_scratch scratch;
-    struct stat st;
-    size_t cap;
     int fd = out_fd;
     size_t sdir_field_offset, epoc_offset, evtf_offset, sdir_offset;
     struct sdir_entry *sdir_entries = NULL;
     signed char glo_chan[100];
     int n_sdir = 0, sdir_alloc = 0;
-    int sys_idx, status = 0;
+    int sys_idx, res, status = 0;
 
     scratch_init(&scratch);
     g_output_name = output_name;
 
-    /* Pick an upper bound for the output size.  SRNX is compressed
-     * relative to RINEX, so input_size + a small margin is a safe
-     * ceiling for all realistic observation files.  SRNX input may
-     * grow when re-encoded (for example, from SOC2 to SOCD), so it
-     * gets the stdin bound of RINEX text size instead.
-     */
-    if (!strcmp(input_name, "-") || is_srnx)
-    {
-        cap = (size_t)(data.obs ? data.obs[0] : 0) * 16 + data.file_header_len + 65536;
-    }
-    else if (stat(input_name, &st) != 0)
-    {
-        fprintf(stderr, "Unable to stat %s\n", input_name);
-        status = 1; goto done;
-    }
-    else
-    {
-        cap = (size_t)st.st_size + 65536;
-    }
-    if (cap < 262144)
-        cap = 262144;
-
-    /* EVTF preserves decoded text and can expand compressed input. */
-    for (sys_idx = 0; sys_idx < data.event_used; ++sys_idx)
-    {
-        size_t extra = (size_t)data.event[sys_idx].text_len + 128;
-        if (extra > SIZE_MAX - cap)
-        {
-            fprintf(stderr, "Exceptional records exceed output size limit\n");
-            status = 1; goto done;
-        }
-        cap += extra;
-    }
-
-    /* Open and size the output file. */
+    /* Open the output file now, before the work of encoding. */
     if (fd < 0)
-        fd = open(output_name, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        fd = open(output_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
     {
         fprintf(stderr, "Unable to create %s\n", output_name);
-        free_rinex_data(&data);
-        return 1;
+        status = 1; goto done;
     }
-    if (ftruncate(fd, (off_t)cap) != 0)
-    {
-        fprintf(stderr, "ftruncate failed on %s\n", output_name);
-        close(fd);
-        unlink(output_name);
-        free_rinex_data(&data);
-        return 1;
-    }
-    mm.data = mmap(NULL, cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (mm.data == MAP_FAILED)
-    {
-        fprintf(stderr, "mmap failed on %s\n", output_name);
-        close(fd);
-        unlink(output_name);
-        free_rinex_data(&data);
-        return 1;
-    }
-    mm.cap = cap;
-    mm.used = 0;
 
     /* GLONASS frequency channels for SOC2 predictors. */
     soc2_parse_glo_chan(data.file_header, data.file_header_len, glo_chan);
@@ -3173,25 +3153,24 @@ static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
 
 done:
     g_output_name = NULL;
-    if (mm.data && mm.data != MAP_FAILED)
-    {
-        msync(mm.data, mm.used, MS_SYNC);
-        munmap(mm.data, mm.cap);
-    }
     if (fd >= 0)
     {
+        if (status == 0 && (res = mm_write(&mm, fd)) != 0)
+        {
+            fprintf(stderr, "Unable to write %s: %s\n", output_name,
+                strerror(res));
+            status = 1;
+        }
+        if (close(fd) != 0 && status == 0)
+        {
+            fprintf(stderr, "Unable to close %s: %s\n", output_name,
+                strerror(errno));
+            status = 1;
+        }
         if (status != 0)
-        {
-            close(fd);
             unlink(output_name);
-        }
-        else
-        {
-            if (ftruncate(fd, (off_t)mm.used) != 0)
-                fprintf(stderr, "ftruncate-to-used failed on %s\n", output_name);
-            close(fd);
-        }
     }
+    free(mm.data);
     free(sdir_entries);
     scratch_free(&scratch);
     free_rinex_data(&data);
@@ -3285,7 +3264,7 @@ int main(int argc, char *argv[])
     struct rinex_data data;
     struct stat in_st, out_st;
     size_t name_len;
-    int ii, res, is_srnx, out_fd = -1, do_check = 0, opts_done = 0;
+    int ii, res, out_fd = -1, do_check = 0, opts_done = 0;
 
     for (ii = 1; ii < argc; ++ii)
     {
@@ -3385,7 +3364,7 @@ int main(int argc, char *argv[])
 
     /* Load the input first: SRNX input that is already current must
      * be skipped before any output (even a temporary file) is created. */
-    res = load_input(input_name, &data, &is_srnx);
+    res = load_input(input_name, &data);
     if (res)
     {
         free(output_name);
@@ -3420,7 +3399,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    res = rnx2srnx(input_name, &data, is_srnx, write_name, out_fd);
+    res = rnx2srnx(input_name, &data, write_name, out_fd);
     if (res == 0 && do_check && strcmp(input_name, "-") != 0
         && run_check(input_name, write_name))
         res = EXIT_FAILURE;
