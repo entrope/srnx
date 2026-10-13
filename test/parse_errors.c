@@ -120,6 +120,44 @@ const unsigned char parse_errors_v3_bad_satid[] =
     "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
     NUL_PAD;
 
+/* RINEX v3 observations that are not in F14.3,A1,A1 columns.  Each
+ * odd-numbered epoch is malformed and each even-numbered one is valid.
+ */
+const unsigned char parse_errors_v3_columns[] =
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n"
+    "G    4 C1C L1C D1C S1C                                      SYS / # / OBS TYPES\n"
+    "     0                                                      RCV CLOCK OFFS APPL\n"
+    "                                                            END OF HEADER\n"
+    "> 2020 07 07 00 00  1.0000000  0  1\n" /* missing blank before last value */
+    "G13  28541439.844 5 149986288.817        1175.101 5       35.700\n"
+    "> 2020 07 07 00 00  2.0000000  0  1\n" /* valid, with blank value and SSI */
+    "G13  28541439.844 5               5     -1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  3.0000000  0  1\n" /* missing blank before 9-digit value */
+    "G13  28541439.844 5149986288.817         1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  4.0000000  0  1\n" /* valid */
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  5.0000000  0  1\n" /* ten-digit integer part */
+    "G13  28541439.844 59999999999.999        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  6.0000000  0  1\n" /* valid */
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  7.0000000  0  1\n" /* only two fraction digits */
+    "G13  28541439.84  5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  8.0000000  0  1\n" /* valid */
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  9.0000000  0  1\n" /* non-digit LLI */
+    "G13  28541439.844x5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00 10.0000000  0  1\n" /* valid */
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00 11.0000000  0  1\n" /* blank inside integer part */
+    "G13  2854 439.844 5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00 12.0000000  0  1\n" /* valid */
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00 13.0000000  0  1\n" /* minus sign after a digit */
+    "G13  28541439.844 5 149986288.817        1175.101 5     3-5.700\n"
+    "> 2020 07 07 00 00 14.0000000  0  1\n" /* valid */
+    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
+    NUL_PAD;
+
 void
 test_parse_errors_v2(void)
 {
@@ -258,15 +296,61 @@ void test_parse_errors_v3_bad_satid(void)
     v3->destroy(v3);
 }
 
+void test_parse_errors_v3_columns(void)
+{
+    struct rinex_stream *v3;
+    struct rinex_parser *p;
+    const char *msg;
+    rinex_error_t err;
+    int ii;
+
+    p = NULL;
+    v3 = rinex_buffer_stream(parse_errors_v3_columns,
+        sizeof parse_errors_v3_columns - sizeof NUL_PAD);
+    msg = rinex_open(&p, v3);
+    if (msg || !p)
+        BAIL_OUT();
+
+    /* 15 tests */
+    for (ii = 1; ii <= 14; ++ii)
+    {
+        err = p->read(p);
+        if (ii & 1)
+        {
+            cmp_ok(err, "==", RINEX_ERR_BAD_FORMAT, "rinex v3 columns read() #%d failed", ii);
+        }
+        else if (ii == 2)
+        {
+            ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == 20000000
+                && p->obs[0] == 28541439844 && p->lli[0] == ' ' && p->ssi[0] == '5'
+                && p->obs[1] == 0 && p->lli[1] == ' ' && p->ssi[1] == '5'
+                && p->obs[2] == -1175101 && p->obs[3] == 35700,
+                "rinex v3 columns read() #2 succeeded");
+        }
+        else
+        {
+            ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == ii * 10000000
+                && p->obs[1] == 149986288817 && p->obs[3] == 35700,
+                "rinex v3 columns read() #%d succeeded", ii);
+        }
+    }
+    err = p->read(p);
+    cmp_ok(err, "==", RINEX_EOF, "rinex v3 columns read() after EOF is stable");
+
+    p->destroy(p);
+    v3->destroy(v3);
+}
+
 int main(int argc, char *argv[])
 {
-    plan(8+1+8+3+3);
+    plan(8+1+8+3+3+15);
 
     test_parse_errors_v2();
     test_parse_errors_v2_b();
     test_parse_errors_v3();
     test_parse_errors_v2_bad_satid();
     test_parse_errors_v3_bad_satid();
+    test_parse_errors_v3_columns();
 
     done_testing(); (void)argc; (void)argv;
 }

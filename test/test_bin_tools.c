@@ -387,9 +387,10 @@ int main(void)
      *     format_observation's abort().
      *
      * A ten-digit integer value (9999999999.999) exceeds the F14.3 range
-     * (max 999999999.999).  The lenient text parser still accepts and
-     * stores it, so rnx2srnx succeeds; decoding it with srnx2rnx must
-     * trip format_observation()'s range abort(). */
+     * (max 999999999.999).  The text parser rejects it, but the CRX
+     * parser does not range-check values, so rnx2srnx accepts it from
+     * CRX input; decoding that with srnx2rnx must trip
+     * format_observation()'s range abort(). */
     {
         const char *corrupt_rnx[] = {
             "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n",
@@ -400,8 +401,20 @@ int main(void)
             /* Ten-digit integer part: out of the F14.3 range. */
             "G01" "9999999999.999" "  \n",
         };
+        const char *corrupt_crx[] = {
+            "3.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n",
+            "RNX2CRX ver.4.2.0                       10-Oct-26 01:10     CRINEX PROG / DATE\n",
+            "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n",
+            "test                                                        PGM / RUN BY / DATE\n",
+            "G    1 C1C                                                  SYS / # / OBS TYPES\n",
+            "                                                            END OF HEADER\n",
+            "> 2020 07 07 00 00  0.0000000  0  1      G01\n",
+            "\n",
+            /* The same value, which CRX writes without a decimal point. */
+            "3&9999999999999\n",
+        };
         char cmd[1024];
-        char rnx_path[256], srnx_path[256], out_path[256];
+        char rnx_path[256], crx_path[256], srnx_path[256], out_path[256];
         FILE *f;
         int res, ii, aborted;
 
@@ -415,13 +428,30 @@ int main(void)
             fclose(f);
         }
 
-        /* The lenient parser accepts the out-of-range value into the SRNX. */
+        /* The text parser rejects the out-of-range value. */
         snprintf(srnx_path, sizeof srnx_path, "test_bin_corrupt.srnx");
         remove(srnx_path);
         snprintf(cmd, sizeof cmd, "%s %s %s >/dev/null 2>&1",
             RNX2SRNX_PATH, rnx_path, srnx_path);
         res = system(cmd);
-        ok(res == 0, "rnx2srnx accepts out-of-range value (lenient parser)");
+        ok(res != 0, "rnx2srnx rejects out-of-range RINEX value");
+
+        snprintf(crx_path, sizeof crx_path, "test_bin_corrupt.crx");
+        f = fopen(crx_path, "w");
+        ok(f != NULL, "corrupted CRX temp file created");
+        if (f)
+        {
+            for (ii = 0; ii < (int)(sizeof corrupt_crx / sizeof corrupt_crx[0]); ++ii)
+                fputs(corrupt_crx[ii], f);
+            fclose(f);
+        }
+
+        /* The CRX parser accepts it into the SRNX. */
+        remove(srnx_path);
+        snprintf(cmd, sizeof cmd, "%s %s %s >/dev/null 2>&1",
+            RNX2SRNX_PATH, crx_path, srnx_path);
+        res = system(cmd);
+        ok(res == 0, "rnx2srnx accepts out-of-range CRX value");
 
         /* Decoding must abort() in format_observation(). */
         snprintf(out_path, sizeof out_path, "test_bin_corrupt_out.rnx");
@@ -433,6 +463,7 @@ int main(void)
         ok(aborted, "srnx2rnx aborts on out-of-range observation");
 
         remove(rnx_path);
+        remove(crx_path);
         remove(srnx_path);
         remove(out_path);
     }

@@ -157,17 +157,29 @@ static const char *rnx_parse_obs
     int kk;
     char buf[16];
 
-    /* A missing value may still carry LLI/SSI characters. */
-    if (!memcmp(obs, "              ", 14))
+    /* A missing value may still carry LLI/SSI characters, or may be
+     * cut short by the end of the line.
+     */
+    for (kk = 0; kk < 14 && obs[kk] == ' '; ++kk) {}
+    if (kk == 14 || obs[kk] == '\n')
     {
-        obs += 14;
+        obs += kk;
+        for (; kk < 16; ++kk)
+        {
+            buf[kk] = (*obs == '\n') ? ' ' : *obs++;
+            if (buf[kk] != ' ' && (buf[kk] < '0' || buf[kk] > '9')) return NULL;
+        }
         p->obs[nn] = 0;
-        p->lli[nn] = *obs == '\n' ? ' ' : *obs++;
-        p->ssi[nn] = *obs == '\n' ? ' ' : *obs++;
+        p->lli[nn] = buf[14];
+        p->ssi[nn] = buf[15];
         return obs;
     }
 
-    /* The first 11 characters must be present: space, minus, digit or dot. */
+    /* The value must follow the F14.3 layout: blanks, an optional minus
+     * and digits in the first 10 characters, '.' in the 11th and digits
+     * in the next three.  The first character must be a blank or minus,
+     * which keeps the value within RINEX_{MIN,MAX}_OBS.
+     */
     for (kk = 0; kk < 10; ++kk)
     {
         if (*obs != ' ') break;
@@ -180,6 +192,10 @@ static const char *rnx_parse_obs
         buf[kk++] = ' ';
         obs++;
     }
+    else if (kk == 0)
+    {
+        return NULL;
+    }
     for (; kk < 10; ++kk)
     {
         if (*obs < '0' || *obs > '9') break;
@@ -190,9 +206,17 @@ static const char *rnx_parse_obs
         return NULL;
     }
     buf[kk++] = '.';
+    for (; kk < 14; ++kk)
+    {
+        if (*obs < '0' || *obs > '9') return NULL;
+        buf[kk] = *obs++;
+    }
+
+    /* The LLI and SSI may each be a blank or a digit. */
     for (; kk < 16; ++kk)
     {
         buf[kk] = (*obs == '\n') ? ' ' : *obs++;
+        if (buf[kk] != ' ' && (buf[kk] < '0' || buf[kk] > '9')) return NULL;
     }
 
     /* Save the LLI and SSI. */
@@ -203,7 +227,7 @@ static const char *rnx_parse_obs
 #define DVAL(A) ((A == ' ') ? 0 : (A - '0'))
 #define FOUR(W, X, Y, Z) (DVAL(W) + 10 * DVAL(X) + 100 * DVAL(Y) + 1000 * DVAL(Z))
     value = DVAL(buf[13])
-        /* buf[10] == '.', at least in theory */
+        /* buf[10] == '.' */
         + 10 * FOUR(buf[12], buf[11], buf[9], buf[8])
         + 100000 * FOUR(buf[7], buf[6], buf[5], buf[4])
         + INT64_C(1000000000) * FOUR(buf[3], buf[2], buf[1], buf[0]);

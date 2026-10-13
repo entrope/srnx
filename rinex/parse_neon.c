@@ -39,22 +39,31 @@ static const char *rnx_neon_parse_obs
     p->lli[idx] = vgetq_lane_s8(m_obs, 14);
     p->ssi[idx] = vgetq_lane_s8(m_obs, 15);
 
-    /* Use the technique from https://arxiv.org/pdf/1902.08318.pdf
-     * section 3.1.2 (Vectorized classification) to check whether
-     * all the bytes of m_obs are in the set " -.0123456789".
-     * " -." are 0x20, 0x2D, 0x2E respectively.
-     * 0-9 are 0x30 through 0x39 respectively.
+    /* Check that m_obs follows the F14.3,A1,A1 layout, column by
+     * column: a blank or '-' in column 0, then (through column 9)
+     * blanks or '-' only after a blank and digits anywhere, '.' in
+     * column 10, digits in columns 11-13, and a blank or digit for
+     * LLI and SSI.  Requiring column 0 to be a blank or '-' keeps the
+     * value within RINEX_{MIN,MAX}_OBS.  A missing value (14 blanks)
+     * may still carry LLI/SSI characters.
      */
-    const uint8x16_t hi_tbl = {0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    const uint8x16_t lo_tbl = {3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 1, 1, 0};
     const uint8x16_t m_obs_u8 = vreinterpretq_u8_s8(m_obs);
-    const int8x16_t shift = {-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0};
-    const uint8x16_t t_hi = vqtbl1q_u8(hi_tbl, vshrq_n_u8(m_obs_u8, 4));
-    const uint8x16_t t_lo = vqtbl1q_u8(lo_tbl, vandq_u8(m_obs_u8, vdupq_n_u8(0xf)));
-    const uint8x16_t t_ok = vandq_u8(vtstq_u8(t_hi, t_lo), vdupq_n_u8(0x80));
-    const uint8x16_t t_msk = vshlq_u8(t_ok, shift);
-    uint32_t msk = vaddv_u8(vget_low_u8(t_msk));
-    msk += vaddv_u8(vget_high_u8(t_msk)) << 8;
+    const uint8x16_t c_sp = vceqq_u8(m_obs_u8, vdupq_n_u8(' '));
+    const uint8x16_t c_minus = vceqq_u8(m_obs_u8, vdupq_n_u8('-'));
+    const uint8x16_t c_dot = vceqq_u8(m_obs_u8, vdupq_n_u8('.'));
+    const uint8x16_t c_digit = vcleq_u8(vsubq_u8(m_obs_u8, vdupq_n_u8('0')), vdupq_n_u8(9));
+    const uint8x16_t c_prev_sp = vextq_u8(vdupq_n_u8(0xff), c_sp, 15);
+    const uint8x16_t l_int = {255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0};
+    const uint8x16_t l_dot = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0};
+    const uint8x16_t l_digit = {0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 255, 255};
+    const uint8x16_t l_ind = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255};
+    const uint8x16_t sign_ok = vandq_u8(c_prev_sp, l_int);
+    const uint8x16_t t_ok = vorrq_u8(
+        vorrq_u8(vandq_u8(c_sp, vorrq_u8(sign_ok, l_ind)),
+            vandq_u8(c_minus, sign_ok)),
+        vorrq_u8(vandq_u8(c_digit, l_digit), vandq_u8(c_dot, l_dot)));
+    const uint8x16_t t_blank = vorrq_u8(c_sp, vandq_u8(c_digit, l_ind));
+    const int valid = vminvq_u8(t_ok) == 255 || vminvq_u8(t_blank) == 255;
 
     /* Check whether the input contains a '-'.  "-.1  " is allowed. */
     const int8_t is_neg = vminvq_s8(vreinterpretq_s8_u8(vceqq_s8(v_minus, m_obs)));
@@ -73,7 +82,7 @@ static const char *rnx_neon_parse_obs
     p->obs[idx] = obs_s64;
 
     const int8_t done = 16 + vaddvq_s8(m_mask);
-    return (msk == 65535) ? (obs + done) : NULL; /* how far did we skip? */
+    return valid ? (obs + done) : NULL; /* how far did we skip? */
 }
 
 #if 0

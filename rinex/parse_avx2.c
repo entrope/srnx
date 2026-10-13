@@ -148,7 +148,7 @@ static __m256i rnx_parse_4(
     return t9;
 }
 
-static inline int rnx_avx2_parse_obs
+static inline const char *rnx_avx2_parse_obs
 (
     struct rinex_parser *p,
     const char *obs,
@@ -168,6 +168,30 @@ static inline int rnx_avx2_parse_obs
     __m128i m_nl_3 = _mm_or_si128(m_nl_2, _mm_bslli_si128(m_nl_2, 4));
     __m128i m_sp   = _mm_or_si128(m_nl_3, _mm_bslli_si128(m_nl_3, 8));
     v_obs[kk] = _mm_blendv_epi8(v_obs_2, v_sp, m_sp);
+
+    /* Check that v_obs[kk] follows the F14.3,A1,A1 layout, column by
+     * column: a blank or '-' in column 0, then (through column 9)
+     * blanks or '-' only after a blank and digits anywhere, '.' in
+     * column 10, digits in columns 11-13, and a blank or digit for
+     * LLI and SSI.  Requiring column 0 to be a blank or '-' keeps the
+     * value within RINEX_{MIN,MAX}_OBS.  A missing value (14 blanks)
+     * may still carry LLI/SSI characters.
+     */
+    const __m128i v_dig = _mm_sub_epi8(v_obs[kk], _mm_set1_epi8('0'));
+    const int c_sp = _mm_movemask_epi8(_mm_cmpeq_epi8(v_obs[kk], v_sp));
+    const int c_minus = _mm_movemask_epi8(_mm_cmpeq_epi8(v_obs[kk], _mm_set1_epi8('-')));
+    const int c_dot = _mm_movemask_epi8(_mm_cmpeq_epi8(v_obs[kk], _mm_set1_epi8('.')));
+    const int c_digit = _mm_movemask_epi8(_mm_cmpeq_epi8(
+        _mm_min_epu8(v_dig, _mm_set1_epi8(9)), v_dig));
+    const int sign_ok = ((c_sp << 1) | 1) & 0x03ff;
+    const int t_ok = (c_sp & (sign_ok | 0xc000)) | (c_minus & sign_ok)
+        | (c_digit & 0xfbfe) | (c_dot & 0x0400);
+    const int t_blank = c_sp | (c_digit & 0xc000);
+    if (t_ok != 0xffff && t_blank != 0xffff)
+    {
+        return NULL;
+    }
+
     if (kk == 7)
     {
         __m128i lli_ssi_01 = _mm_unpackhi_epi8(v_obs[0], v_obs[1]);
@@ -207,7 +231,7 @@ static inline int rnx_avx2_parse_obs
         p->obs[idx[5]] = _mm256_extract_epi64(obs_47, 2);
         p->obs[idx[7]] = _mm256_extract_epi64(obs_47, 3);
     }
-    return cnt;
+    return obs + cnt;
 }
 
 static inline void rnx_avx2_parse_outro(
@@ -267,7 +291,7 @@ static inline void rnx_avx2_parse_outro(
 
 #define SIMD_PARSE_OBS \
     idx[kk] = nn; \
-    obs += rnx_avx2_parse_obs(&p->base, obs, v_obs, idx, kk); \
+    obs = rnx_avx2_parse_obs(&p->base, obs, v_obs, idx, kk); \
     kk = (kk + 1) & 7
 
 #define SIMD_PARSE_OUTRO \
