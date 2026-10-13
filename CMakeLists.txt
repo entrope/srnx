@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.26 FATAL_ERROR)
-cmake_policy(VERSION 3.29)
+cmake_minimum_required(VERSION 3.22 FATAL_ERROR)
+cmake_policy(VERSION 3.22)
 project(rinex VERSION 0.1 DESCRIPTION "RINEX parsing library in C")
 include(CTest)
 include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/libtap)
@@ -14,18 +14,28 @@ add_custom_target(coverage
 
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-try_compile(HAVE_NEON
+message(CHECK_START "Checking for NEON support")
+try_compile(HAVE_NEON ${CMAKE_BINARY_DIR}/try_compile/neon
     SOURCES ${CMAKE_SOURCE_DIR}/rinex/parse_neon.c
     CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${CMAKE_SOURCE_DIR}"
-    LOG_DESCRIPTION "NEON support"
     COMPILE_DEFINITIONS -DHAVE_NEON)
+if(HAVE_NEON)
+    message(CHECK_PASS "yes")
+else()
+    message(CHECK_FAIL "no")
+endif()
 add_compile_definitions($<$<BOOL:${HAVE_NEON}>:HAVE_NEON>)
 
-try_compile(HAVE_AVX2
+message(CHECK_START "Checking for AVX2 support")
+try_compile(HAVE_AVX2 ${CMAKE_BINARY_DIR}/try_compile/avx2
     SOURCES ${CMAKE_SOURCE_DIR}/rinex/parse_avx2.c
     CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${CMAKE_SOURCE_DIR}"
-    LOG_DESCRIPTION "AVX2 support"
     COMPILE_DEFINITIONS -DHAVE_AVX2)
+if(HAVE_AVX2)
+    message(CHECK_PASS "yes")
+else()
+    message(CHECK_FAIL "no")
+endif()
 add_compile_definitions($<$<BOOL:${HAVE_AVX2}>:HAVE_AVX2>)
 
 find_package(PkgConfig REQUIRED)
