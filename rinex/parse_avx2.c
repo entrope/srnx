@@ -247,15 +247,17 @@ static inline void rnx_avx2_parse_outro(
     switch (kk)
     {
     case 7:
-        /* Indexing is wonky because of AVX's "lane" arrangement. */
+        /* Indexing is wonky because of AVX's "lane" arrangement:
+         * values 1 and 2 of each four are in lanes 2 and 1.
+         */
         p->lli[idx[6]] = _mm_extract_epi8(v_obs[6], 14);
         p->ssi[idx[6]] = _mm_extract_epi8(v_obs[6], 15);
-        p->obs[idx[5]] = _mm256_extract_epi64(res_hi, 2);
+        p->obs[idx[6]] = _mm256_extract_epi64(res_hi, 1);
         /* fall through */
     case 6:
         p->lli[idx[5]] = _mm_extract_epi8(v_obs[5], 14);
         p->ssi[idx[5]] = _mm_extract_epi8(v_obs[5], 15);
-        p->obs[idx[6]] = _mm256_extract_epi64(res_hi, 1);
+        p->obs[idx[5]] = _mm256_extract_epi64(res_hi, 2);
         /* fall through */
     case 5:
         p->lli[idx[4]] = _mm_extract_epi8(v_obs[4], 14);
@@ -270,12 +272,12 @@ static inline void rnx_avx2_parse_outro(
     case 3:
         p->lli[idx[2]] = _mm_extract_epi8(v_obs[2], 14);
         p->ssi[idx[2]] = _mm_extract_epi8(v_obs[2], 15);
-        p->obs[idx[1]] = _mm256_extract_epi64(res_lo, 2);
+        p->obs[idx[2]] = _mm256_extract_epi64(res_lo, 1);
         /* fall through */
     case 2:
         p->lli[idx[1]] = _mm_extract_epi8(v_obs[1], 14);
         p->ssi[idx[1]] = _mm_extract_epi8(v_obs[1], 15);
-        p->obs[idx[2]] = _mm256_extract_epi64(res_lo, 1);
+        p->obs[idx[1]] = _mm256_extract_epi64(res_lo, 2);
         /* fall through */
     case 1:
         p->lli[idx[0]] = _mm_extract_epi8(v_obs[0], 14);
