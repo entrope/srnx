@@ -29,13 +29,13 @@ static const char *rnx_neon_parse_obs
     const int8x16_t m_orig = vld1q_s8((const int8_t *)obs);
 
     /* m_nl_<n> through m_mask are a prefix-scan "or" of obs[i] == '\n' */
-    const int8x16_t m_nl_0 = vceqq_s8(m_orig, vdupq_n_s8('\n'));
+    const int8x16_t m_nl_0 = vreinterpretq_s8_u8(vceqq_s8(m_orig, vdupq_n_s8('\n')));
     const int8x16_t m_nl_1 = vorrq_s8(m_nl_0, vextq_s8(v_zero, m_nl_0, 15));
     const int8x16_t m_nl_2 = vorrq_s8(m_nl_1, vextq_s8(v_zero, m_nl_1, 14));
     const int8x16_t m_nl_3 = vorrq_s8(m_nl_2, vextq_s8(v_zero, m_nl_2, 12));
     const int8x16_t m_mask = vorrq_s8(m_nl_3, vextq_s8(v_zero, m_nl_3, 8));
     /* replace any masked bytes with ' ', then extract LLI and SSI */
-    const int8x16_t m_obs = vbslq_s8(m_mask, vdupq_n_s8(' '), m_orig);
+    const int8x16_t m_obs = vbslq_s8(vreinterpretq_u8_s8(m_mask), vdupq_n_s8(' '), m_orig);
     p->lli[idx] = vgetq_lane_s8(m_obs, 14);
     p->ssi[idx] = vgetq_lane_s8(m_obs, 15);
 
@@ -47,20 +47,21 @@ static const char *rnx_neon_parse_obs
      */
     const uint8x16_t hi_tbl = {0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     const uint8x16_t lo_tbl = {3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 1, 1, 0};
-    const uint8x16_t shift = {-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0};
-    const uint8x16_t t_hi = vqtbl1q_u8(hi_tbl, vshrq_n_u8(m_obs, 4));
-    const uint8x16_t t_lo = vqtbl1q_u8(lo_tbl, vandq_u8(m_obs, vdupq_n_u8(0xf)));
+    const uint8x16_t m_obs_u8 = vreinterpretq_u8_s8(m_obs);
+    const int8x16_t shift = {-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0};
+    const uint8x16_t t_hi = vqtbl1q_u8(hi_tbl, vshrq_n_u8(m_obs_u8, 4));
+    const uint8x16_t t_lo = vqtbl1q_u8(lo_tbl, vandq_u8(m_obs_u8, vdupq_n_u8(0xf)));
     const uint8x16_t t_ok = vandq_u8(vtstq_u8(t_hi, t_lo), vdupq_n_u8(0x80));
     const uint8x16_t t_msk = vshlq_u8(t_ok, shift);
     uint32_t msk = vaddv_u8(vget_low_u8(t_msk));
     msk += vaddv_u8(vget_high_u8(t_msk)) << 8;
 
     /* Check whether the input contains a '-'.  "-.1  " is allowed. */
-    const int8_t is_neg = vminvq_s8(vceqq_s8(v_minus, m_obs));
+    const int8_t is_neg = vminvq_s8(vreinterpretq_s8_u8(vceqq_s8(v_minus, m_obs)));
     /* Realign the digits and translate them to byte-wide values. */
     const int8x16_t v_ext_s8 = vextq_s8(v_zero, m_obs, 14);
     const int8x16_t v_idx_s8 = vqsubq_s8(v_ext_s8, vdupq_n_s8('0'));
-    const int8x16_t v_tbl_s8 = vqtbl1q_s8(v_digits, v_idx_s8);
+    const int8x16_t v_tbl_s8 = vqtbl1q_s8(v_digits, vreinterpretq_u8_s8(v_idx_s8));
     /* Perform multiply-accumulates with the place values. */
     const int8x16_t v_dig_s8 = vmulq_s8(v_tbl_s8, v_1_10);
     const int16x8_t v_dig_s16 = vmulq_s16(vpaddlq_s8(v_dig_s8), v_1_100);
