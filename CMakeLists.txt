@@ -273,3 +273,14 @@ target_compile_definitions(test_soc2 PRIVATE
 add_dependencies(test_soc2 rnx2srnx)
 add_test(NAME soc2 COMMAND test_soc2)
 set_property(TEST soc2 PROPERTY LABELS function)
+
+add_executable(test_picosec test/test_picosec.c)
+target_link_libraries(test_picosec rinex tap)
+target_compile_definitions(test_picosec PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    RNX2SRNX_SEARCH_PATH="$<TARGET_FILE:rnx2srnx_search>"
+    SRNX2RNX_PATH="$<TARGET_FILE:srnx2rnx>"
+    RNXCMP_PATH="$<TARGET_FILE:rnxcmp>")
+add_dependencies(test_picosec rnx2srnx rnx2srnx_search srnx2rnx rnxcmp)
+add_test(NAME picosec COMMAND test_picosec)
+set_property(TEST picosec PROPERTY LABELS function)

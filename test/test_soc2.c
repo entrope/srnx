@@ -270,10 +270,10 @@ static void check_minor_version(void)
     buf = read_file(raw_path, &len);
     if (!buf)
         BAIL_OUT("cannot read %s", raw_path);
-    buf[6] = 2; /* SRNX payload: major, minor, ... */
+    buf[6] = 3; /* SRNX payload: major, minor, ... */
     write_file(bad_path, buf, len);
     res = srnx_load(bad_path, &data);
-    ok(res != 0, "minor version 2 is rejected");
+    ok(res != 0, "minor version 3 is rejected");
     free_rinex_data(&data);
     free(buf);
 }

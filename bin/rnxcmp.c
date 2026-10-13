@@ -47,8 +47,12 @@ static void found_mismatch(void)
 /** epoch_ts formats an epoch timestamp into buf (caller provides >= 32 bytes). */
 static void epoch_ts(const struct rinex_epoch *e, char buf[32])
 {
-    snprintf(buf, 32, "%08d %04d %d.%07d",
-        e->yyyy_mm_dd, e->hh_mm, e->sec_e7 / 10000000, e->sec_e7 % 10000000);
+    if (e->has_ps)
+        snprintf(buf, 32, "%08d %04d %d.%07d%05d", e->yyyy_mm_dd, e->hh_mm,
+            e->sec_e7 / 10000000, e->sec_e7 % 10000000, e->sec_ps);
+    else
+        snprintf(buf, 32, "%08d %04d %d.%07d", e->yyyy_mm_dd, e->hh_mm,
+            e->sec_e7 / 10000000, e->sec_e7 % 10000000);
 }
 
 /** Compare two epochs by timestamp.  Returns -1, 0, or 1. */
@@ -60,6 +64,8 @@ static int epoch_cmp(const struct rinex_epoch *a, const struct rinex_epoch *b)
         return a->hh_mm < b->hh_mm ? -1 : 1;
     if (a->sec_e7 != b->sec_e7)
         return a->sec_e7 < b->sec_e7 ? -1 : 1;
+    if (a->sec_ps != b->sec_ps)
+        return a->sec_ps < b->sec_ps ? -1 : 1;
     return 0;
 }
 
@@ -353,6 +359,10 @@ static void event_key(
           && !parse_seconds(line, len, 18, &key->time.sec_e7);
     if (!key->has_time)
         return;
+    key->time.has_ps = !v2 && len == 62
+        && !parse_field(line, len, 57, 5, &key->time.sec_ps);
+    if (!key->time.has_ps)
+        key->time.sec_ps = 0;
     if (v2)
         yy += (yy < 80) ? 2000 : 1900;
     key->time.yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;

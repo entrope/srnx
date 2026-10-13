@@ -170,10 +170,12 @@ static int is_obs_flag(char flag)
 /** Format \a ep for diagnostic messages. */
 static const char *epoch_str(const struct rinex_epoch *ep, char buf[40])
 {
-    snprintf(buf, 40, "%04d-%02d-%02d %02d:%02d:%02d.%07d",
+    int len = snprintf(buf, 40, "%04d-%02d-%02d %02d:%02d:%02d.%07d",
         ep->yyyy_mm_dd / 10000, ep->yyyy_mm_dd / 100 % 100,
         ep->yyyy_mm_dd % 100, ep->hh_mm / 100, ep->hh_mm % 100,
         ep->sec_e7 / 10000000, ep->sec_e7 % 10000000);
+    if (ep->has_ps && len > 0 && len < 40)
+        snprintf(buf + len, 40 - len, "%05d", ep->sec_ps);
     return buf;
 }
 
@@ -551,6 +553,10 @@ static int write_v34_epoch(FILE *out, const struct rinex_parser *p)
         ep->flag, ep->n_sats);
     if (ep->clock_offset != 0)
         fprintf(out, "      %s", clk);
+    else if (ep->has_ps)
+        fprintf(out, "%21s", "");
+    if (ep->has_ps)
+        fprintf(out, " %05d", ep->sec_ps);
     fputc('\n', out);
 
     for (ii = 0; ii < ep->n_sats; ++ii)
@@ -707,8 +713,9 @@ out:
     return status;
 }
 
-/** Copy the records of \a in to \a out.  \a last_e7 is the time of the
- * latest observation epoch written, or INT64_MIN if none has been.
+/** Copy the records of \a in to \a out.  \a last_e7 (and, below that
+ * resolution, \a last_ps) is the time of the latest observation epoch
+ * written, or INT64_MIN if none has been.
  * Records no later than that, as it was before this input, overlap an
  * earlier input and are dropped; records within this input are kept
  * even if they share a timestamp (for example, a flag-6 cycle-slip
@@ -719,14 +726,15 @@ static int merge_input(
     FILE *out,
     struct input *in,
     int version,
-    int64_t *last_e7
+    int64_t *last_e7,
+    int *last_ps
 )
 {
     struct rinex_stream *stream;
     struct rinex_parser *p;
     rinex_error_t res;
     int64_t t_e7, cutoff = *last_e7;
-    int overlap = 0, status = 0;
+    int cutoff_ps = *last_ps, overlap = 0, status = 0;
 
     p = open_input(in->name, &stream);
     if (!p)
@@ -737,7 +745,8 @@ static int merge_input(
         if (is_obs_flag(p->epoch.flag))
         {
             t_e7 = rnx_epoch_time_e7(&p->epoch);
-            overlap = t_e7 <= cutoff;
+            overlap = t_e7 < cutoff
+                || (t_e7 == cutoff && p->epoch.sec_ps <= cutoff_ps);
             if (overlap)
             {
                 ++in->n_dropped;
@@ -752,8 +761,12 @@ static int merge_input(
                 status = 1;
                 break;
             }
-            if (t_e7 > *last_e7)
+            if (t_e7 > *last_e7
+                || (t_e7 == *last_e7 && p->epoch.sec_ps > *last_ps))
+            {
                 *last_e7 = t_e7;
+                *last_ps = p->epoch.sec_ps;
+            }
             ++in->n_written;
             continue;
         }
@@ -762,7 +775,10 @@ static int merge_input(
          * without a timestamp goes with the preceding epoch.
          */
         if (event_has_time(p->buffer, p->buffer_len, version)
-            ? rnx_epoch_time_e7(&p->epoch) <= cutoff : overlap)
+            ? (rnx_epoch_time_e7(&p->epoch) < cutoff
+                || (rnx_epoch_time_e7(&p->epoch) == cutoff
+                    && p->epoch.sec_ps <= cutoff_ps))
+            : overlap)
         {
             ++in->n_events_dropped;
             continue;
@@ -922,6 +938,7 @@ int main(int argc, char *argv[])
     char first_buf[40], last_buf[40];
     FILE *out;
     int64_t last_e7, interval;
+    int last_ps;
     int ii, opt, n_inputs, n_errors, version;
 
     if (argc > 1 && !strcmp(argv[1], "--help"))
@@ -1056,8 +1073,9 @@ int main(int argc, char *argv[])
 
     write_header(out, &inputs[0]);
     last_e7 = INT64_MIN;
+    last_ps = 0;
     for (ii = 0; ii < n_inputs && !n_errors; ++ii)
-        n_errors += merge_input(out, &inputs[ii], version, &last_e7);
+        n_errors += merge_input(out, &inputs[ii], version, &last_e7, &last_ps);
 
     if (fflush(out) || ferror(out))
     {

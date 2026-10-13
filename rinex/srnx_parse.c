@@ -174,7 +174,7 @@ static int srnx_v1_parse_event_v2(struct rinex_epoch *epoch, const char *line)
  */
 static int srnx_v1_parse_event_v34(struct rinex_epoch *epoch, const char *line)
 {
-    int yy, mm, dd, hh, min, n_sats;
+    int yy, mm, dd, hh, min, n_sats, len;
     int64_t i64 = 0;
 
     if (line[0] != '>' || line[31] < '2' || line[31] > '5')
@@ -196,6 +196,13 @@ static int srnx_v1_parse_event_v34(struct rinex_epoch *epoch, const char *line)
     epoch->flag = line[31];
     epoch->n_sats = n_sats;
     epoch->clock_offset = 0;
+
+    /* Any picosecond digits follow the (unused) clock offset field. */
+    for (len = 0; line[len] != '\n' && line[len] != '\0'; ++len)
+    {
+        /* no operation */
+    }
+    rnx_v34_parse_ps(epoch, line + 56, len > 56 ? len - 56 : 0);
     return 0;
 }
 

@@ -341,7 +341,9 @@ static void emit_v2_epoch_header(
 
 /** Emit a v3/v4 epoch header line.  When the receiver clock offset is
  * non-zero, append the F15.12 field with 6 spaces of padding (6X
- * reserved field per RINEX 3.05).
+ * reserved field per RINEX 3.05).  When the epoch has picoseconds (in
+ * an SRNX file with an EPO2 chunk), append them per RINEX 4.02 (1X,I5.5
+ * after the clock offset field, which is blank if the offset is zero).
  *
  * The clock offset is stored at scale 1e12 in v3/v4 (matching F15.12);
  * see rnx_parse.c v3 path.
@@ -364,6 +366,10 @@ static void emit_v34_epoch_header(
         yyyy, mm, dd, hh, mi, sec_f, flag, n_active);
     if (ep->clock_offset != 0)
         fprintf(out, "      %15.12f", (double)ep->clock_offset / 1.0e12);
+    else if (ep->has_ps)
+        fprintf(out, "%21s", "");
+    if (ep->has_ps)
+        fprintf(out, " %05d", ep->sec_ps);
     fputc('\n', out);
 }
 

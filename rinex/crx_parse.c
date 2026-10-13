@@ -475,6 +475,60 @@ static rinex_error_t crx_v2_read_obs(
     return RINEX_SUCCESS;
 }
 
+/** crx_parse_picosec applies the CRINEX 3.1 picosecond text difference
+ * \a s (ending at a newline) to \a crx->picosec, as CRX2RNX's repair()
+ * does: a space keeps the old character, '&' clears it, and any other
+ * character replaces it.  The result must be five digits.
+ *
+ * \returns 0 on success, RINEX_ERR_BAD_FORMAT (with an error message)
+ *   if the difference or the result is malformed.
+ */
+static int crx_parse_picosec(struct crx_v23_parser *crx, const char *s)
+{
+    struct rinex_parser *p_ = &crx->base.base;
+    char *ps = crx->picosec;
+    char field[6];
+    int ii, len;
+
+    for (len = 0; s[len] != '\n' && s[len] != '\0'; ++len)
+    {
+        /* no operation */
+    }
+    if (len > 5)
+    {
+        rnx_errorf(p_, "overlong picoseconds in clock offset line: %.*s",
+            crx_quote_len(s, 24), s);
+        return RINEX_ERR_BAD_FORMAT;
+    }
+    for (ii = 0; ii < len; ++ii)
+    {
+        if (ps[ii] == '\0')
+        {
+            ps[ii] = (s[ii] == '&') ? ' ' : s[ii];
+            ps[ii + 1] = '\0';
+        }
+        else if (s[ii] == '&')
+        {
+            ps[ii] = ' ';
+        }
+        else if (s[ii] != ' ')
+        {
+            ps[ii] = s[ii];
+        }
+    }
+
+    /* A shorter result copies its NUL, which rnx_v34_parse_ps() rejects. */
+    field[0] = ' ';
+    memcpy(field + 1, ps, 5);
+    if (rnx_v34_parse_ps(&p_->epoch, field, 6))
+    {
+        rnx_errorf(p_, "bad picoseconds in clock offset line: %.*s",
+            crx_quote_len(s, 24), s);
+        return RINEX_ERR_BAD_FORMAT;
+    }
+    return 0;
+}
+
 /** crx_parse_clock parses a CRX receiver clock offset line.
  *
  * The clock line uses the same N&VALUE / delta format as individual
@@ -484,6 +538,11 @@ static rinex_error_t crx_v2_read_obs(
  * place that RINEX prints for the clock offset: 1e-9 s (F12.9) for
  * RINEX 2, so \a scale is 1000, and 1e-12 s (F15.12) for RINEX 3/4, so
  * \a scale is 1.
+ *
+ * In CRINEX 3.1, the clock offset (which may be empty) can be followed
+ * by a space and a text difference of the epoch's picosecond digits
+ * (see crx_parse_picosec()).  Once seen, those digits apply to each
+ * later epoch until changed.
  *
  * \returns 0 on success, RINEX_ERR_BAD_FORMAT (with an error message)
  *   if the line is malformed.
@@ -502,24 +561,39 @@ static int crx_parse_clock(
     {
         clk->used = 0;
         p_->epoch.clock_offset = 0;
-        return 0;
+        end = s;
+        if (!crx->has_picosec)
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        end = crx_update_arc(p_, clk, s);
+        if (!end)
+        {
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        if (*end != '\n' && *end != '\0' && !(crx->has_picosec && *end == ' '))
+        {
+            rnx_errorf(p_, "unexpected text in clock offset line: %.*s",
+                crx_quote_len(s, 24), s);
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        if (__builtin_mul_overflow(clk->value, scale, &p_->epoch.clock_offset))
+        {
+            rnx_errorf(p_, "clock offset overflows: %.*s", crx_quote_len(s, 24), s);
+            return RINEX_ERR_BAD_FORMAT;
+        }
     }
 
-    end = crx_update_arc(p_, clk, s);
-    if (!end)
+    if (*end == ' ')
     {
-        return RINEX_ERR_BAD_FORMAT;
+        return crx_parse_picosec(crx, end + 1);
     }
-    if (*end != '\n' && *end != '\0')
+    if (crx->picosec[0] != '\0')
     {
-        rnx_errorf(p_, "unexpected text in clock offset line: %.*s",
-            crx_quote_len(s, 24), s);
-        return RINEX_ERR_BAD_FORMAT;
-    }
-    if (__builtin_mul_overflow(clk->value, scale, &p_->epoch.clock_offset))
-    {
-        rnx_errorf(p_, "clock offset overflows: %.*s", crx_quote_len(s, 24), s);
-        return RINEX_ERR_BAD_FORMAT;
+        return crx_parse_picosec(crx, end);
     }
     return 0;
 }
@@ -822,6 +896,15 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
      */
     if (p_->epoch.flag >= '2' && p_->epoch.flag <= '5')
     {
+        /* An event's epoch line is plain RINEX, so any picosecond digits
+         * are in it rather than on a clock offset line. */
+        line_len = strlen(crx->epoch_text);
+        if (rnx_v34_parse_ps(&p_->epoch, crx->epoch_text + 56,
+            line_len > 56 ? line_len - 56 : 0))
+        {
+            rnx_errorf(p_, "picoseconds have bad format: %s", crx->epoch_text);
+            return RINEX_ERR_BAD_FORMAT;
+        }
         res = rnx_get_newlines(p_, &p->parse_ofs, NULL, 0, n_sats);
         if (res <= RINEX_EOF)
         {
@@ -1014,12 +1097,13 @@ const char *crx_open_v23(
     }
     else if (crx->base.base.read == rnx_read_v34)
     {
-        if (memcmp("3.0 ", stream->buffer, 4))
+        if (memcmp("3.0 ", stream->buffer, 4) && memcmp("3.1 ", stream->buffer, 4))
         {
-            err = "Expected CRINEX 3.0 for RINEX v3.x/v4.x";
+            err = "Expected CRINEX 3.0 or 3.1 for RINEX v3.x/v4.x";
         }
         else
         {
+            crx->has_picosec = stream->buffer[2] == '1';
             crx->base.base.read = crx_read_v34;
         }
     }

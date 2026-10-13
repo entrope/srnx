@@ -215,6 +215,9 @@ int rnx_v34_parse_time(struct rinex_epoch *epoch, const char *line)
     int64_t i64;
     int yy, mm, dd, hh, min, ii;
 
+    epoch->has_ps = 0;
+    epoch->sec_ps = 0;
+
     /* Special events (flags 2-5) may leave the date and time blank. */
     if (line[31] >= '2' && line[31] <= '5')
     {
@@ -240,6 +243,34 @@ int rnx_v34_parse_time(struct rinex_epoch *epoch, const char *line)
     epoch->yyyy_mm_dd = (yy * 100 + mm) * 100 + dd;
     epoch->hh_mm = hh * 100 + min;
     epoch->sec_e7 = i64;
+    return 0;
+}
+
+/* Doc comment in rnx_priv.h. */
+int rnx_v34_parse_ps(struct rinex_epoch *epoch, const char *field, int len)
+{
+    int ii, ps;
+
+    epoch->has_ps = 0;
+    epoch->sec_ps = 0;
+    if (len == 0)
+    {
+        return 0;
+    }
+    if (len != 6 || field[0] != ' ')
+    {
+        return RINEX_ERR_BAD_FORMAT;
+    }
+    for (ii = 1, ps = 0; ii < 6; ++ii)
+    {
+        if (field[ii] < '0' || field[ii] > '9')
+        {
+            return RINEX_ERR_BAD_FORMAT;
+        }
+        ps = ps * 10 + field[ii] - '0';
+    }
+    epoch->has_ps = 1;
+    epoch->sec_ps = ps;
     return 0;
 }
 
@@ -277,6 +308,22 @@ rinex_error_t rnx_read_v34(struct rinex_parser *p_)
     }
     p->base.epoch.flag = line[31];
     p->base.epoch.n_sats = n_sats;
+
+    /* Are there picosecond digits after the receiver clock offset? */
+    if (rnx_v34_parse_ps(&p->base.epoch, line + 56,
+        line_len > 56 ? line_len - 56 : 0))
+    {
+        rnx_errorf(p_, "picoseconds have bad format: %.*s", line_len, line);
+        return RINEX_ERR_BAD_FORMAT;
+    }
+    if (p->base.epoch.has_ps)
+    {
+        /* The clock offset may be blank. */
+        for (line_len = 56; line_len > 41 && line[line_len - 1] == ' '; --line_len)
+        {
+            /* no operation */
+        }
+    }
 
     /* Is there a receiver clock offset? */
     if (line_len <= 43) /* 6X reserved field ends at column 41, need at

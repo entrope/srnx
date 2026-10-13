@@ -103,7 +103,7 @@ struct srnx_reader
     /** Offset of the SDIR chunk, if any. */
     int64_t sdir_offset;
 
-    /** Offset of the EPOC chunk, if any; negative if unknown. */
+    /** Offset of the EPOC or EPO2 chunk, if any; negative if unknown. */
     int64_t epoc_offset;
 
     /** Offset of the first EVTF chunk, if any; negative if unknown. */
@@ -123,12 +123,16 @@ struct srnx_reader
      * hashed by satellite and observation index. */
     struct srnx_column *columns[64];
 
-    /** Epoch timestamps (1e-7 s, from rnx_epoch_time_e7()) for SOC2 rate
+    /** Epoch timestamps in ticks (from rnx_epoch_ticks()) for SOC2 rate
      * predictors, or NULL until first needed. */
-    int64_t *epoch_t7;
+    int64_t *epoch_ticks;
 
-    /** Number of entries in #epoch_t7. */
-    size_t epoch_t7_len;
+    /** Number of entries in #epoch_ticks. */
+    size_t epoch_ticks_len;
+
+    /** Nonzero if the epochs are in an EPO2 chunk (picosecond times)
+     * rather than EPOC; valid after srnx_get_epochs() succeeds. */
+    int epo2;
 
     /** errmsg describes why a read failed. */
     char errmsg[160];
@@ -610,7 +614,7 @@ int srnx_open_buffer(
         res = SRNX_CORRUPT;
         goto out;
     }
-    if (ul > 1)
+    if (ul > 2)
     {
         srnx_errorf(srnx, "unsupported minor version %"PRIu64, ul);
         res = SRNX_BAD_MAJOR;
@@ -752,7 +756,7 @@ struct srnx_reader *srnx_reset(struct srnx_reader **p_srnx)
                 free(col);
             }
         }
-        free(srnx->epoch_t7);
+        free(srnx->epoch_ticks);
     }
     else
     {
@@ -1015,6 +1019,37 @@ static int srnx_find_chunk_cached(
         p_len, p_start, p_next);
 }
 
+/** Finds the EPOC or EPO2 chunk of \a srnx, setting \a srnx->epo2 to
+ * say which it is.
+ *
+ * \param[in] srnx SRNX file to read.
+ * \param[out] p_payload Receives pointer to the chunk's payload.
+ * \param[out] p_len Receives length of the chunk's payload.
+ * \returns Zero on success, else as for srnx_find_chunk_cached().
+ */
+static int srnx_find_epochs(
+    struct srnx_reader *srnx,
+    const char **p_payload,
+    uint64_t *p_len
+)
+{
+    int res;
+
+    /* The SDIR chunk's offset may point at either kind. */
+    srnx->epo2 = srnx->epoc_offset > 0
+        && (uint64_t)srnx->epoc_offset + 4 <= srnx->data_size
+        && !memcmp(srnx->data + srnx->epoc_offset, "EPO2", 4);
+    res = srnx_find_chunk_cached(srnx, srnx->epo2 ? "EPO2" : "EPOC",
+        &srnx->epoc_offset, p_payload, p_len, NULL);
+    if (res == SRNX_NO_CHUNK && srnx->epoc_offset < 0)
+    {
+        res = srnx_find_chunk_cached(srnx, "EPO2", &srnx->epoc_offset,
+            p_payload, p_len, NULL);
+        srnx->epo2 = res == 0;
+    }
+    return res;
+}
+
 /* Doc comment in srnx.h. */
 int srnx_get_epochs(
     struct srnx_reader *srnx,
@@ -1022,22 +1057,31 @@ int srnx_get_epochs(
     size_t *p_epochs_len
 )
 {
-    uint64_t len, idx, n_epoch, date, time;
-    int64_t i64;
+    uint64_t len, idx, n_epoch, date, time, max_time;
+    int64_t i64, sec, minute, ticks, max_sec;
     struct rinex_epoch *new_epochs, *epoch;
     const char *epoc, *end;
-    int res, sec_e7;
+    int res;
     short hh_mm, mm;
 
     *p_epochs_len = 0;
 
-    /* Search for the EPOC chunk. */
-    res = srnx_find_chunk_cached(srnx, "EPOC", &srnx->epoc_offset, &epoc, &len, NULL);
+    /* Search for the EPOC or EPO2 chunk. */
+    res = srnx_find_epochs(srnx, &epoc, &len);
     if (res)
     {
         return res;
     }
     end = epoc + len;
+
+    /* EPOC counts time in ticks of 1e-7 seconds, EPO2 in picoseconds.
+     * A time of day is (hours * 100 + minutes) * 100 seconds' worth of
+     * ticks, plus seconds in ticks; it must not be after 24:60:61.
+     */
+    ticks = srnx->epo2 ? RNX_TICKS_PER_SEC_E12 : RNX_TICKS_PER_SEC_E7;
+    minute = 60 * ticks;
+    max_time = 2460 * (uint64_t)(100 * ticks) + 61 * (uint64_t)ticks;
+    max_sec = (INT_MAX + (int64_t)1) * (ticks / RNX_TICKS_PER_SEC_E7) - 1;
 
     /* How many epochs are in this file? */
     if (epoc_uleb128(&epoc, end, &n_epoch)
@@ -1079,9 +1123,9 @@ int srnx_get_epochs(
         /* Convert to whole seconds? */
         if (i64 < 0)
         {
-            if (i64 < -(INT64_MAX / 10000000))
+            if (i64 < -(INT64_MAX / ticks))
                 goto corrupt;
-            i64 *= -10000000;
+            i64 *= -ticks;
         }
 
         if (epoc_uleb128(&epoc, end, &len)
@@ -1103,13 +1147,13 @@ int srnx_get_epochs(
             date += (date < 800000) ? 20000000 : 19000000;
         }
 
-        if (epoc_uleb128(&epoc, end, &time) || time > 2460610000000)
+        if (epoc_uleb128(&epoc, end, &time) || time > max_time)
         {
             srnx_errorf(srnx, "oversize EPOC start time");
             return SRNX_CORRUPT;
         }
-        sec_e7 = time % 1000000000;
-        hh_mm = time / 1000000000;
+        sec = time % (uint64_t)(100 * ticks);
+        hh_mm = time / (uint64_t)(100 * ticks);
         mm = hh_mm % 100;
 
         /* Unpack this epoch span. */
@@ -1118,21 +1162,23 @@ int srnx_get_epochs(
             epoch = (*p_epoch) + idx;
             epoch->yyyy_mm_dd = date;
             epoch->hh_mm = hh_mm;
-            epoch->sec_e7 = sec_e7;
+            epoch->sec_e7 = sec / (ticks / RNX_TICKS_PER_SEC_E7);
+            epoch->sec_ps = sec % (ticks / RNX_TICKS_PER_SEC_E7);
+            epoch->has_ps = srnx->epo2;
             epoch->flag = '0';
             epoch->n_sats = 0;
 
             /* Advance seconds count and check for minute rollover.
-             * Comparison of previous sec_e7 is needed for leap seconds.
+             * Comparison of previous seconds is needed for leap seconds.
              */
             if (len == 1)
                 continue;
-            if (i64 > INT_MAX - sec_e7)
+            if (i64 > max_sec - sec)
                 goto corrupt;
-            sec_e7 += i64;
-            if (sec_e7 >= 600000000 && epoch->sec_e7 < 600000000)
+            sec += i64;
+            if (sec >= minute && sec - i64 < minute)
             {
-                sec_e7 -= 600000000;
+                sec -= minute;
                 hh_mm += 1;
                 mm += 1;
                 if (mm >= 60)
@@ -1146,6 +1192,13 @@ int srnx_get_epochs(
 
     if (idx != n_epoch)
         goto corrupt;
+
+    /* Rate predictors need differences of EPO2 times to fit in 64 bits. */
+    if (srnx->epo2 && !rnx_epoch_ps_span_ok(*p_epoch, n_epoch))
+    {
+        srnx_errorf(srnx, "EPO2 epochs span 2^63 picoseconds or more");
+        return SRNX_CORRUPT;
+    }
 
     /* Walk over the receiver clock offset spans. */
     for (idx = 0; (epoc < end) && (idx < n_epoch); )
@@ -1180,7 +1233,7 @@ int srnx_get_epochs(
     return 0;
 
 corrupt:
-    srnx_errorf(srnx, "invalid or incomplete EPOC payload");
+    srnx_errorf(srnx, "invalid or incomplete %s payload", srnx->epo2 ? "EPO2" : "EPOC");
     return SRNX_CORRUPT;
 }
 
@@ -1607,13 +1660,17 @@ struct soc2_pred
     uint64_t den;
     int stencil;
     uint64_t max_span;
+
+    /** Ticks per second of satellite epoch times (and #max_span). */
+    int64_t ticks;
 };
 
 /** Computes the SOC2 prediction for satellite epoch \a kk.
  *
  * \param[in] pr Predictor (kind SRNX_PRED_VALUE or SRNX_PRED_RATE).
  * \param[in] ref Reference values for all \a count satellite epochs.
- * \param[in] t7 Satellite epoch times (1e-7 s); used by rate predictors.
+ * \param[in] tt Satellite epoch times (in \a pr->ticks per second); used
+ *   by rate predictors.
  * \param[in] count Number of satellite epochs.
  * \param[in] kk Satellite epoch to predict.
  * \param[in] scale Observation scale.
@@ -1623,7 +1680,7 @@ struct soc2_pred
 static inline int soc2_predict(
     const struct soc2_pred *pr,
     const int64_t *ref,
-    const int64_t *t7,
+    const int64_t *tt,
     uint64_t count,
     uint64_t kk,
     int64_t scale,
@@ -1649,11 +1706,13 @@ static inline int soc2_predict(
         bb = pr->stencil == 0 ? kk : kk + 1;
         if (bb >= count || ref[aa] == INT64_MIN || ref[bb] == INT64_MIN)
             return 0;
-        dt = t7[bb] - t7[aa];
-        if (dt <= 0 || (pr->max_span && (uint64_t)dt > pr->max_span))
+        dt = tt[bb] - tt[aa];
+        if (dt <= 0 || (pr->max_span && (uint64_t)dt > pr->max_span)
+            || !rnx_rate_predict(ref[aa], ref[bb], dt, pr->ticks, pr->num,
+                pr->den, &pp))
+        {
             return 0;
-        pp = rnx_rdiv128(((__int128)ref[bb] - ref[aa]) * 10000000 * pr->num,
-            (__int128)dt * pr->den);
+        }
     }
     *p_q = scale == 1 ? pp : rnx_rdiv128(pp, scale);
     return 1;
@@ -1887,8 +1946,9 @@ static int srnx_column_values(
     return 0;
 }
 
-/** Fills \a *p_t7 with the times (1e-7 s) of the \a n_values epochs in
- * which satellite \a name is present.  The caller frees \a *p_t7.
+/** Fills \a *p_t7 with the times (in ticks from rnx_epoch_ticks()) of
+ * the \a n_values epochs in which satellite \a name is present.  The
+ * caller frees \a *p_t7.
  */
 static int srnx_satellite_times(
     struct srnx_reader *srnx,
@@ -1902,10 +1962,11 @@ static int srnx_satellite_times(
     uint64_t kk;
     int res, n_runs = 0, alloc = 0, obs_count = 0, s_idx, ii, ei;
 
-    if (!srnx->epoch_t7)
+    if (!srnx->epoch_ticks)
     {
         struct rinex_epoch *epochs = NULL;
         size_t n_epochs = 0, jj;
+        int64_t t0_e7;
 
         res = srnx_get_epochs(srnx, &epochs, &n_epochs);
         if (res)
@@ -1913,16 +1974,17 @@ static int srnx_satellite_times(
             free(epochs);
             return res;
         }
-        srnx->epoch_t7 = malloc((n_epochs ? n_epochs : 1) * sizeof *srnx->epoch_t7);
-        if (!srnx->epoch_t7)
+        srnx->epoch_ticks = malloc((n_epochs ? n_epochs : 1) * sizeof *srnx->epoch_ticks);
+        if (!srnx->epoch_ticks)
         {
             free(epochs);
             srnx_errorf(srnx, "allocation failed for epoch times");
             return ENOMEM;
         }
+        t0_e7 = n_epochs ? rnx_epoch_time_e7(&epochs[0]) : 0;
         for (jj = 0; jj < n_epochs; ++jj)
-            srnx->epoch_t7[jj] = rnx_epoch_time_e7(&epochs[jj]);
-        srnx->epoch_t7_len = n_epochs;
+            srnx->epoch_ticks[jj] = rnx_epoch_ticks(&epochs[jj], srnx->epo2, t0_e7);
+        srnx->epoch_ticks_len = n_epochs;
         free(epochs);
     }
 
@@ -1954,14 +2016,14 @@ static int srnx_satellite_times(
     {
         for (ei = runs[ii].start; ei < runs[ii].end; ++ei)
         {
-            if (ei < 0 || (size_t)ei >= srnx->epoch_t7_len)
+            if (ei < 0 || (size_t)ei >= srnx->epoch_ticks_len)
             {
                 free(runs);
                 free(t7);
                 srnx_errorf(srnx, "SATE presence for %.3s exceeds EPOC", name.name);
                 return SRNX_CORRUPT;
             }
-            t7[kk++] = srnx->epoch_t7[ei];
+            t7[kk++] = srnx->epoch_ticks[ei];
         }
     }
     free(runs);
@@ -2340,6 +2402,7 @@ static int soc2_open(
             res = srnx_satellite_times(srnx, name, n_values, &t7);
             if (res)
                 return res;
+            pr.ticks = srnx->epo2 ? RNX_TICKS_PER_SEC_E12 : RNX_TICKS_PER_SEC_E7;
         }
     }
 

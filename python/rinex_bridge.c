@@ -206,7 +206,7 @@ int rb_extract_epochs_sod(const struct rinex_data *data,
         const struct rinex_epoch *e = &data->epoch[ii];
         out[ii] = (e->hh_mm / 100) * 3600.0
                 + (e->hh_mm % 100) * 60.0
-                + e->sec_e7 / 1e7;
+                + e->sec_e7 / 1e7 + e->sec_ps / 1e12;
     }
 
     return n;

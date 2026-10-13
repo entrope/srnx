@@ -77,16 +77,20 @@ static int64_t find_next_chunk(
     return -1;
 }
 
-static void print_first_span(uint64_t total_epochs, const char *payload)
+/** Prints the epoch count and first span of an EPOC chunk, or of an EPO2
+ * chunk (with times in picoseconds rather than 1e-7 s) if \a epo2.
+ */
+static void print_first_span(uint64_t total_epochs, const char *payload, int epo2)
 {
     const char *rptr = payload;
+    uint64_t ticks = epo2 ? 1000000000000ULL : 10000000ULL;
     int64_t interval = read_sleb128(&rptr);
-    /* Negative interval = seconds; positive = already in 1e-7 s units. */
-    if (interval < 0) interval = -interval * 10000000;
+    /* Negative interval = seconds; positive = already in ticks. */
+    if (interval < 0) interval = -interval * (int64_t)ticks;
 
     uint64_t count_minus_1 = read_uleb128(&rptr);
     uint64_t date = read_uleb128(&rptr);
-    uint64_t time_e11 = read_uleb128(&rptr);
+    uint64_t time_of_day = read_uleb128(&rptr);
 
     int yyyy;
     if (date < 1000000)
@@ -102,18 +106,18 @@ static void print_first_span(uint64_t total_epochs, const char *payload)
     int mm = (int)((date % 10000) / 100);
     int dd = (int)(date % 100);
 
-    int hh = (int)(time_e11 / 100000000000ULL);
-    int mi = (int)((time_e11 % 100000000000ULL) / 1000000000ULL);
-    uint64_t sec_e7 = time_e11 % 1000000000ULL;
-    int ss = (int)(sec_e7 / 10000000);
-    uint64_t frac = sec_e7 % 10000000;
+    int hh = (int)(time_of_day / (10000 * ticks));
+    int mi = (int)((time_of_day % (10000 * ticks)) / (100 * ticks));
+    uint64_t sec = time_of_day % (100 * ticks);
+    int ss = (int)(sec / ticks);
+    uint64_t frac = sec % ticks;
 
     printf("  Epochs: %" PRIu64
-        ", Span: interval=%.7f s, count=%" PRIu64
-        ", %04d-%02d-%02d %02d:%02d:%02d.%07" PRIu64 "\n",
-        total_epochs,
-        (double)interval / 10000000.0, count_minus_1 + 1,
-        yyyy, mm, dd, hh, mi, ss, frac);
+        ", Span: interval=%.*f s, count=%" PRIu64
+        ", %04d-%02d-%02d %02d:%02d:%02d.%0*" PRIu64 "\n",
+        total_epochs, epo2 ? 12 : 7,
+        (double)interval / (double)ticks, count_minus_1 + 1,
+        yyyy, mm, dd, hh, mi, ss, epo2 ? 12 : 7, frac);
 }
 
 typedef struct {
@@ -123,6 +127,7 @@ typedef struct {
 
 typedef struct {
     int         epoc_count;
+    int         epo2_count;
     int         sdir_count;
     int         evtf_count;
     int         sate_count;
@@ -248,11 +253,15 @@ static void scan_file(const char *filename, file_stats_t *stats)
                           + chunk_digest_length;
 
         /* What is the FOURCC? */
-        if (memcmp(fourcc, "EPOC", 4) == 0)
+        if (memcmp(fourcc, "EPOC", 4) == 0 || memcmp(fourcc, "EPO2", 4) == 0)
         {
-            stats->epoc_count++;
+            int epo2 = fourcc[3] == '2';
+            if (epo2)
+                stats->epo2_count++;
+            else
+                stats->epoc_count++;
             stats->total_epochs = read_uleb128(&rptr);
-            print_first_span(stats->total_epochs, rptr);
+            print_first_span(stats->total_epochs, rptr, epo2);
         }
         else if (memcmp(fourcc, "SDIR", 4) == 0)
         {
@@ -418,6 +427,7 @@ static void scan_file(const char *filename, file_stats_t *stats)
 static void agg_merge(file_stats_t *agg, const file_stats_t *stats)
 {
     agg->epoc_count   += stats->epoc_count;
+    agg->epo2_count   += stats->epo2_count;
     agg->sdir_count   += stats->sdir_count;
     agg->evtf_count   += stats->evtf_count;
     agg->sate_count   += stats->sate_count;
@@ -484,6 +494,8 @@ static void print_summary(const file_stats_t *agg)
 {
     printf("Chunk totals:\n");
     printf("  EPOC: %d\n", agg->epoc_count);
+    if (agg->epo2_count)
+        printf("  EPO2: %d\n", agg->epo2_count);
     printf("  SDIR: %d\n", agg->sdir_count);
     printf("  EVTF: %d\n", agg->evtf_count);
     printf("  SATE: %d\n", agg->sate_count);

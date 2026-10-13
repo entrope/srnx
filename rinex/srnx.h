@@ -127,7 +127,8 @@ int srnx_get_header(
     size_t *rhdr_len
 );
 
-/** Loads the RINEX epoch values from a SRNX file.
+/** Loads the RINEX epoch values from a SRNX file's EPOC or EPO2 chunk.
+ * With EPO2, every epoch has picoseconds (rinex_epoch.has_ps).
  *
  * \param[in] srnx SRNX reader object.
  * \param[in,out] p_epoch Receives pointer to epoch structures.
@@ -142,7 +143,7 @@ int srnx_get_epochs(
 
 /* Loads the next EVTF record from a SRNX file. Flags 1 and 6 include
  * the complete satellite/value records in RINEX text; they are not part
- * of the EPOC array or the SOCD values returned by the column APIs.
+ * of the EPOC/EPO2 array or the SOCD values returned by the column APIs.
  *
  * \param[in] srnx SRNX reader object.
  * \param[in,out] p_event Receives pointer to special event text.

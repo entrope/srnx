@@ -182,30 +182,111 @@ static int indicator_idx(unsigned char ch)
 
 /* ---- Epoch span helper (shared) ---- */
 
-/** Check if two epochs are in the same span (same interval, no minute
- * rollover boundary).
+/** Returns nonzero if any epoch in \a data has picosecond digits, so
+ * the output needs an EPO2 chunk rather than EPOC.
+ */
+static int epochs_have_ps(const struct rinex_data *data)
+{
+    int ii;
+
+    for (ii = 0; ii < data->epoch_used; ++ii)
+    {
+        if (data->epoch[ii].has_ps)
+            return 1;
+    }
+    return 0;
+}
+
+/** Seconds of minute of \a ep in ticks: picoseconds for EPO2 (if
+ * \a epo2), else 1e-7 s for EPOC.
+ */
+static int64_t epoch_sec_ticks(const struct rinex_epoch *ep, int epo2)
+{
+    return epo2 ? (int64_t)ep->sec_e7 * 100000 + ep->sec_ps : ep->sec_e7;
+}
+
+/** Check if two epochs are in the same span (same interval, in ticks of
+ * EPO2 if \a epo2 or else of EPOC, and no minute rollover boundary).
  */
 static int same_span(const struct rinex_epoch *prev,
-    const struct rinex_epoch *cur, int64_t interval_e7)
+    const struct rinex_epoch *cur, int64_t interval, int epo2)
 {
+    int64_t minute = 60 * (epo2 ? RNX_TICKS_PER_SEC_E12 : RNX_TICKS_PER_SEC_E7);
+    int64_t prev_sec = epoch_sec_ticks(prev, epo2);
     int64_t expected_sec;
 
     if (cur->yyyy_mm_dd != prev->yyyy_mm_dd)
         return 0;
-    expected_sec = prev->sec_e7 + interval_e7;
-    if (expected_sec >= 600000000 && prev->sec_e7 < 600000000)
+    expected_sec = prev_sec + interval;
+    if (expected_sec >= minute && prev_sec < minute)
     {
         /* Minute rollover expected. */
-        expected_sec -= 600000000;
+        expected_sec -= minute;
         if (cur->hh_mm != prev->hh_mm + 1
             && !(prev->hh_mm % 100 == 59
                  && cur->hh_mm == prev->hh_mm + 41))
             return 0;
-        return cur->sec_e7 == expected_sec;
+        return epoch_sec_ticks(cur, epo2) == expected_sec;
     }
     if (cur->hh_mm != prev->hh_mm)
         return 0;
-    return cur->sec_e7 == expected_sec;
+    return epoch_sec_ticks(cur, epo2) == expected_sec;
+}
+
+/** One epoch span of an EPOC or EPO2 chunk. */
+struct epoch_span
+{
+    int64_t interval; /* encoded interval: negative for whole seconds */
+    int count;        /* number of epochs in the span */
+    uint64_t date;    /* YYYYMMDD */
+    uint64_t time;    /* time of day of the first epoch, in ticks */
+};
+
+/** Fills \a span with the longest epoch span starting at
+ * \a data->epoch[start], in ticks of EPO2 if \a epo2 or else of EPOC.
+ */
+static void next_epoch_span(const struct rinex_data *data, int start,
+    int epo2, struct epoch_span *span)
+{
+    const struct rinex_epoch *e0 = &data->epoch[start];
+    int64_t ticks = epo2 ? RNX_TICKS_PER_SEC_E12 : RNX_TICKS_PER_SEC_E7;
+    int64_t interval = 0;
+    int len = 1;
+
+    /* Determine interval from first two epochs in this span. */
+    if (start + 1 < data->epoch_used)
+    {
+        const struct rinex_epoch *e1 = &data->epoch[start + 1];
+        interval = epoch_sec_ticks(e1, epo2) - epoch_sec_ticks(e0, epo2);
+        if (e1->hh_mm != e0->hh_mm)
+        {
+            int dmin = (e1->hh_mm / 100 - e0->hh_mm / 100) * 60
+                     + (e1->hh_mm % 100 - e0->hh_mm % 100);
+            interval += (int64_t)dmin * 60 * ticks;
+        }
+        /* At a day boundary, or going backwards in time (which the
+         * encoded interval cannot represent), make a 1-epoch span. */
+        if (e1->yyyy_mm_dd != e0->yyyy_mm_dd || interval < 0)
+            interval = 0;
+    }
+
+    /* Extend the span as far as possible. */
+    if (interval != 0)
+    {
+        while (start + len < data->epoch_used
+            && same_span(&data->epoch[start + len - 1],
+                &data->epoch[start + len], interval, epo2))
+        {
+            len++;
+        }
+    }
+
+    span->interval = (interval != 0 && interval % ticks == 0)
+        ? -(interval / ticks) : interval;
+    span->count = len;
+    span->date = e0->yyyy_mm_dd;
+    span->time = (uint64_t)((e0->hh_mm / 100) * 100 + e0->hh_mm % 100)
+        * (uint64_t)(100 * ticks) + (uint64_t)epoch_sec_ticks(e0, epo2);
 }
 
 /* ---- SDIR entry (shared) ---- */
@@ -714,8 +795,8 @@ static int rice_select_order(const int64_t *delta_matrix, int count,
 #define SOC2_ABSENT INT64_MIN        /* no observation at this satellite epoch */
 #define SOC2_UNPRED (INT64_MIN + 1)  /* observation in an unpredicted-values block */
 
-/* Doppler predictor max_span: 300 seconds, in units of 1e-7 s. */
-#define SOC2_DOPPLER_MAX_SPAN 3000000000ULL
+/* Doppler predictor max_span, in seconds (scaled to ticks when used). */
+#define SOC2_DOPPLER_MAX_SPAN 300
 
 /* glo_chan[] entry for a GLONASS slot without a known frequency channel. */
 #define GLO_CHAN_UNKNOWN 127
@@ -727,7 +808,8 @@ struct soc2_pred
     int64_t  num;
     uint64_t den;
     int      stencil;  /* rate: 0 backward, 1 central, 2 forward */
-    uint64_t max_span; /* rate: 1e-7 s units, 0 = unlimited */
+    uint64_t max_span; /* rate: in ticks, 0 = unlimited */
+    int64_t  ticks;    /* rate: ticks per second (not written) */
 };
 
 /* The plan for one signal of a satellite. */
@@ -959,14 +1041,17 @@ static int soc2_same_band(const struct rinex_system_data *p_sys,
 }
 
 /** Plan SOC2 coding for the signals of satellite \a sv: fills \a t7[]
- * (satellite epoch times, 1e-7 s; obs_used entries) and \a plans[]
+ * (satellite epoch times in ticks from rnx_epoch_ticks(), picoseconds if
+ * \a epo2 and otherwise 1e-7 s; obs_used entries) and \a plans[]
  * (p_sys->n_obs entries).  \a glo_chan_tab is from soc2_parse_glo_chan().
  * Returns 0, or -1 if out of memory. */
 static int soc2_plan_sv(const struct rinex_data *data,
     const struct rinex_satellite_data *sv,
     const struct rinex_system_data *p_sys, const signed char glo_chan_tab[100],
-    int64_t *t7, struct soc2_plan *plans)
+    int epo2, int64_t *t7, struct soc2_plan *plans)
 {
+    int64_t ticks = epo2 ? RNX_TICKS_PER_SEC_E12 : RNX_TICKS_PER_SEC_E7;
+    int64_t t0_e7 = data->epoch_used ? rnx_epoch_time_e7(&data->epoch[0]) : 0;
     int count = sv->obs_used, n_obs = p_sys->n_obs;
     char sys = sv->id[0];
     int *present;
@@ -981,7 +1066,7 @@ static int soc2_plan_sv(const struct rinex_data *data,
     {
         int ei;
         for (ei = sv->when[jj].start; ei < sv->when[jj].end; ++ei)
-            t7[kk++] = rnx_epoch_time_e7(&data->epoch[ei]);
+            t7[kk++] = rnx_epoch_ticks(&data->epoch[ei], epo2, t0_e7);
     }
 
     for (jj = 0; jj < n_obs; ++jj)
@@ -1038,6 +1123,7 @@ static int soc2_plan_sv(const struct rinex_data *data,
 
         memset(pred, 0, sizeof *pred);
         pred->den = 1;
+        pred->ticks = ticks;
         plans[jj].s_ref = -1;
         if (sv->start[jj] < 0)
             continue;
@@ -1069,7 +1155,7 @@ static int soc2_plan_sv(const struct rinex_data *data,
             pred->kind = SRNX_PRED_RATE;
             pred->ref = src;
             pred->stencil = 1;
-            pred->max_span = SOC2_DOPPLER_MAX_SPAN;
+            pred->max_span = (uint64_t)(SOC2_DOPPLER_MAX_SPAN * ticks);
             soc2_set_ratio(pred, -f_tgt, f_src);
         }
     }
@@ -1114,9 +1200,8 @@ static int soc2_build_seq(int64_t *seq, const int64_t *obs, int count,
                 int64_t dt = t7[bb] - t7[aa];
                 if (dt > 0 && (pr->max_span == 0 || (uint64_t)dt <= pr->max_span))
                 {
-                    pp = rnx_rdiv128((__int128)(ref_vals[bb] - ref_vals[aa])
-                        * 10000000 * pr->num, (__int128)dt * pr->den);
-                    avail = 1;
+                    avail = rnx_rate_predict(ref_vals[aa], ref_vals[bb], dt,
+                        pr->ticks, pr->num, pr->den, &pp);
                 }
             }
         }
@@ -2610,14 +2695,19 @@ static size_t write_sate_chunk(struct mmbuf *mm,
     return offset;
 }
 
-/* ---- Write EPOC chunk ---- */
+/* ---- Write EPOC or EPO2 chunk ---- */
 
-static size_t write_epoc_chunk(struct mmbuf *mm, const struct rinex_data *data)
+/** Writes the epochs of \a data as an EPO2 chunk if \a epo2, else EPOC.
+ * \returns The chunk's offset.
+ */
+static size_t write_epoc_chunk(struct mmbuf *mm, const struct rinex_data *data,
+    int epo2)
 {
+    const char *fourcc = epo2 ? "EPO2" : "EPOC";
     struct wbuf payload;
+    struct epoch_span span;
     size_t offset;
     int ii, span_start;
-    int64_t interval_e7;
 
     wbuf_init(&payload);
 
@@ -2627,71 +2717,19 @@ static size_t write_epoc_chunk(struct mmbuf *mm, const struct rinex_data *data)
     if (data->epoch_used == 0)
     {
         offset = mm->used;
-        write_chunk(mm, "EPOC", payload.data, payload.used);
+        write_chunk(mm, fourcc, payload.data, payload.used);
         wbuf_free(&payload);
         return offset;
     }
 
-    /* Build epoch spans. */
-    span_start = 0;
-    while (span_start < data->epoch_used)
+    /* Build epoch spans: interval, count-minus-1, date, time of day. */
+    for (span_start = 0; span_start < data->epoch_used; span_start += span.count)
     {
-        const struct rinex_epoch *e0 = &data->epoch[span_start];
-        int span_len = 1;
-        uint64_t date, time;
-
-        /* Determine interval from first two epochs in this span. */
-        interval_e7 = 0;
-        if (span_start + 1 < data->epoch_used)
-        {
-            const struct rinex_epoch *e1 = &data->epoch[span_start + 1];
-            /* Compute interval in sec_e7 units. */
-            interval_e7 = e1->sec_e7 - e0->sec_e7;
-            if (e1->hh_mm != e0->hh_mm)
-            {
-                int dmin = (e1->hh_mm / 100 - e0->hh_mm / 100) * 60
-                         + (e1->hh_mm % 100 - e0->hh_mm % 100);
-                interval_e7 += (int64_t)dmin * 600000000;
-            }
-            if (e1->yyyy_mm_dd != e0->yyyy_mm_dd)
-            {
-                /* Day boundary: just make a 1-epoch span. */
-                interval_e7 = 0;
-            }
-        }
-
-        /* Extend the span as far as possible. */
-        if (interval_e7 != 0)
-        {
-            while (span_start + span_len < data->epoch_used)
-            {
-                if (!same_span(&data->epoch[span_start + span_len - 1],
-                    &data->epoch[span_start + span_len], interval_e7))
-                    break;
-                span_len++;
-            }
-        }
-
-        /* Encode interval. */
-        if (interval_e7 != 0 && (interval_e7 % 10000000) == 0)
-            wbuf_sleb128(&payload, -(interval_e7 / 10000000));
-        else
-            wbuf_sleb128(&payload, interval_e7);
-
-        /* count-minus-1 */
-        wbuf_uleb128(&payload, span_len - 1);
-
-        /* date: YYYYMMDD */
-        date = e0->yyyy_mm_dd;
-        wbuf_uleb128(&payload, date);
-
-        /* time: HH*1e11 + MM*1e9 + SS_e7 */
-        time = (uint64_t)(e0->hh_mm / 100) * 100000000000ULL
-             + (uint64_t)(e0->hh_mm % 100) * 1000000000ULL
-             + (uint64_t)e0->sec_e7;
-        wbuf_uleb128(&payload, time);
-
-        span_start += span_len;
+        next_epoch_span(data, span_start, epo2, &span);
+        wbuf_sleb128(&payload, span.interval);
+        wbuf_uleb128(&payload, span.count - 1);
+        wbuf_uleb128(&payload, span.date);
+        wbuf_uleb128(&payload, span.time);
     }
 
     /* RLE-encode receiver clock offsets.
@@ -2718,7 +2756,7 @@ static size_t write_epoc_chunk(struct mmbuf *mm, const struct rinex_data *data)
     }
 
     offset = mm->used;
-    write_chunk(mm, "EPOC", payload.data, payload.used);
+    write_chunk(mm, fourcc, payload.data, payload.used);
     wbuf_free(&payload);
     return offset;
 }
@@ -2750,10 +2788,10 @@ static const char *rinex_header_start(const char *hdr, int len)
     return hdr;
 }
 
-/** Writes the SRNX header chunk. Returns the offset (within \a mm) of
- * the SDIR-offset field for later patching.
+/** Writes the SRNX header chunk, with minor version \a minor. Returns
+ * the offset (within \a mm) of the SDIR-offset field for later patching.
  */
-static size_t write_srnx_header(struct mmbuf *mm)
+static size_t write_srnx_header(struct mmbuf *mm, int minor)
 {
     char payload[SRNX_PAYLOAD_SIZE];
     struct wbuf tmp;
@@ -2764,12 +2802,12 @@ static size_t write_srnx_header(struct mmbuf *mm)
     memset(payload, 0, sizeof payload);
 
     /* Build payload into a fixed-size buffer.
-     * Fields: major=1, minor=1 (0 with --socd), chunk_digest=<g_chunk_digest_id>,
+     * Fields: major=1, minor=<minor>, chunk_digest=<g_chunk_digest_id>,
      * file_digest=<g_file_digest_id>, sdir_offset=0 (patched later), padding.
      */
     wbuf_init(&tmp);
     wbuf_uleb128(&tmp, 1); /* major */
-    wbuf_uleb128(&tmp, g_use_socd ? 0 : 1); /* minor: 1 when using SOC2 */
+    wbuf_uleb128(&tmp, (uint64_t)minor); /* 2 with EPO2, else 1 for SOC2 */
     wbuf_uleb128(&tmp, (uint64_t)g_chunk_digest_id); /* chunk digest */
     wbuf_uleb128(&tmp, (uint64_t)g_file_digest_id); /* file digest */
     /* sdir_offset starts here; leave as zeros for patching */
@@ -3012,7 +3050,7 @@ static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
     struct sdir_entry *sdir_entries = NULL;
     signed char glo_chan[100];
     int n_sdir = 0, sdir_alloc = 0;
-    int sys_idx, res, status = 0;
+    int sys_idx, res, status = 0, epo2;
 
     scratch_init(&scratch);
     g_output_name = output_name;
@@ -3029,8 +3067,16 @@ static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
     /* GLONASS frequency channels for SOC2 predictors. */
     soc2_parse_glo_chan(data.file_header, data.file_header_len, glo_chan);
 
+    /* Picosecond epoch times need an EPO2 chunk (and SRNX 1.2). */
+    epo2 = epochs_have_ps(&data);
+    if (epo2 && !rnx_epoch_ps_span_ok(data.epoch, (size_t)data.epoch_used))
+    {
+        fprintf(stderr, "%s: epochs span too long for EPO2\n", input_name);
+        status = 1; goto done;
+    }
+
     /* 1. Write SRNX header (with placeholder SDIR offset). */
-    sdir_field_offset = write_srnx_header(&mm);
+    sdir_field_offset = write_srnx_header(&mm, epo2 ? 2 : g_use_socd ? 0 : 1);
 
     /* 2. Write RHDR chunk (RINEX header only; skip any CRX preamble). */
     {
@@ -3041,8 +3087,8 @@ static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
         write_chunk(&mm, "RHDR", rhdr_start, (size_t)rhdr_len);
     }
 
-    /* 3. Write EPOC chunk. */
-    epoc_offset = write_epoc_chunk(&mm, &data);
+    /* 3. Write EPOC or EPO2 chunk. */
+    epoc_offset = write_epoc_chunk(&mm, &data, epo2);
 
     /* 4. Write EVTF chunks (special event records), if any. */
     evtf_offset = write_evtf_chunks(&mm, &data);
@@ -3089,7 +3135,7 @@ static int rnx2srnx(const char input_name[], struct rinex_data *p_data,
                 plans = calloc((size_t)n_obs, sizeof *plans);
                 t7 = calloc((size_t)p_sv->obs_used, sizeof *t7);
                 if (!plans || !t7
-                    || soc2_plan_sv(&data, p_sv, p_sys, glo_chan, t7, plans) != 0)
+                    || soc2_plan_sv(&data, p_sv, p_sys, glo_chan, epo2, t7, plans) != 0)
                 {
                     free(plans);
                     free(t7);
@@ -4040,12 +4086,12 @@ static size_t rhdr_payload_bytes(const struct rinex_data *data)
     return (size_t)(len - (int)(start - hdr));
 }
 
-/* Replicate EPOC byte accounting from rnx2srnx, ignoring tuple choice. */
-static size_t epoc_payload_bytes(const struct rinex_data *data)
+/* Replicate EPOC/EPO2 byte accounting from rnx2srnx, ignoring tuple choice. */
+static size_t epoc_payload_bytes(const struct rinex_data *data, int epo2)
 {
     struct cbuf wb;
+    struct epoch_span span;
     int ii, span_start;
-    int64_t interval_e7;
 
     cbuf_init(&wb);
     cbuf_uleb128(&wb, (uint64_t)data->epoch_used);
@@ -4053,53 +4099,13 @@ static size_t epoc_payload_bytes(const struct rinex_data *data)
     if (data->epoch_used == 0)
         return wb.used;
 
-    span_start = 0;
-    while (span_start < data->epoch_used)
+    for (span_start = 0; span_start < data->epoch_used; span_start += span.count)
     {
-        const struct rinex_epoch *e0 = &data->epoch[span_start];
-        int span_len = 1;
-        uint64_t date, time;
-
-        interval_e7 = 0;
-        if (span_start + 1 < data->epoch_used)
-        {
-            const struct rinex_epoch *e1 = &data->epoch[span_start + 1];
-            interval_e7 = e1->sec_e7 - e0->sec_e7;
-            if (e1->hh_mm != e0->hh_mm)
-            {
-                int dmin = (e1->hh_mm / 100 - e0->hh_mm / 100) * 60
-                         + (e1->hh_mm % 100 - e0->hh_mm % 100);
-                interval_e7 += (int64_t)dmin * 600000000;
-            }
-            if (e1->yyyy_mm_dd != e0->yyyy_mm_dd)
-                interval_e7 = 0;
-        }
-
-        if (interval_e7 != 0)
-        {
-            while (span_start + span_len < data->epoch_used)
-            {
-                if (!same_span(&data->epoch[span_start + span_len - 1],
-                    &data->epoch[span_start + span_len], interval_e7))
-                    break;
-                span_len++;
-            }
-        }
-
-        if (interval_e7 != 0 && (interval_e7 % 10000000) == 0)
-            cbuf_sleb128(&wb, -(interval_e7 / 10000000));
-        else
-            cbuf_sleb128(&wb, interval_e7);
-        cbuf_uleb128(&wb, (uint64_t)(span_len - 1));
-
-        date = e0->yyyy_mm_dd;
-        cbuf_uleb128(&wb, date);
-        time = (uint64_t)(e0->hh_mm / 100) * 100000000000ULL
-             + (uint64_t)(e0->hh_mm % 100) * 1000000000ULL
-             + (uint64_t)e0->sec_e7;
-        cbuf_uleb128(&wb, time);
-
-        span_start += span_len;
+        next_epoch_span(data, span_start, epo2, &span);
+        cbuf_sleb128(&wb, span.interval);
+        cbuf_uleb128(&wb, (uint64_t)(span.count - 1));
+        cbuf_uleb128(&wb, span.date);
+        cbuf_uleb128(&wb, span.time);
     }
 
     {
@@ -4254,6 +4260,7 @@ struct file_ctx
     size_t epoc_bytes;
     size_t evtf_total_bytes;
     size_t fixed_pre_first_socd; /* SRNX + RHDR + EPOC + EVTFs on disk */
+    int epo2;              /* nonzero to write EPO2 rather than EPOC */
     int chunk_digest_len;
     int file_digest_len;
     /* --soc2 only: GLONASS frequency channel by slot (index 1..99), from
@@ -4317,7 +4324,7 @@ static int soc2_prepare_sv(struct file_ctx *ctx, struct sv_cache *svc,
     plans = malloc((size_t)n_obs * sizeof *plans);
     sym = malloc((size_t)count);
     if (!t7 || !plans || !sym
-        || soc2_plan_sv(data, sv, p_sys, ctx->glo_chan, t7, plans) != 0)
+        || soc2_plan_sv(data, sv, p_sys, ctx->glo_chan, ctx->epo2, t7, plans) != 0)
     {
         fprintf(stderr, "Out of memory\n");
         free(t7); free(plans); free(sym);
@@ -4432,7 +4439,13 @@ static int ctx_load(struct file_ctx *ctx, const char *filename)
 
     /* Compute tuple-independent chunk sizes. */
     ctx->rhdr_bytes = rhdr_payload_bytes(&ctx->data);
-    ctx->epoc_bytes = epoc_payload_bytes(&ctx->data);
+    ctx->epo2 = epochs_have_ps(&ctx->data);
+    if (ctx->epo2 && !rnx_epoch_ps_span_ok(ctx->data.epoch, (size_t)ctx->data.epoch_used))
+    {
+        fprintf(stderr, "%s: epochs span too long for EPO2\n", ctx->filename);
+        return -1;
+    }
+    ctx->epoc_bytes = epoc_payload_bytes(&ctx->data, ctx->epo2);
 
     {
         int ii;

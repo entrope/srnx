@@ -128,6 +128,67 @@ static inline int64_t rnx_epoch_time_e7(const struct rinex_epoch *ep)
         + ep->sec_e7;
 }
 
+/** SOC2 rate predictors count time in ticks of 1e-7 s in a file with an
+ * EPOC chunk, or of 1e-12 s in a file with an EPO2 chunk. */
+#define RNX_TICKS_PER_SEC_E7 10000000LL
+#define RNX_TICKS_PER_SEC_E12 1000000000000LL
+
+/** Timestamp of \a ep in SOC2 rate-predictor ticks: rnx_epoch_time_e7()
+ * if \a pico is zero, else picoseconds since the time \a t0_e7 (from
+ * rnx_epoch_time_e7()).  Only differences of these matter.  With
+ * \a pico, rnx_epoch_ps_span_ok() must have accepted the epochs, so that
+ * neither this nor a difference of two such ticks overflows when
+ * \a t0_e7 is one of those epochs.
+ */
+static inline int64_t rnx_epoch_ticks(const struct rinex_epoch *ep,
+    int pico, int64_t t0_e7)
+{
+    int64_t t7 = rnx_epoch_time_e7(ep);
+    return pico ? (t7 - t0_e7) * 100000 + ep->sec_ps : t7;
+}
+
+/** Checks that the \a n_epochs epochs at \a epochs span less than 2^63
+ * picoseconds, as the epochs of an EPO2 chunk must.
+ * \returns Nonzero if they do.
+ */
+static inline int rnx_epoch_ps_span_ok(const struct rinex_epoch *epochs,
+    size_t n_epochs)
+{
+    __int128 t_min = 0, t_max = 0, tt;
+    size_t ii;
+
+    for (ii = 0; ii < n_epochs; ++ii)
+    {
+        tt = (__int128)rnx_epoch_time_e7(&epochs[ii]) * 100000
+            + epochs[ii].sec_ps;
+        if (ii == 0 || tt < t_min)
+            t_min = tt;
+        if (ii == 0 || tt > t_max)
+            t_max = tt;
+    }
+    return t_max - t_min <= INT64_MAX;
+}
+
+/** Computes a SOC2 rate prediction, `(rb - ra) * ticks_per_sec * num /
+ * (dt * den)` rounded as rnx_rdiv128() does, into \a *p_pp.  \a dt and
+ * \a den must be positive.
+ * \returns Nonzero if the prediction is available, or zero if the
+ *   numerator does not fit in 128 bits (a valid file never needs that).
+ */
+static inline int rnx_rate_predict(int64_t ra, int64_t rb, int64_t dt,
+    int64_t ticks_per_sec, int64_t num, uint64_t den, int64_t *p_pp)
+{
+    __int128 prod;
+
+    if (__builtin_mul_overflow((__int128)rb - ra, (__int128)ticks_per_sec, &prod)
+        || __builtin_mul_overflow(prod, (__int128)num, &prod))
+    {
+        return 0;
+    }
+    *p_pp = rnx_rdiv128(prod, (__int128)dt * den);
+    return 1;
+}
+
 /** Predicted SSI digit ('1'..'9') for a signal-strength value \a s in
  * milli-units (thousandths of dB-Hz), per the SOC2 SSI reference rule. */
 static inline char rnx_ssi_from_strength(int64_t s)
@@ -236,6 +297,18 @@ struct crx_v23_parser
 
     /** clk_state holds the differential state for the receiver clock offset. */
     struct obs_state clk_state;
+
+    /** picosec holds the text of the latest picosecond digits of the
+     * epoch (CRINEX 3.1), or is empty if none have been seen yet.  Like
+     * CRX2RNX, these persist until changed, even across initialization
+     * of the epoch line.
+     */
+    char picosec[6];
+
+    /** has_picosec is nonzero if clock offset lines may carry picosecond
+     * digits (CRINEX 3.1).
+     */
+    char has_picosec;
 
     /** sattab is a reusable satellite reorder table for v2 delta epochs.
      * sattab[i] is the index of the i-th new satellite in the old list,
@@ -358,6 +431,14 @@ int rnx_copy_text(
  * \returns 0 on success, RINEX_ERR_BAD_FORMAT if a field is malformed.
  */
 int rnx_v34_parse_time(struct rinex_epoch *epoch, const char *line);
+
+/** rnx_v34_parse_ps parses RINEX 4.02's optional picosecond digits of an
+ * epoch's seconds (format 1X,I5.5, following the receiver clock offset)
+ * from the \a len bytes at \a field into \a epoch.  \a len is zero when
+ * the field is absent.
+ * \returns 0 on success, RINEX_ERR_BAD_FORMAT if the field is malformed.
+ */
+int rnx_v34_parse_ps(struct rinex_epoch *epoch, const char *field, int len);
 
 int rnx_v2_parse_time(
     struct rnx_v234_parser *p,

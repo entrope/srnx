@@ -15,7 +15,8 @@
 #include <unistd.h>
 
 /** Formats a human-readable epoch timestamp.
- * Output format: "YYYY-MM-DD HH:MM:SS.fffffff" (27 chars + NUL).
+ * Output format: "YYYY-MM-DD HH:MM:SS.fffffff" (27 chars + NUL), with
+ * five more digits of seconds if the epoch has picoseconds.
  */
 char *rnx_format_epoch(char buf[], const struct rinex_epoch *epoch)
 {
@@ -27,8 +28,12 @@ char *rnx_format_epoch(char buf[], const struct rinex_epoch *epoch)
     int sec = epoch->sec_e7 / 10000000;
     int frac = epoch->sec_e7 % 10000000;
 
-    snprintf(buf, 64, "%04d-%02d-%02d %02d:%02d:%02d.%07d",
-        yy, mm, dd, hh, mi, sec, frac);
+    if (epoch->has_ps)
+        snprintf(buf, 64, "%04d-%02d-%02d %02d:%02d:%02d.%07d%05d",
+            yy, mm, dd, hh, mi, sec, frac, epoch->sec_ps);
+    else
+        snprintf(buf, 64, "%04d-%02d-%02d %02d:%02d:%02d.%07d",
+            yy, mm, dd, hh, mi, sec, frac);
     return buf;
 }
 
@@ -630,6 +635,10 @@ static const char *observation_event(const struct rinex_parser *p, int version,
             fprintf(file, "%6s", "");
             failed |= event_fixed(file, ep->clock_offset, 12, 15);
         }
+        else if (ep->has_ps)
+            fprintf(file, "%21s", "");
+        if (ep->has_ps)
+            fprintf(file, " %05d", ep->sec_ps);
         fputc('\n', file);
     }
 

@@ -64,7 +64,7 @@ enum cat {
     CAT_DIGESTS,        /* per-chunk and file-level digest bytes */
     CAT_SRNX_HDR,       /* SRNX chunk payload (5 ULEB128s + padding) */
     CAT_RHDR,           /* RHDR chunk payload (RINEX text header) */
-    CAT_EPOC,           /* EPOC chunk payload */
+    CAT_EPOC,           /* EPOC or EPO2 chunk payload */
     CAT_SDIR,           /* SDIR chunk payload */
     CAT_EVTF,           /* EVTF chunk payloads */
     CAT_SATE_PRESENCE,  /* SATE chunk payloads (name + signal offsets + presence RLE) */
@@ -484,7 +484,8 @@ static int split_file(const char *filename)
 
         enum cat payload_cat;
         if (memcmp(fourcc, "RHDR", 4) == 0)         payload_cat = CAT_RHDR;
-        else if (memcmp(fourcc, "EPOC", 4) == 0)    payload_cat = CAT_EPOC;
+        else if (memcmp(fourcc, "EPOC", 4) == 0
+            || memcmp(fourcc, "EPO2", 4) == 0)        payload_cat = CAT_EPOC;
         else if (memcmp(fourcc, "SDIR", 4) == 0)    payload_cat = CAT_SDIR;
         else if (memcmp(fourcc, "EVTF", 4) == 0)    payload_cat = CAT_EVTF;
         else if (memcmp(fourcc, "SATE", 4) == 0)    payload_cat = CAT_SATE_PRESENCE;

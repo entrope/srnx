@@ -4,14 +4,16 @@
 
 ### Format Version
 
-This file describes revision 1.1 of the Succinct RINEX (SRNX) file
+This file describes revision 1.2 of the Succinct RINEX (SRNX) file
 format.
 Revision 1.1 adds the [`SOC2`](#soc2) chunk, an alternative to `SOCD`
 that adds cross-signal prediction, signal-strength indicators predicted
 from signal-strength observations, delta-coder resets, and split
 Golomb-Rice coding of observation values.
-A file that uses only the chunks of revision 1.0 remains a valid
-revision 1.0 file.
+Revision 1.2 adds the [`EPO2`](#epo2) chunk, an alternative to `EPOC`
+that holds epoch times with the picosecond resolution of RINEX 4.02.
+A file that uses only the chunks of an earlier revision remains a valid
+file of that revision.
 
 ### Introduction
 
@@ -71,8 +73,9 @@ occur in a single SRNX file.
 | FOURCC | Count | Description |
 | :----: | :----------: | :---------- |
 | [SRNX](#srnx) | 1 | Succinct RINEX header |
-| [RHDR](#rhdr) | 1 | RINEX (2.x or 3.x) file header |
+| [RHDR](#rhdr) | 1 | RINEX (2.x, 3.x or 4.x) file header |
 | [EPOC](#epoc) | 0..1 | Epoch record information |
+| [EPO2](#epo2) | 0..1 | Epoch record information, with picoseconds |
 | [EVTF](#evtf) | Any | Special event flag and data |
 | [SOCD](#socd) | Any | Satellite observation code data |
 | [SOC2](#soc2) | Any | Satellite observation code data, version 2 |
@@ -81,13 +84,15 @@ occur in a single SRNX file.
 
 The first chunk of an SRNX file MUST be `SRNX`.
 The second chunk of an SRNX file MUST be `RHDR`.
-If an `EPOC` chunk is not present, the file MUST NOT have any `EVTF`,
-`SATE`, `SOCD` or `SOC2` chunks (it has no special events or
-observations).
+A file MUST NOT have both an `EPOC` and an `EPO2` chunk.
+In the rest of this document, the *epoch chunk* is whichever of the two
+is present.
+If neither is present, the file MUST NOT have any `EVTF`, `SATE`,
+`SOCD` or `SOC2` chunks (it has no special events or observations).
 
 Additional chunks, if any are present, MAY appear in any order, but:
 
-- The `EPOC` chunk, if present, SHOULD be the third chunk.
+- The epoch chunk, if present, SHOULD be the third chunk.
 - The file SHOULD store `EVTF` chunks consecutively.
 - The order of the table above means most offsets point "backwards"
   in the file, simplifying the creation of the SRNX file.
@@ -103,7 +108,8 @@ in this order:
 
 1. A major version identifier, currently 1.
 1. A minor version identifier: 0 if the file uses only revision 1.0
-   chunks, or 1 if it contains any `SOC2` chunk.
+   chunks, 1 if it contains any `SOC2` chunk but no `EPO2` chunk, or 2
+   if it contains an `EPO2` chunk.
 1. A per-chunk digest identifier, from [below](#digests).
 1. A file-level digest identifier.
 1. The file offset of the `SDIR` chunk, or zero if there is no such chunk.
@@ -119,7 +125,7 @@ an external source, such as the file system that holds the SRNX file.)
 
 A reader MUST reject a file whose minor version is greater than the
 greatest minor version it supports, because the file may contain
-observation chunks that the reader cannot decode.
+chunks that the reader cannot decode.
 
 When creating the SRNX file, the offset of the SDIR chunk might be
 unknown until all the other chunks are written.
@@ -128,14 +134,14 @@ once it is known.
 
 ### <a name="rhdr"></a>RHDR: RINEX Header
 
-The `RHDR` payload is simply the RINEX 2.x or 3.x file header, including
+The `RHDR` payload is simply the RINEX 2.x, 3.x or 4.x file header, including
 the newline following the END OF HEADER label.
 Each newline is represented as a single line feed (LF, '\n'; Unix
 style).
 
 ### <a name="sdir"></a>SDIR: Satellite Directory
 
-The `SDIR` payload consists of the file offset of the `EPOC` chunk,
+The `SDIR` payload consists of the file offset of the epoch chunk,
 followed by the file offset of the first `EVTF` chunk, followed by a
 sequence of satellite directory entries.
 If the `EVTF` file offset is zero, no special events are present.
@@ -154,15 +160,16 @@ observation or cycle-slip fields follow, including continuation lines,
 receiver clock offset, LLI and SSI fields. CRINEX input MUST be decoded
 to RINEX text before storing it here.
 
-A flag-1 or flag-6 record MUST NOT also be represented in EPOC, SATE,
-SOCD or SOC2. Its values do not participate in SOCD or SOC2 scaling,
+A flag-1 or flag-6 record MUST NOT also be represented in the epoch
+chunk, SATE, SOCD or SOC2. Its values do not participate in SOCD or SOC2 scaling,
 delta encoding, cross-signal prediction or predictor state updates.
 Reading EVTF does not reset a SOCD or SOC2 predictor.
 
 The epoch index is a ULEB128 indication of where the event record
 exists relative to flag-0 observation epochs: 0 indicates before the
 first flag-0 epoch, 1 indicates between the first and second, and so
-forth. A value equal to the EPOC epoch count indicates a trailing event.
+forth. A value equal to the epoch chunk's epoch count indicates a
+trailing event.
 Multiple EVTF records may share an index and timestamp; their original
 relative order MUST be preserved. EVTF records themselves do not
 increment this index.
@@ -209,6 +216,29 @@ the remainding receiver clock offsets are zero.
 The number of satellites observed in each epoch is not directly
 represented in the SRNX file.
 
+### <a name="epo2"></a>EPO2: Epoch records with picoseconds
+
+RINEX 4.02 allows an epoch record to append five more digits to its
+seconds field (which is then floored, rather than rounded, to 1e-7
+seconds), giving picosecond resolution.
+The `EPO2` payload represents such epochs.
+It is exactly like the `EPOC` payload except for the units of time:
+
+- A positive interval represents the interval in seconds times 1e12.
+  (A negative interval still represents the negated number of seconds.)
+- The ULEB128 for the initial time-of-day is hours times 1e16 plus
+  minutes times 1e14 plus seconds times 1e12.
+
+The earliest and latest epochs in an `EPO2` chunk MUST be less than 2^63
+picoseconds (about 106.75 days) apart, so that the difference between
+any two of its timestamps fits in a signed 64-bit integer.
+
+An encoder SHOULD write an `EPO2` chunk only when some epoch in its
+input has the extra digits of seconds, and an `EPOC` chunk otherwise.
+When converting to RINEX, a reader SHOULD write the extra digits for
+every epoch of an `EPO2` chunk (zero digits for an epoch that did not
+have them), and SHOULD NOT write them for an `EPOC` chunk.
+
 ### <a name="sate"></a>SATE: Satellite observations
 
 The `SATE` payload lists the observation times and codes for a single
@@ -239,7 +269,7 @@ For example, if this consists of the values `1 2 5 4 6`, the satellite
 was observed during two (1+1) spans of epochs:
 
 - six (5+1) epochs starting at the third (2+1) epoch described in the
-  `EPOC` chunk, and
+  epoch chunk, and
 - seven (6+1) epochs starting at the 14th epoch (4+1 epochs after the
   last epoch in the first span).
 
@@ -449,7 +479,7 @@ signal-strength indicators.
 | :--: | :----------------- | :---------------- |
 | 0 | none | none: every present value is coded directly |
 | 1 | ULEB128 reference `j`, SLEB128 `num`, ULEB128 `den` | `R[k] * num / den` |
-| 2 | ULEB128 reference `j`, SLEB128 `num`, ULEB128 `den`, ULEB128 stencil, ULEB128 `max_span` | `(R[b] - R[a]) * 10^7 * num / ((t[b] - t[a]) * den)` |
+| 2 | ULEB128 reference `j`, SLEB128 `num`, ULEB128 `den`, ULEB128 stencil, ULEB128 `max_span` | `(R[b] - R[a]) * U * num / ((t[b] - t[a]) * den)` |
 | 3 and above | reserved | |
 
 `R[k]` is the value of reference `j` at satellite epoch `k`.
@@ -461,16 +491,18 @@ For kind 2, the stencil selects satellite epochs `a` and `b`: 0 means
 `a = k - 1, b = k` (backward difference), 1 means `a = k - 1, b = k + 1`
 (central difference), and 2 means `a = k, b = k + 1` (forward
 difference); other stencil values are reserved.
-`t[k]` is the timestamp of satellite epoch `k` from the `EPOC` chunk, in
-units of 1e-7 seconds, counted continuously across day boundaries.
-`max_span` is in units of 1e-7 seconds; zero means unlimited.
+`t[k]` is the timestamp of satellite epoch `k` from the epoch chunk, in
+units of `1/U` seconds, counted continuously across day boundaries,
+where `U` is 10^7 with an `EPOC` chunk and 10^12 with an `EPO2` chunk.
+`max_span` is in the same units; zero means unlimited.
 
 A prediction is *available* at satellite epoch `k` when:
 
 - for kind 1, `R[k]` is present;
 - for kind 2, `a` and `b` are both satellite epochs, `R[a]` and `R[b]`
-  are both present, `t[b] > t[a]`, and either `max_span` is zero or
-  `t[b] - t[a] <= max_span`.
+  are both present, `t[b] > t[a]`, either `max_span` is zero or
+  `t[b] - t[a] <= max_span`, and `(R[b] - R[a]) * U * num` fits in a
+  128-bit signed integer.
 
 Predictions MUST be computed exactly, with intermediate products held in
 at least 128-bit signed integers, and the division rounded to the
