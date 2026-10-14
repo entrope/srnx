@@ -220,6 +220,28 @@ void free_rinex_data(struct rinex_data *data);
  */
 const char *rinex_load_file(const char *filename, struct rinex_data *out);
 
+/** Fills isolated gaps in Doppler observations with zeros.
+ *
+ * Before rinex_load() kept explicit zeros, it treated a 0.000 without
+ * an LLI as missing, so SRNX files converted then lack zero Doppler
+ * values, which are common for geostationary satellites.  This guesses
+ * where those were: a Doppler observation (code starting with 'D') that
+ * is missing at an epoch where its satellite was observed, between two
+ * present observations at the satellite's adjacent epochs in the same
+ * run of epochs, each with magnitude at most \a max_abs.  It does not
+ * change the LLI or SSI.
+ *
+ * \param[in,out] data Loaded data to update.
+ * \param[in] max_abs Largest magnitude of the neighboring values, in
+ *   thousandths of Hz.
+ * \param[out] first If not NULL, receives a description of the first
+ *   filled observation, if any.
+ * \param[in] first_size Size of \a first in bytes.
+ * \returns The number of observations filled.
+ */
+int rinex_fill_zero_doppler(struct rinex_data *data, int64_t max_abs,
+    char first[], size_t first_size);
+
 /** Formats a human-readable epoch timestamp into \a buf.
  *
  * \param[out] buf       Destination buffer (at least 64 bytes).

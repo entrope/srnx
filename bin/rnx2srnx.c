@@ -1265,6 +1265,14 @@ static int g_use_socd;
  * the version that would be written. */
 static int g_recompress;
 
+/* With --fill-zero-doppler, the largest neighbor of a Doppler gap in
+ * SRNX input to fill with zero, in thousandths of Hz; else negative. */
+static int64_t g_fill_max_abs = -1;
+
+/* The text of the --fill-zero-doppler option, for --check to pass to
+ * rnxcmp. */
+static const char *g_fill_arg;
+
 /* Exit status when an SRNX input is not re-encoded because it is
  * already the version that would be written (or newer). */
 #define EXIT_ALREADY_CURRENT 2
@@ -2951,21 +2959,14 @@ static void append_file_digest(struct mmbuf *mm)
 
 /* ---- Main converter ---- */
 
-/** Decides whether to re-encode an SRNX input of version \a major.\a minor.
- *
- * \returns Non-zero, after reporting it, if the input is already at least
- *   the version this run would write and --recompress was not given.
+/** Returns nonzero if SRNX version \a major.\a minor is at least the
+ * version this run would write.
  */
-static int srnx_already_current(const char input_name[], int major, int minor)
+static int srnx_is_current(int major, int minor)
 {
     int out_minor = g_use_socd ? 0 : 1;
 
-    if (g_recompress || major < 1 || (major == 1 && minor < out_minor))
-        return 0;
-    fprintf(stderr, "%s is already SRNX %d.%d; use --recompress to"
-        " re-encode it\n", strcmp(input_name, "-") ? input_name : "stdin",
-        major, minor);
-    return 1;
+    return major > 1 || (major == 1 && minor >= out_minor);
 }
 
 /** Loads \a input_name ("-" for stdin) into \a data, unless it is SRNX
@@ -2973,10 +2974,14 @@ static int srnx_already_current(const char input_name[], int major, int minor)
  * start of the (decompressed) input, before decoding, so versions that
  * this library cannot decode are recognized too.
  *
+ * \param[out] p_srnx Receives 0 if the input is not SRNX, 1 if it is
+ *   SRNX older than this run would write, or 2 if it is SRNX at least
+ *   that version.
  * \returns Zero on success, EXIT_ALREADY_CURRENT if the input is SRNX
  *   that should not be re-encoded, or EXIT_FAILURE on error.
  */
-static int load_input(const char input_name[], struct rinex_data *data)
+static int load_input(const char input_name[], struct rinex_data *data,
+    int *p_srnx)
 {
     struct rinex_stream *stream, *decomp = NULL, *input;
     const char *err = NULL, *program;
@@ -3007,9 +3012,17 @@ static int load_input(const char input_name[], struct rinex_data *data)
         err = strerror(res);
         goto out;
     }
-    if (!srnx_peek_version(input->buffer, input->size, &major, &minor)
-        && srnx_already_current(input_name, major, minor))
+    *p_srnx = 0;
+    if (!srnx_peek_version(input->buffer, input->size, &major, &minor))
+        *p_srnx = srnx_is_current(major, minor) ? 2 : 1;
+    /* --fill-zero-doppler must decode current input to look for gaps,
+     * but not input newer than this library decodes (SRNX 1.2). */
+    if (*p_srnx == 2 && !g_recompress
+        && (g_fill_max_abs < 0 || major != 1 || minor > 2))
     {
+        fprintf(stderr, "%s is already SRNX %d.%d; use --recompress to"
+            " re-encode it\n", strcmp(input_name, "-") ? input_name : "stdin",
+            major, minor);
         status = EXIT_ALREADY_CURRENT;
         goto out;
     }
@@ -3256,9 +3269,12 @@ static int is_srnx_file_name(const char name[], size_t len)
  * \a input.  rnxcmp's stdout/stderr are inherited so its output (if any)
  * is visible directly.
  *
+ * \param[in] fill_arg If not NULL, a --fill-zero-doppler option for
+ *   rnxcmp, so it fills \a input's Doppler gaps as this run did.
  * \returns Zero if rnxcmp reports the files match, -1 otherwise.
  */
-static int run_check(const char *input, const char *output)
+static int run_check(const char *input, const char *output,
+    const char *fill_arg)
 {
     pid_t pid;
     int status;
@@ -3271,7 +3287,10 @@ static int run_check(const char *input, const char *output)
     }
     if (pid == 0)
     {
-        execlp("rnxcmp", "rnxcmp", input, output, (char *)NULL);
+        if (fill_arg)
+            execlp("rnxcmp", "rnxcmp", fill_arg, input, output, (char *)NULL);
+        else
+            execlp("rnxcmp", "rnxcmp", input, output, (char *)NULL);
         fprintf(stderr, "rnx2srnx: exec rnxcmp failed: %s\n", strerror(errno));
         _exit(127);
     }
@@ -3294,11 +3313,17 @@ static void usage(FILE *out, const char *argv0)
     fprintf(out, "Usage: %s [--chunk-digest=<id>] [--file-digest=<id>]\n"
         "          [--max-sleb-run=<N>] [--socd] [--order-search=scan|guess]\n"
         "          [--order-margin=<percent|off>] [--pred-margin=<percent|off>] [--check]\n"
-        "          [--recompress] [--] <input.rnx|input.srnx|-> [output.srnx]\n"
+        "          [--recompress] [--fill-zero-doppler[=<Hz>]]\n"
+        "          [--] <input.rnx|input.srnx|-> [output.srnx]\n"
         "'-' as input reads from stdin and requires an explicit output name.\n"
         "An input.srnx is replaced by default.  SRNX input that is already the\n"
         "  version that would be written (or newer) is left alone, with exit\n"
         "  status %d, unless --recompress is given.\n"
+        "--fill-zero-doppler repairs SRNX input from rnx2srnx versions that\n"
+        "  dropped zero Doppler values: it fills each missing Doppler value\n"
+        "  between two at adjacent epochs of at most <Hz> (default 10) with\n"
+        "  zero.  SRNX input that is already current is re-encoded only if\n"
+        "  that fills something.  It does not change RINEX input.\n"
         "--socd writes revision 1.0 SOCD chunks instead of SOC2.\n"
         "--order-search chooses how SOC2 delta orders are searched (default: guess).\n"
         "--order-margin=<percent|off> and --pred-margin=<percent|off> (default: 5)\n"
@@ -3315,7 +3340,7 @@ int main(int argc, char *argv[])
     struct rinex_data data;
     struct stat in_st, out_st;
     size_t name_len;
-    int ii, res, out_fd = -1, do_check = 0, opts_done = 0;
+    int ii, res, out_fd = -1, do_check = 0, opts_done = 0, srnx, n_filled = 0;
 
     for (ii = 1; ii < argc; ++ii)
     {
@@ -3362,6 +3387,24 @@ int main(int argc, char *argv[])
         if (!strcmp(arg, "--recompress"))
         {
             g_recompress = 1;
+            continue;
+        }
+        if (!strncmp(arg, "--fill-zero-doppler", 19)
+            && (arg[19] == '\0' || arg[19] == '='))
+        {
+            char *end;
+            double hz = 10.0;
+            if (arg[19] == '=')
+            {
+                hz = strtod(arg + 20, &end);
+                if (end == arg + 20 || *end != '\0' || !(hz >= 0 && hz <= 1e9))
+                {
+                    fprintf(stderr, "Invalid --fill-zero-doppler value '%s'\n", arg + 20);
+                    return EXIT_FAILURE;
+                }
+            }
+            g_fill_max_abs = (int64_t)(hz * 1000 + 0.5);
+            g_fill_arg = arg;
             continue;
         }
         if (parse_order_search(arg)
@@ -3415,11 +3458,35 @@ int main(int argc, char *argv[])
 
     /* Load the input first: SRNX input that is already current must
      * be skipped before any output (even a temporary file) is created. */
-    res = load_input(input_name, &data);
+    res = load_input(input_name, &data, &srnx);
     if (res)
     {
         free(output_name);
         return res;
+    }
+
+    /* Fill Doppler gaps in SRNX input, and leave current SRNX input
+     * alone if there were none. */
+    if (srnx && g_fill_max_abs >= 0)
+    {
+        char first[128];
+        const char *name = strcmp(input_name, "-") ? input_name : "stdin";
+
+        n_filled = rinex_fill_zero_doppler(&data, g_fill_max_abs, first,
+            sizeof first);
+        if (n_filled)
+        {
+            fprintf(stderr, "%s: filled %d Doppler gap%s with zero; first: %s\n",
+                name, n_filled, n_filled == 1 ? "" : "s", first);
+        }
+        else if (srnx == 2 && !g_recompress)
+        {
+            fprintf(stderr, "%s is already current and has no Doppler gaps"
+                " to fill\n", name);
+            free_rinex_data(&data);
+            free(output_name);
+            return EXIT_ALREADY_CURRENT;
+        }
     }
 
     /* Replacing the input (re-encoding SRNX in place) writes a new
@@ -3452,7 +3519,7 @@ int main(int argc, char *argv[])
 
     res = rnx2srnx(input_name, &data, write_name, out_fd);
     if (res == 0 && do_check && strcmp(input_name, "-") != 0
-        && run_check(input_name, write_name))
+        && run_check(input_name, write_name, n_filled ? g_fill_arg : NULL))
         res = EXIT_FAILURE;
     if (res == 0 && write_name != output_name
         && rename(write_name, output_name) != 0)

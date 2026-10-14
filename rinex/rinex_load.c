@@ -37,6 +37,60 @@ char *rnx_format_epoch(char buf[], const struct rinex_epoch *epoch)
     return buf;
 }
 
+int rinex_fill_zero_doppler(struct rinex_data *data, int64_t max_abs,
+    char first[], size_t first_size)
+{
+    const struct rinex_system_data *p_sys;
+    const struct rinex_satellite_data *p_sv;
+    int64_t *obs;
+    char when[64];
+    int sys_idx, svi, kk, rr, jj, base, len, n_filled = 0;
+
+    if (first && first_size)
+        first[0] = '\0';
+    for (sys_idx = 0; sys_idx < 32; ++sys_idx)
+    {
+        p_sys = &data->sys[sys_idx];
+        for (svi = p_sys->sv.start; svi < p_sys->sv.end; ++svi)
+        {
+            p_sv = data->sv[svi];
+            if (!p_sv)
+                continue;
+            for (kk = 0; kk < p_sys->n_obs; ++kk)
+            {
+                if (p_sys->obs[kk][0] != 'D' || p_sv->start[kk] < 0)
+                    continue;
+
+                /* Values are indexed by satellite epoch, so neighbors
+                 * must be in the same run of the satellite's epochs.
+                 */
+                obs = data->obs + p_sv->start[kk];
+                for (rr = base = 0; rr < p_sv->when_used; ++rr, base += len)
+                {
+                    len = p_sv->when[rr].end - p_sv->when[rr].start;
+                    for (jj = base + 1; jj < base + len - 1; ++jj)
+                    {
+                        if (obs[jj] != INT64_MIN
+                            || obs[jj - 1] == INT64_MIN || obs[jj + 1] == INT64_MIN
+                            || obs[jj - 1] > max_abs || obs[jj - 1] < -max_abs
+                            || obs[jj + 1] > max_abs || obs[jj + 1] < -max_abs)
+                            continue;
+                        obs[jj] = 0;
+                        if (!n_filled++ && first)
+                        {
+                            snprintf(first, first_size, "%s %.3s at %s",
+                                p_sv->id, p_sys->obs[kk], rnx_format_epoch(when,
+                                &data->epoch[p_sv->when[rr].start + jj - base]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return n_filled;
+}
+
 void free_rinex_data(struct rinex_data *data)
 {
     int ii, n_sv = 0;
