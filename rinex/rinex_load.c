@@ -37,6 +37,191 @@ char *rnx_format_epoch(char buf[], const struct rinex_epoch *epoch)
     return buf;
 }
 
+/** rinex_fill_zero_doppler() only fills a gap if the Doppler stays small
+ * for this long (in 1e-7 s) before and after it, as for geostationary
+ * satellites; other satellites' Doppler passes through zero faster.
+ */
+#define RNX_FILL_WINDOW_E7 (300 * 10000000LL)
+
+/* Documentation comment in rinex_load.h. */
+int rinex_written_by_teqc(const struct rinex_data *data)
+{
+    static const char pgm_run_by[] = "PGM / RUN BY / DATE";
+    const char *header = data->file_header, *end;
+    size_t size = data->file_header_len;
+    int ofs;
+
+    while (size > 0)
+    {
+        ofs = rnx_find_header(header, size, pgm_run_by, sizeof pgm_run_by);
+        if (ofs < 0)
+            break;
+        if (!strncmp(header + ofs, "teqc ", 5))
+            return 1;
+        end = memchr(header + ofs, '\n', size - ofs);
+        if (!end)
+            break;
+        size -= end + 1 - header;
+        header = end + 1;
+    }
+
+    return 0;
+}
+
+/** Checks that every present value in \a obs (one signal of \a p_sv) at
+ * the satellite's epochs within RNX_FILL_WINDOW_E7 of its satellite
+ * epoch \a jj, which is in run \a rr starting at satellite epoch
+ * \a base, has magnitude at most \a max_abs.  This looks across runs.
+ */
+static int rnx_fill_window_small(const struct rinex_data *data,
+    const struct rinex_satellite_data *p_sv, const int64_t *obs,
+    int rr, int base, int jj, int64_t max_abs)
+{
+    const struct rinex_range *when = p_sv->when;
+    int64_t t0;
+    int r2, b2, ii;
+
+    t0 = rnx_epoch_time_e7(&data->epoch[when[rr].start + jj - base]);
+    for (r2 = rr, b2 = base, ii = jj - 1; ii >= 0; --ii)
+    {
+        while (ii < b2)
+        {
+            --r2;
+            b2 -= when[r2].end - when[r2].start;
+        }
+        if (t0 - rnx_epoch_time_e7(&data->epoch[when[r2].start + ii - b2])
+            > RNX_FILL_WINDOW_E7)
+            break;
+        if (obs[ii] != INT64_MIN && (obs[ii] > max_abs || obs[ii] < -max_abs))
+            return 0;
+    }
+    for (r2 = rr, b2 = base, ii = jj + 1; ii < p_sv->obs_used; ++ii)
+    {
+        while (ii >= b2 + when[r2].end - when[r2].start)
+        {
+            b2 += when[r2].end - when[r2].start;
+            ++r2;
+        }
+        if (rnx_epoch_time_e7(&data->epoch[when[r2].start + ii - b2]) - t0
+            > RNX_FILL_WINDOW_E7)
+            break;
+        if (obs[ii] != INT64_MIN && (obs[ii] > max_abs || obs[ii] < -max_abs))
+            return 0;
+    }
+
+    return 1;
+}
+
+/** Describes in \a first (if not NULL) the observation \a code of
+ * \a p_sv at epoch index \a ee of \a data. */
+static void rnx_fill_describe(char first[], size_t first_size,
+    const struct rinex_data *data, const struct rinex_satellite_data *p_sv,
+    const char code[], int ee)
+{
+    char when[64];
+
+    if (first)
+    {
+        snprintf(first, first_size, "%s %.3s at %s", p_sv->id, code,
+            rnx_format_epoch(when, &data->epoch[ee]));
+    }
+}
+
+int rinex_fill_zero_doppler(struct rinex_data *data, int64_t max_abs,
+    char first[], size_t first_size)
+{
+    const struct rinex_system_data *p_sys;
+    const struct rinex_satellite_data *p_sv;
+    const int64_t *phase;
+    const char *lli, *ssi;
+    int64_t *obs;
+    int sys_idx, svi, kk, mm, rr, jj, base, len, teqc, n_filled = 0;
+
+    if (first && first_size)
+        first[0] = '\0';
+
+    /* teqc writes zeros as blanks, so its files had no zeros to lose,
+     * and any zero Doppler without indicators came from an earlier fill.
+     */
+    teqc = rinex_written_by_teqc(data);
+
+    for (sys_idx = 0; sys_idx < 32; ++sys_idx)
+    {
+        p_sys = &data->sys[sys_idx];
+        for (svi = p_sys->sv.start; svi < p_sys->sv.end; ++svi)
+        {
+            p_sv = data->sv[svi];
+            if (!p_sv)
+                continue;
+            for (kk = 0; kk < p_sys->n_obs; ++kk)
+            {
+                if (p_sys->obs[kk][0] != 'D' || p_sv->start[kk] < 0)
+                    continue;
+
+                obs = data->obs + p_sv->start[kk];
+                if (teqc)
+                {
+                    lli = data->lli + p_sv->start[kk];
+                    ssi = data->ssi + p_sv->start[kk];
+                    for (rr = base = 0; rr < p_sv->when_used; ++rr, base += len)
+                    {
+                        len = p_sv->when[rr].end - p_sv->when[rr].start;
+                        for (jj = base; jj < base + len; ++jj)
+                        {
+                            if (obs[jj] != 0 || lli[jj] != ' ' || ssi[jj] != ' ')
+                                continue;
+                            obs[jj] = INT64_MIN;
+                            if (!n_filled++)
+                            {
+                                rnx_fill_describe(first, first_size, data, p_sv,
+                                    p_sys->obs[kk], p_sv->when[rr].start + jj - base);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                /* Find the carrier phase of the same signal. */
+                for (mm = 0; mm < p_sys->n_obs; ++mm)
+                {
+                    if (p_sys->obs[mm][0] == 'L' && p_sv->start[mm] >= 0
+                        && !memcmp(p_sys->obs[mm] + 1, p_sys->obs[kk] + 1, 3))
+                        break;
+                }
+                if (mm == p_sys->n_obs)
+                    continue;
+                phase = data->obs + p_sv->start[mm];
+
+                /* Values are indexed by satellite epoch, so neighbors
+                 * must be in the same run of the satellite's epochs.
+                 */
+                for (rr = base = 0; rr < p_sv->when_used; ++rr, base += len)
+                {
+                    len = p_sv->when[rr].end - p_sv->when[rr].start;
+                    for (jj = base + 1; jj < base + len - 1; ++jj)
+                    {
+                        if (obs[jj] != INT64_MIN || phase[jj] == INT64_MIN
+                            || obs[jj - 1] == INT64_MIN || obs[jj + 1] == INT64_MIN
+                            || obs[jj - 1] > max_abs || obs[jj - 1] < -max_abs
+                            || obs[jj + 1] > max_abs || obs[jj + 1] < -max_abs
+                            || !rnx_fill_window_small(data, p_sv, obs, rr, base,
+                                jj, max_abs))
+                            continue;
+                        obs[jj] = 0;
+                        if (!n_filled++)
+                        {
+                            rnx_fill_describe(first, first_size, data, p_sv,
+                                p_sys->obs[kk], p_sv->when[rr].start + jj - base);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return n_filled;
+}
+
 void free_rinex_data(struct rinex_data *data)
 {
     int ii, n_sv = 0;

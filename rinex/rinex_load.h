@@ -220,6 +220,41 @@ void free_rinex_data(struct rinex_data *data);
  */
 const char *rinex_load_file(const char *filename, struct rinex_data *out);
 
+/** Fills isolated gaps in Doppler observations with zeros.
+ *
+ * Before rinex_load() kept explicit zeros, it treated a 0.000 without
+ * an LLI as missing, so SRNX files converted then lack zero Doppler
+ * values, which are common for geostationary satellites.  This guesses
+ * where those were: a Doppler observation (code starting with 'D') that
+ * is missing at an epoch where its satellite was observed with the
+ * carrier phase of the same signal (the 'L' code with the same band and
+ * attribute), between two present observations at the satellite's
+ * adjacent epochs in the same run of epochs, when every present value
+ * of the signal within five minutes (in any run) has magnitude at most
+ * \a max_abs.  That last condition picks out geostationary satellites,
+ * whose Doppler stays near zero.  It does not change the LLI or SSI.
+ *
+ * If rinex_written_by_teqc() says teqc wrote \a data, nothing is filled,
+ * because teqc writes zeros as blanks, so the file had no zeros to lose.
+ * Instead, this blanks each zero Doppler observation whose LLI and SSI
+ * are blank: earlier versions of this function filled those.
+ *
+ * \param[in,out] data Loaded data to update.
+ * \param[in] max_abs Largest magnitude of the neighboring values, in
+ *   thousandths of Hz.
+ * \param[out] first If not NULL, receives a description of the first
+ *   filled (or blanked) observation, if any.
+ * \param[in] first_size Size of \a first in bytes.
+ * \returns The number of observations filled (or blanked).
+ */
+int rinex_fill_zero_doppler(struct rinex_data *data, int64_t max_abs,
+    char first[], size_t first_size);
+
+/** Returns nonzero if a PGM / RUN BY / DATE line of \a data's header
+ * names teqc, which writes zero observations as blanks.
+ */
+int rinex_written_by_teqc(const struct rinex_data *data);
+
 /** Formats a human-readable epoch timestamp into \a buf.
  *
  * \param[out] buf       Destination buffer (at least 64 bytes).

@@ -6,7 +6,9 @@
  * 0.000 as a present zero and a blank field as INT64_MIN (keeping any
  * LLI/SSI it has), that rinex_load() and rnx2srnx keep the zeros and
  * warn about blank fields with indicators, and that SRNX round trips
- * through srnx2rnx, rnxcmp and rinex-merge keep the zeros.
+ * through srnx2rnx, rnxcmp and rinex-merge keep the zeros.  Also checks
+ * that rnx2srnx --fill-zero-doppler repairs SRNX files written before
+ * that, and that rnxcmp --fill-zero-doppler matches it.
  */
 
 #include "rinex/rinex.h"
@@ -17,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <tap.h>
 
 #ifndef RNX2SRNX_PATH
@@ -146,6 +149,151 @@ static const char zero_crx[] =
     "0 -1000000 -1000 0\n"
     ;
 
+/* Doppler gaps as rnx2srnx left them before it kept explicit zeros.
+ * --fill-zero-doppler should fill C01 at 12:00:01 (between 0.5 and
+ * -0.3 Hz), C02 at 12:00:02 (between +/-10 Hz) and C03 at 12:00:06,
+ * but not gaps of two epochs, gaps at either end of a satellite's run
+ * of epochs (C03 is absent at 12:00:03), gaps in other observations
+ * (C03 S2I), gaps without the signal's carrier phase (C05), or gaps
+ * near a value larger than 10 Hz: next to it (C06 at 12:00:06) or
+ * within five minutes, even in another run (C06 at 12:00:01).
+ */
+#define GAP_HEADER \
+    "     3.04           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n"
+#define GAP_OBS_TYPES \
+    "C    4 C2I L2I D2I S2I                                      SYS / # / OBS TYPES\n" \
+    "     1.000                                                  INTERVAL\n" \
+    "                                                            END OF HEADER\n"
+
+#define GAP_OLD_BODY \
+    "> 2024 03 01 12 00  0.0000000  0  6\n" \
+    "C01  37000100.000   192000100.000           0.500          40.000\n" \
+    "C02  37000200.000   192000200.000                          41.000\n" \
+    "C03  37000300.000   192000300.000           1.000           5.000\n" \
+    "C04  20000400.000   105000400.000       -2500.000          39.000\n" \
+    "C05  37000500.000   192000500.000           0.200          40.000\n" \
+    "C06  37000600.000   192000600.000           3.000          40.000\n" \
+    "> 2024 03 01 12 00  1.0000000  0  6\n" \
+    "C01  37000101.000   192000105.000                          40.000\n" \
+    "C02  37000201.000   192000205.000          10.000          41.000\n" \
+    "C03  37000301.000   192000305.000           2.000\n" \
+    "C04  20000401.000   105000405.000                          39.000\n" \
+    "C05  37000501.000                                          40.000\n" \
+    "C06  37000601.000   192000605.000                          40.000\n" \
+    "> 2024 03 01 12 00  2.0000000  0  6\n" \
+    "C01  37000102.000   192000110.000          -0.300          40.000\n" \
+    "C02  37000202.000   192000210.000                          41.000\n" \
+    "C03  37000302.000   192000310.000                           5.000\n" \
+    "C04  20000402.000   105000410.000       -2499.000          39.000\n" \
+    "C05  37000502.000   192000510.000           0.100          40.000\n" \
+    "C06  37000602.000   192000610.000           2.000          40.000\n" \
+    "> 2024 03 01 12 00  3.0000000  0  4\n" \
+    "C01  37000103.000   192000115.000           0.200          40.000\n" \
+    "C02  37000203.000   192000215.000         -10.000          41.000\n" \
+    "C04  20000403.000   105000415.000       -2498.000          39.000\n" \
+    "C05  37000503.000   192000515.000           0.300          40.000\n" \
+    "> 2024 03 01 12 00  4.0000000  0  6\n" \
+    "C01  37000104.000   192000120.000                          40.000\n" \
+    "C02  37000204.000   192000220.000                          41.000\n" \
+    "C03  37000304.000   192000320.000                           5.000\n" \
+    "C04  20000404.000   105000420.000       -2497.000          39.000\n" \
+    "C05\n" \
+    "C06  37000604.000   192000620.000          25.000          40.000\n" \
+    "> 2024 03 01 12 00  5.0000000  0  6\n" \
+    "C01  37000105.000   192000125.000                          40.000\n" \
+    "C02  37000205.000   192000225.000                          41.000\n" \
+    "C03  37000305.000   192000325.000           1.000           5.000\n" \
+    "C04  20000405.000   105000425.000       -2496.000          39.000\n" \
+    "C05  37000505.000   192000525.000           0.100          40.000\n" \
+    "C06  37000605.000   192000625.000           5.000          40.000\n" \
+    "> 2024 03 01 12 00  6.0000000  0  6\n" \
+    "C01  37000106.000   192000130.000           0.100          40.000\n" \
+    "C02  37000206.000   192000230.000           9.000          41.000\n" \
+    "C03  37000306.000   192000330.000                           5.000\n" \
+    "C04  20000406.000   105000430.000       -2495.000          39.000\n" \
+    "C05  37000506.000   192000530.000           0.200          40.000\n" \
+    "C06  37000606.000   192000630.000                          40.000\n" \
+    "> 2024 03 01 12 00  7.0000000  0  6\n" \
+    "C01  37000107.000   192000135.000                          40.000\n" \
+    "C02  37000207.000   192000235.000           2.000          41.000\n" \
+    "C03  37000307.000   192000335.000           1.500           5.000\n" \
+    "C04  20000407.000   105000435.000       -2494.000          39.000\n" \
+    "C05  37000507.000   192000535.000           0.300          40.000\n" \
+    "C06  37000607.000   192000635.000          10.001          40.000\n" \
+    ""
+
+#define GAP_FIXED_BODY \
+    "> 2024 03 01 12 00  0.0000000  0  6\n" \
+    "C01  37000100.000   192000100.000           0.500          40.000\n" \
+    "C02  37000200.000   192000200.000                          41.000\n" \
+    "C03  37000300.000   192000300.000           1.000           5.000\n" \
+    "C04  20000400.000   105000400.000       -2500.000          39.000\n" \
+    "C05  37000500.000   192000500.000           0.200          40.000\n" \
+    "C06  37000600.000   192000600.000           3.000          40.000\n" \
+    "> 2024 03 01 12 00  1.0000000  0  6\n" \
+    "C01  37000101.000   192000105.000           0.000          40.000\n" \
+    "C02  37000201.000   192000205.000          10.000          41.000\n" \
+    "C03  37000301.000   192000305.000           2.000\n" \
+    "C04  20000401.000   105000405.000                          39.000\n" \
+    "C05  37000501.000                                          40.000\n" \
+    "C06  37000601.000   192000605.000                          40.000\n" \
+    "> 2024 03 01 12 00  2.0000000  0  6\n" \
+    "C01  37000102.000   192000110.000          -0.300          40.000\n" \
+    "C02  37000202.000   192000210.000           0.000          41.000\n" \
+    "C03  37000302.000   192000310.000                           5.000\n" \
+    "C04  20000402.000   105000410.000       -2499.000          39.000\n" \
+    "C05  37000502.000   192000510.000           0.100          40.000\n" \
+    "C06  37000602.000   192000610.000           2.000          40.000\n" \
+    "> 2024 03 01 12 00  3.0000000  0  4\n" \
+    "C01  37000103.000   192000115.000           0.200          40.000\n" \
+    "C02  37000203.000   192000215.000         -10.000          41.000\n" \
+    "C04  20000403.000   105000415.000       -2498.000          39.000\n" \
+    "C05  37000503.000   192000515.000           0.300          40.000\n" \
+    "> 2024 03 01 12 00  4.0000000  0  6\n" \
+    "C01  37000104.000   192000120.000                          40.000\n" \
+    "C02  37000204.000   192000220.000                          41.000\n" \
+    "C03  37000304.000   192000320.000                           5.000\n" \
+    "C04  20000404.000   105000420.000       -2497.000          39.000\n" \
+    "C05\n" \
+    "C06  37000604.000   192000620.000          25.000          40.000\n" \
+    "> 2024 03 01 12 00  5.0000000  0  6\n" \
+    "C01  37000105.000   192000125.000                          40.000\n" \
+    "C02  37000205.000   192000225.000                          41.000\n" \
+    "C03  37000305.000   192000325.000           1.000           5.000\n" \
+    "C04  20000405.000   105000425.000       -2496.000          39.000\n" \
+    "C05  37000505.000   192000525.000           0.100          40.000\n" \
+    "C06  37000605.000   192000625.000           5.000          40.000\n" \
+    "> 2024 03 01 12 00  6.0000000  0  6\n" \
+    "C01  37000106.000   192000130.000           0.100          40.000\n" \
+    "C02  37000206.000   192000230.000           9.000          41.000\n" \
+    "C03  37000306.000   192000330.000           0.000           5.000\n" \
+    "C04  20000406.000   105000430.000       -2495.000          39.000\n" \
+    "C05  37000506.000   192000530.000           0.200          40.000\n" \
+    "C06  37000606.000   192000630.000                          40.000\n" \
+    "> 2024 03 01 12 00  7.0000000  0  6\n" \
+    "C01  37000107.000   192000135.000                          40.000\n" \
+    "C02  37000207.000   192000235.000           2.000          41.000\n" \
+    "C03  37000307.000   192000335.000           1.500           5.000\n" \
+    "C04  20000407.000   105000435.000       -2494.000          39.000\n" \
+    "C05  37000507.000   192000535.000           0.300          40.000\n" \
+    "C06  37000607.000   192000635.000          10.001          40.000\n" \
+    ""
+
+static const char gap_old_rnx[] = GAP_HEADER GAP_OBS_TYPES GAP_OLD_BODY;
+
+/* gap_old_rnx with its fillable gaps filled. */
+static const char gap_fixed_rnx[] = GAP_HEADER GAP_OBS_TYPES GAP_FIXED_BODY;
+
+/* gap_old_rnx and gap_fixed_rnx as teqc would write them; teqc never
+ * wrote zeros, so the zeros in the latter can only have been filled.
+ */
+#define GAP_TEQC_PGM \
+    "teqc  2019Jan25     NOAA/NOS/NGS/CORS   20240302 00:00:00UTCPGM / RUN BY / DATE\n"
+static const char gap_teqc_rnx[] = GAP_HEADER GAP_TEQC_PGM GAP_OBS_TYPES
+    GAP_OLD_BODY;
+static const char gap_teqc_fixed_rnx[] = GAP_HEADER GAP_TEQC_PGM
+    GAP_OBS_TYPES GAP_FIXED_BODY;
+
 #define N_EPOCHS 10
 #define N_SATS 3
 #define N_OBS 4
@@ -172,6 +320,11 @@ static const char *socd_path = "test_zero_obs_socd.srnx";
 static const char *back_path = "test_zero_obs_back.rnx";
 static const char *merge_path = "test_zero_obs_merge.rnx";
 static const char *log_path = "test_zero_obs.log";
+static const char *gap_old_path = "test_zero_obs_gap_old.rnx";
+static const char *gap_fixed_path = "test_zero_obs_gap_fixed.rnx";
+static const char *gap_srnx_path = "test_zero_obs_gap.srnx";
+static const char *gap_fill_path = "test_zero_obs_gap_fill.srnx";
+static const char *gap_out_path = "test_zero_obs_gap_out.srnx";
 
 static int write_file(const char *path, const char *text)
 {
@@ -357,6 +510,19 @@ static void check_load(const char *path, int n_dropped, const char *what)
     free_rinex_data(&data);
 }
 
+/* Returns the exit status of a command run by run(), or -1. */
+static int run_status(const char *fmt, const char *aa, const char *bb)
+{
+    int res = run(fmt, aa, bb);
+    return WIFEXITED(res) ? WEXITSTATUS(res) : -1;
+}
+
+/* Returns nonzero if files \a aa and \b bb have the same contents. */
+static int same_file(const char *aa, const char *bb)
+{
+    return run("cmp -s %s %s", aa, bb) == 0;
+}
+
 /* Returns nonzero if \a path contains \a needle. */
 static int file_contains(const char *path, const char *needle)
 {
@@ -370,6 +536,104 @@ static int file_contains(const char *path, const char *needle)
     fclose(in);
     buf[len] = '\0';
     return strstr(buf, needle) != NULL;
+}
+
+/* Checks rnx2srnx --fill-zero-doppler and rnxcmp --fill-zero-doppler. */
+static void check_fill(void)
+{
+    char cmd[1024];
+    const char *slash = strrchr(RNXCMP_PATH, '/');
+    int len = slash ? (int)(slash - RNXCMP_PATH) : 1;
+
+    ok(write_file(gap_old_path, gap_old_rnx) == 0
+        && write_file(gap_fixed_path, gap_fixed_rnx) == 0,
+        "wrote Doppler gap files");
+    remove(gap_srnx_path);
+    ok(run(RNX2SRNX_PATH " %s %s", gap_old_path, gap_srnx_path) == 0,
+        "rnx2srnx converts Doppler gap file");
+
+    /* RINEX input is not filled. */
+    remove(gap_out_path);
+    ok(run(RNX2SRNX_PATH " --fill-zero-doppler %s %s", gap_old_path,
+        gap_out_path) == 0, "fill: rnx2srnx converts RINEX");
+    ok(run(RNXCMP_PATH " %s %s >/dev/null 2>&1", gap_old_path, gap_out_path) == 0,
+        "fill: RINEX input is not filled");
+
+    /* Current SRNX input is filled in place. */
+    ok(run("cp %s %s", gap_srnx_path, gap_fill_path) == 0, "fill: copied SRNX");
+    ok(run(RNX2SRNX_PATH " --fill-zero-doppler %s 2>%s", gap_fill_path,
+        log_path) == 0, "fill: rnx2srnx fills SRNX in place");
+    ok(file_contains(log_path, "filled 3 Doppler gaps with zero; first: "
+        "C01 D2I at 2024-03-01 12:00:01"), "fill: reports the fills");
+    ok(run(RNXCMP_PATH " %s %s >/dev/null 2>&1", gap_fixed_path, gap_fill_path) == 0,
+        "fill: filled SRNX matches the expected RINEX");
+    ok(run(RNXCMP_PATH " %s %s >/dev/null 2>&1", gap_old_path, gap_fill_path) != 0,
+        "fill: filled SRNX differs from the gaps");
+    ok(run(RNXCMP_PATH " --fill-zero-doppler %s %s >/dev/null 2>&1",
+        gap_old_path, gap_fill_path) == 0,
+        "fill: rnxcmp --fill-zero-doppler fills the same gaps");
+
+    /* With nothing (more) to fill, current SRNX is left alone. */
+    ok(run("cp %s %s", gap_fill_path, gap_out_path) == 0, "fill: copied filled SRNX");
+    cmp_ok(run_status(RNX2SRNX_PATH " --fill-zero-doppler %s 2>%s",
+        gap_out_path, "/dev/null"), "==", 2, "fill: no gaps left gives exit status 2");
+    ok(same_file(gap_fill_path, gap_out_path), "fill: file without gaps is unchanged");
+    cmp_ok(run_status(RNX2SRNX_PATH " --fill-zero-doppler --recompress %s 2>%s",
+        gap_out_path, "/dev/null"), "==", 0,
+        "fill: --recompress re-encodes it anyway");
+
+    /* The threshold is adjustable, and checked. */
+    remove(gap_out_path);
+    ok(run(RNX2SRNX_PATH " --fill-zero-doppler=9.999 %s %s 2>test_zero_obs.log",
+        gap_srnx_path, gap_out_path) == 0, "fill: rnx2srnx with a lower threshold");
+    ok(file_contains(log_path, "filled 2 Doppler gaps"),
+        "fill: a lower threshold fills fewer gaps");
+    cmp_ok(run_status(RNX2SRNX_PATH " --fill-zero-doppler=x %s %s 2>/dev/null",
+        gap_srnx_path, gap_out_path), "==", 1, "fill: rejects a bad threshold");
+
+    /* Files that teqc wrote had no zeros to lose. */
+    ok(write_file(gap_old_path, gap_teqc_rnx) == 0, "fill: wrote teqc gap file");
+    remove(gap_fill_path);
+    ok(run(RNX2SRNX_PATH " %s %s", gap_old_path, gap_fill_path) == 0,
+        "fill: rnx2srnx converts teqc gap file");
+    ok(run("cp %s %s", gap_fill_path, gap_out_path) == 0, "fill: copied teqc SRNX");
+    cmp_ok(run_status(RNX2SRNX_PATH " --fill-zero-doppler %s 2>%s",
+        gap_out_path, "/dev/null"), "==", 2, "fill: teqc SRNX is not filled");
+    ok(same_file(gap_fill_path, gap_out_path), "fill: teqc SRNX is unchanged");
+
+    /* Zeros that were filled in teqc files are blanked again. */
+    ok(write_file(gap_fixed_path, gap_teqc_fixed_rnx) == 0,
+        "fill: wrote filled teqc gap file");
+    remove(gap_out_path);
+    ok(run(RNX2SRNX_PATH " %s %s", gap_fixed_path, gap_out_path) == 0,
+        "fill: rnx2srnx converts filled teqc gap file");
+    ok(run(RNX2SRNX_PATH " --fill-zero-doppler %s 2>%s", gap_out_path,
+        log_path) == 0, "fill: rnx2srnx blanks filled teqc SRNX in place");
+    ok(file_contains(log_path, "blanked 3 zero Doppler values, since teqc "
+        "wrote no zeros; first: C01 D2I at 2024-03-01 12:00:01"),
+        "fill: reports the blanked values");
+    ok(run(RNXCMP_PATH " %s %s >/dev/null 2>&1", gap_old_path, gap_out_path) == 0,
+        "fill: blanked teqc SRNX matches the gaps");
+    ok(run(RNXCMP_PATH " --fill-zero-doppler %s %s >/dev/null 2>&1",
+        gap_fixed_path, gap_out_path) == 0,
+        "fill: rnxcmp --fill-zero-doppler blanks the same values");
+    ok(write_file(gap_old_path, gap_old_rnx) == 0
+        && write_file(gap_fixed_path, gap_fixed_rnx) == 0,
+        "fill: rewrote gap files");
+
+    /* --check passes the option to rnxcmp (found through PATH). */
+    remove(gap_out_path);
+    snprintf(cmd, sizeof cmd, "PATH=%.*s:$PATH " RNX2SRNX_PATH
+        " --check --fill-zero-doppler %%s %%s 2>>test_zero_obs.log", len,
+        slash ? RNXCMP_PATH : ".");
+    ok(run(cmd, gap_srnx_path, gap_out_path) == 0, "fill: --check passes");
+
+    remove(gap_old_path);
+    remove(gap_fixed_path);
+    remove(gap_srnx_path);
+    remove(gap_fill_path);
+    remove(gap_out_path);
+    remove(log_path);
 }
 
 int main(void)
@@ -419,6 +683,8 @@ int main(void)
     ok(run(RINEX_MERGE_PATH " -o %s %s", merge_path, rnx_path) == 0,
         "rinex-merge copies a single input");
     check_parser(merge_path, 0, "rinex-merge");
+
+    check_fill();
 
     remove(rnx_path);
     remove(crx_path);

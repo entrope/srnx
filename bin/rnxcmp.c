@@ -30,6 +30,9 @@ struct obs_pair
 static struct obs_pair *obs_pairs[32];
 static int n_obs_pairs[32];
 static int full_mode;
+/* With --fill-zero-doppler, the largest neighbor of a filled Doppler gap
+ * in file1, in thousandths of Hz; else negative. */
+static int64_t fill_max_abs = -1;
 static const char *file1_name, *file2_name;
 
 /** found_mismatch exits immediately in non-full mode after a diff is found. */
@@ -865,13 +868,38 @@ static void compare_files(void)
 
 static void usage(FILE *out, const char *argv0)
 {
-    fprintf(out, "Usage: %s [--full] [--help] file1 file2\n", argv0);
+    fprintf(out, "Usage: %s [--full] [--fill-zero-doppler[=<Hz>]] [--help] file1 file2\n"
+        "--fill-zero-doppler fills file1's isolated Doppler gaps where the\n"
+        "  Doppler stays within <Hz> (default 10) with zeros first (or, if teqc\n"
+        "  wrote file1, blanks its zero Doppler values), as rnx2srnx does.\n",
+        argv0);
+}
+
+/** Parses --fill-zero-doppler[=<Hz>] in \a arg into fill_max_abs.
+ * \returns 1 if \a arg is that option, -1 if its value is bad, else 0.
+ */
+static int parse_fill_arg(const char *arg)
+{
+    char *end;
+    double hz = 10.0;
+
+    if (strncmp(arg, "--fill-zero-doppler", 19)
+        || (arg[19] != '\0' && arg[19] != '='))
+        return 0;
+    if (arg[19] == '=')
+    {
+        hz = strtod(arg + 20, &end);
+        if (end == arg + 20 || *end != '\0' || !(hz >= 0 && hz <= 1e9))
+            return -1;
+    }
+    fill_max_abs = (int64_t)(hz * 1000 + 0.5);
+    return 1;
 }
 
 int main(int argc, char *argv[])
 {
     const char *err;
-    int ii;
+    int ii, res;
 
     /* Parse arguments. */
     for (ii = 1; ii < argc; ++ii)
@@ -881,9 +909,15 @@ int main(int argc, char *argv[])
             usage(stdout, argv[0]);
             return EXIT_SUCCESS;
         }
-        if (!strcmp(argv[ii], "--full"))
+        res = parse_fill_arg(argv[ii]);
+        if (res < 0)
         {
-            full_mode = 1;
+            fprintf(stderr, "Invalid option '%s'\n", argv[ii]);
+            return EXIT_FAILURE;
+        }
+        if (res || !strcmp(argv[ii], "--full"))
+        {
+            full_mode |= !res;
             memmove(&argv[ii], &argv[ii + 1],
                 (argc - ii - 1) * sizeof(argv[0]));
             --argc;
@@ -915,6 +949,9 @@ int main(int argc, char *argv[])
         free_rinex_data(&data1);
         return EXIT_FAILURE;
     }
+
+    if (fill_max_abs >= 0)
+        rinex_fill_zero_doppler(&data1, fill_max_abs, NULL, 0);
 
     if (data1.n_dropped_flags)
     {
