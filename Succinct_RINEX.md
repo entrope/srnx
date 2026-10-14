@@ -99,6 +99,15 @@ Additional chunks, if any are present, MAY appear in any order, but:
 - Chunks with different FOURCC codes MAY be interleaved.
   This is helpful in reducing the offsets stored in the `SATE` chunks.
 
+### Zero Values
+
+Generally, values that are explicitly zero in an input file SHOULD be
+represented as explicit zeros, rather than absent or missing values,
+in SRNX.
+The RINEX specifications say that missing or unknown data may be
+represented as zero, but zero values are often meaningful for LLIs and
+for Doppler measurements (especially for geostationary satellites).
+
 ## Chunk Payload Definitions
 
 ### <a name="srnx"></a>SRNX: Succinct RINEX Header

@@ -635,11 +635,10 @@ static rinex_error_t srnx_v1_read(struct rinex_parser *p_)
             }
             else
             {
-                /* Absent observation: 0 with blank LLI/SSI, matching
-                 * the text and CRX parsers (RINEX treats blank and
-                 * zero fields as equivalent).
+                /* Absent observation: INT64_MIN with blank LLI/SSI,
+                 * matching the text and CRX parsers.
                  */
-                value = 0;
+                value = INT64_MIN;
                 lli = ' ';
                 ssi = ' ';
             }

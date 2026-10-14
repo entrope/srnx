@@ -92,7 +92,7 @@ void test_abmf00glp_rnx(void)
     ok(p->obs[ofs+13] == 44877, "obs 14 is 44.877");
     for (ii = 14; ii < 18; ++ii)
     {
-        ok(p->obs[ofs+ii] == 0, "obs N is zero");
+        ok(p->obs[ofs+ii] == INT64_MIN, "obs N is blank");
     }
 
     /* close the reader*/

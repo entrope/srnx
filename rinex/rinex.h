@@ -156,17 +156,19 @@ struct rinex_parser
 
     /** obs contains the parsed observation values, times 1000.
      *
-     * A missing or blank observation is represented as 0 with a blank
-     * (' ') entry in #lli and #ssi.  The RINEX standards declare blank
-     * and zero fields to be equivalent ways of writing an empty or
-     * unknown value, so a genuine 0.000 measurement with no indicator
-     * flags cannot be distinguished from a missing one.  The canonical
-     * "is this observation present" test is therefore:
+     * A missing or blank observation is represented as INT64_MIN.
+     * Its entries in #lli and #ssi hold any indicators the file gave
+     * for it (usually blanks).  An explicit 0.000 is a present zero:
+     * although the RINEX standards allow zero to mean an unknown value,
+     * zeros are often genuine, as with the Doppler of a geostationary
+     * satellite.  The canonical "is this observation present" test is
+     * therefore:
      *
-     *   obs[i] >= RINEX_MIN_OBS && (obs[i] != 0 || lli[i] != ' ')
+     *   obs[i] >= RINEX_MIN_OBS && obs[i] <= RINEX_MAX_OBS
      *
-     * (Values outside [RINEX_MIN_OBS, RINEX_MAX_OBS] do not occur in
-     * valid files and must also be treated as missing.)
+     * (Values outside [RINEX_MIN_OBS, RINEX_MAX_OBS] other than
+     * INT64_MIN do not occur in valid files and must also be treated
+     * as missing.)
      *
      * This is only valid when \a epoch.flag is 0, 1 or 6.  The
      * indexing is determined by #sats.

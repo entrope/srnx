@@ -45,9 +45,9 @@ static int find_sat(struct rinex_parser *p, char sys, int num)
     return -1;
 }
 
-static int is_missing(int64_t obs, char lli)
+static int is_missing(int64_t obs)
 {
-    return (obs < RINEX_MIN_OBS) || (obs == 0 && lli == ' ');
+    return (obs < RINEX_MIN_OBS) || (obs > RINEX_MAX_OBS);
 }
 
 int main(int argc, char *argv[])
@@ -168,7 +168,7 @@ int main(int argc, char *argv[])
                     char l1 = p1->lli[base1 + oi], l2 = p2->lli[base2 + oi];
                     char ss1 = p1->ssi[base1 + oi], ss2 = p2->ssi[base2 + oi];
 
-                    if (is_missing(v1, l1) && is_missing(v2, l2))
+                    if (is_missing(v1) && is_missing(v2))
                     {
                         continue;
                     }

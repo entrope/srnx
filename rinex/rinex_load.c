@@ -864,7 +864,19 @@ const char *rinex_load(struct rinex_stream *stream, struct rinex_data *out)
                 lli = p->lli[jj + kk];
                 ssi = p->ssi[jj + kk];
 
-                if (obs >= RINEX_MIN_OBS && (obs != 0 || lli != ' '))
+                if (obs < RINEX_MIN_OBS && (lli != ' ' || ssi != ' '))
+                {
+                    if (!out->n_dropped_flags++)
+                    {
+                        char when[64];
+                        snprintf(out->warning, sizeof out->warning,
+                            "blank observation with indicators '%c%c' for %s %.3s at %s",
+                            lli, ssi, p_sv->id, p_sys->obs[kk],
+                            rnx_format_epoch(when, &p->epoch));
+                    }
+                }
+
+                if (obs >= RINEX_MIN_OBS)
                 {
                     if (p_sv->start[kk] < 0)
                     {

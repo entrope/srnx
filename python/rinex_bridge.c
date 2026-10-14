@@ -62,6 +62,16 @@ int rb_epoch_count(const struct rinex_data *data)
     return data->epoch_used;
 }
 
+int rb_dropped_flags(const struct rinex_data *data)
+{
+    return data->n_dropped_flags;
+}
+
+const char *rb_warning(const struct rinex_data *data)
+{
+    return data->warning;
+}
+
 int rb_rinex_version(const struct rinex_data *data)
 {
     return data->rinex_version;

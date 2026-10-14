@@ -489,22 +489,22 @@ static int format_fixed(char *buf, int width, int64_t value, int frac_digits)
 }
 
 /** Format one observation as a 16-character F14.3,A1,A1 record.
- * Missing or out-of-range values are written as blanks.
+ * Missing or out-of-range values are written as blanks, followed by
+ * any LLI and SSI.
  */
 static void format_obs(char buf[16], int64_t obs, char lli, char ssi)
 {
     uint64_t mag;
     int pos, ii;
 
-    if (obs < RINEX_MIN_OBS || obs > RINEX_MAX_OBS
-        || (obs == 0 && lli == ' ' && ssi == ' '))
+    buf[14] = lli;
+    buf[15] = ssi;
+    if (obs < RINEX_MIN_OBS || obs > RINEX_MAX_OBS)
     {
-        memset(buf, ' ', 16);
+        memset(buf, ' ', 14);
         return;
     }
 
-    buf[14] = lli;
-    buf[15] = ssi;
     mag = obs < 0 ? -(uint64_t)obs : (uint64_t)obs;
     pos = 13;
     for (ii = 0; ii < 3; ++ii, mag /= 10)

@@ -45,7 +45,7 @@ static const char *rnx_neon_parse_obs
      * column 10, digits in columns 11-13, and a blank or digit for
      * LLI and SSI.  Requiring column 0 to be a blank or '-' keeps the
      * value within RINEX_{MIN,MAX}_OBS.  A missing value (14 blanks)
-     * may still carry LLI/SSI characters.
+     * may still carry LLI/SSI characters; it is reported as INT64_MIN.
      */
     const uint8x16_t m_obs_u8 = vreinterpretq_u8_s8(m_obs);
     const uint8x16_t c_sp = vceqq_u8(m_obs_u8, vdupq_n_u8(' '));
@@ -63,7 +63,8 @@ static const char *rnx_neon_parse_obs
             vandq_u8(c_minus, sign_ok)),
         vorrq_u8(vandq_u8(c_digit, l_digit), vandq_u8(c_dot, l_dot)));
     const uint8x16_t t_blank = vorrq_u8(c_sp, vandq_u8(c_digit, l_ind));
-    const int valid = vminvq_u8(t_ok) == 255 || vminvq_u8(t_blank) == 255;
+    const int is_value = vminvq_u8(t_ok) == 255;
+    const int valid = is_value || vminvq_u8(t_blank) == 255;
 
     /* Check whether the input contains a '-'.  "-.1  " is allowed. */
     const int8_t is_neg = vminvq_s8(vreinterpretq_s8_u8(vceqq_s8(v_minus, m_obs)));
@@ -79,7 +80,7 @@ static const char *rnx_neon_parse_obs
     int64_t obs_s64 = (int64_t)10000000 * vgetq_lane_s64(v_dig_s64, 0)
         + vgetq_lane_s64(v_dig_s64, 1);
     if (is_neg) obs_s64 = -obs_s64;
-    p->obs[idx] = obs_s64;
+    p->obs[idx] = is_value ? obs_s64 : INT64_MIN;
 
     const int8_t done = 16 + vaddvq_s8(m_mask);
     return valid ? (obs + done) : NULL; /* how far did we skip? */

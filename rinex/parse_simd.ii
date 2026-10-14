@@ -88,7 +88,7 @@ SIMD_FN(rinex_error_t, read_v2_observations)(
              */
             if ((*obs == '\n') || !memcmp(obs, blank, 16))
             {
-                p->base.obs[nn] = 0;
+                p->base.obs[nn] = INT64_MIN;
                 p->base.lli[nn] = ' ';
                 p->base.ssi[nn] = ' ';
                 if (*obs != '\n')
@@ -177,7 +177,7 @@ SIMD_FN(rinex_error_t, read_v34_observations)(
                 {
                     obs += 16;
                 }
-                p->base.obs[nn] = 0;
+                p->base.obs[nn] = INT64_MIN;
                 p->base.lli[nn] = ' ';
                 p->base.ssi[nn] = ' ';
                 continue;

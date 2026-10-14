@@ -191,6 +191,9 @@ static const char *crx_update_arc(
  * \param[in] base Index into diff/order arrays for this satellite's first obs.
  * \param[in] n_obs Number of observables for this satellite's system.
  * \param[in] is_init True if this is an initialization epoch.
+ * \param[in] crinex1 True for CRINEX 1, where a blank field's flags are
+ *   blank; CRINEX 3 keeps them independently of the field, as CRX2RNX
+ *   4.2.0 does.
  * \returns Pointer past the newline, or NULL on parse error.
  */
 static const char *crx_decompress_obs(
@@ -198,7 +201,8 @@ static const char *crx_decompress_obs(
     const char *line,
     int base,
     int n_obs,
-    int is_init)
+    int is_init,
+    int crinex1)
 {
     struct rinex_parser *p = &crx->base.base;
     int ii, d;
@@ -217,12 +221,12 @@ static const char *crx_decompress_obs(
         {
             /* Empty field: observation is missing/blank. */
             crx->state[d].used = 0;
-            p->obs[d] = 0;
+            p->obs[d] = INT64_MIN;
         }
         else
         {
             /* Arc initialization ("N&value") or continuation. */
-            if (s[1] == '&' && crx->state[d].used == 0)
+            if (crinex1 && s[1] == '&' && crx->state[d].used == 0)
             {
                 crx->state[d].lli = ' ';
                 crx->state[d].ssi = ' ';
@@ -269,8 +273,8 @@ static const char *crx_decompress_obs(
             s++;
         }
 
-        p->lli[d] = (crx->state[d].used == 0) ? ' ' : crx->state[d].lli;
-        p->ssi[d] = (crx->state[d].used == 0) ? ' ' : crx->state[d].ssi;
+        p->lli[d] = (crinex1 && crx->state[d].used == 0) ? ' ' : crx->state[d].lli;
+        p->ssi[d] = (crinex1 && crx->state[d].used == 0) ? ' ' : crx->state[d].ssi;
     }
 
     while (*s != '\n' && *s != '\0')
@@ -443,7 +447,7 @@ static rinex_error_t crx_v2_read_obs(
         p_->sats[ii].obs_0 = nn;
         pos += 3;
 
-        obs = crx_decompress_obs(crx, obs, nn, n_obs, is_init);
+        obs = crx_decompress_obs(crx, obs, nn, n_obs, is_init, 1);
         if (!obs)
         {
             p->parse_ofs = res;
@@ -1034,7 +1038,7 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
         p_->sats[ii].number = svn;
         p_->sats[ii].obs_0 = nn;
 
-        obs = crx_decompress_obs(crx, obs, nn, n_obs_sys, is_init);
+        obs = crx_decompress_obs(crx, obs, nn, n_obs_sys, is_init, 0);
         if (!obs)
         {
             p->parse_ofs = res;

@@ -1,6 +1,7 @@
 """Python wrapper for the RINEX parsing library via ctypes."""
 
 import ctypes
+import warnings
 import numpy as np
 from pathlib import Path
 
@@ -44,6 +45,12 @@ def _load_lib():
     _lib.rb_epoch_count.argtypes = [c_void_p]
     _lib.rb_epoch_count.restype = c_int
 
+    _lib.rb_dropped_flags.argtypes = [c_void_p]
+    _lib.rb_dropped_flags.restype = c_int
+
+    _lib.rb_warning.argtypes = [c_void_p]
+    _lib.rb_warning.restype = c_char_p
+
     _lib.rb_rinex_version.argtypes = [c_void_p]
     _lib.rb_rinex_version.restype = c_int
 
@@ -83,6 +90,11 @@ class RinexFile:
             detail = err.value.decode() if err.value else "unknown error"
             raise RuntimeError(f"Failed to load {filename}: {detail}")
         self.n_epochs = lib.rb_epoch_count(self._handle)
+        n_dropped = lib.rb_dropped_flags(self._handle)
+        if n_dropped:
+            warnings.warn(
+                f"{filename}: dropped indicators of {n_dropped} blank "
+                f"observations; first: {lib.rb_warning(self._handle).decode()}")
         self.rinex_version = lib.rb_rinex_version(self._handle)
         self.interval = lib.rb_interval(self._handle)
 

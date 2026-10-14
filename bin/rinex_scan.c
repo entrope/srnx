@@ -49,7 +49,7 @@ void process_file(struct rinex_parser *p, const char filename[])
             {
                 int64_t obs_val = p->obs[sat_ofs + jj];
                 int present = (obs_val >= RINEX_MIN_OBS)
-                    && (obs_val != 0 || p->lli[sat_ofs + jj] != ' ');
+                    && (obs_val <= RINEX_MAX_OBS);
                 tmp_sat_obs |= (uint64_t)present << jj;
                 n_obs += present;
             }

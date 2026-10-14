@@ -54,18 +54,18 @@ void test_at012000_crx(void)
     ok(p->obs[ofs+5] == 35250, "obs 6 is 35.250");
     ok(p->obs[ofs+6] == 13750, "obs 7 is 13.750");
     for (ii = 7; ii < lim; ++ii)
-        ok(p->obs[ofs+ii] == 0, "obs N is zero");
+        ok(p->obs[ofs+ii] == INT64_MIN, "obs N is blank");
 
     /* 20 tests: second satellite (R10) observations */
     ofs = p->sats[1].obs_0;
     ok(p->obs[ofs+0] == 117123934241, "obs 2,1 is 117123934.241");
-    ok(p->obs[ofs+1] == 0, "obs 2,2 is zero");
+    ok(p->obs[ofs+1] == INT64_MIN, "obs 2,2 is blank");
     ok(p->obs[ofs+2] == 21972148800, "obs 2,3 is 21972148.800");
-    ok(p->obs[ofs+3] == 0, "obs 2,4 is zero");
-    ok(p->obs[ofs+4] == 0, "obs 2,5 is zero");
+    ok(p->obs[ofs+3] == INT64_MIN, "obs 2,4 is blank");
+    ok(p->obs[ofs+4] == INT64_MIN, "obs 2,5 is blank");
     ok(p->obs[ofs+5] == 46000, "obs 2,6 is 46.000");
     for (ii = 6; ii < lim; ++ii)
-        ok(p->obs[ofs+ii] == 0, "obs 2,N is zero");
+        ok(p->obs[ofs+ii] == INT64_MIN, "obs 2,N is blank");
 
     /* 8 tests: second epoch (delta decompression) */
     err = p->read(p);

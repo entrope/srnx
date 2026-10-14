@@ -916,6 +916,17 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    if (data1.n_dropped_flags)
+    {
+        fprintf(stderr, "Warning: %s: dropped indicators of %d blank observations; first: %s\n",
+            file1_name, data1.n_dropped_flags, data1.warning);
+    }
+    if (data2.n_dropped_flags)
+    {
+        fprintf(stderr, "Warning: %s: dropped indicators of %d blank observations; first: %s\n",
+            file2_name, data2.n_dropped_flags, data2.warning);
+    }
+
     /* Compare the two files. */
     compare_files();
 

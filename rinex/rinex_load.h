@@ -123,6 +123,17 @@ struct rinex_data
      */
     char error[256];
 
+    /** warning describes the first blank observation whose LLI or SSI
+     * was not blank, or is empty if there was none.  The columns cannot
+     * hold indicators without a value, so rinex_load() drops them.
+     */
+    char warning[256];
+
+    /** n_dropped_flags counts the blank observations described by
+     * \a warning.
+     */
+    int n_dropped_flags;
+
     /** file_header contains a copy of the file header, with '\n' after
      * each line.
      */

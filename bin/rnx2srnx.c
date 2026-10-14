@@ -3019,6 +3019,11 @@ static int load_input(const char input_name[], struct rinex_data *data)
         err = rinex_load_file(input_name, data);
     else
         err = rinex_load(input, data);
+    if (!err && data->n_dropped_flags)
+    {
+        fprintf(stderr, "Warning: %s: dropped indicators of %d blank observations; first: %s\n",
+            input_name, data->n_dropped_flags, data->warning);
+    }
 
 out:
     if (err)

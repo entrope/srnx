@@ -323,7 +323,7 @@ void test_parse_errors_v3_columns(void)
         {
             ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == 20000000
                 && p->obs[0] == 28541439844 && p->lli[0] == ' ' && p->ssi[0] == '5'
-                && p->obs[1] == 0 && p->lli[1] == ' ' && p->ssi[1] == '5'
+                && p->obs[1] == INT64_MIN && p->lli[1] == ' ' && p->ssi[1] == '5'
                 && p->obs[2] == -1175101 && p->obs[3] == 35700,
                 "rinex v3 columns read() #2 succeeded");
         }

@@ -284,3 +284,17 @@ target_compile_definitions(test_picosec PRIVATE
 add_dependencies(test_picosec rnx2srnx rnx2srnx_search srnx2rnx rnxcmp)
 add_test(NAME picosec COMMAND test_picosec)
 set_property(TEST picosec PROPERTY LABELS function)
+
+add_executable(test_zero_obs test/test_zero_obs.c)
+target_link_libraries(test_zero_obs rinex tap m)
+target_compile_definitions(test_zero_obs PRIVATE
+    RNX2SRNX_PATH="$<TARGET_FILE:rnx2srnx>"
+    SRNX2RNX_PATH="$<TARGET_FILE:srnx2rnx>"
+    RNXCMP_PATH="$<TARGET_FILE:rnxcmp>"
+    RINEX_MERGE_PATH="$<TARGET_FILE:rinex-merge>")
+add_dependencies(test_zero_obs rnx2srnx srnx2rnx rnxcmp rinex-merge)
+add_test(NAME zero_obs COMMAND test_zero_obs)
+set_property(TEST zero_obs PROPERTY LABELS function)
+add_test(NAME zero_obs_std COMMAND test_zero_obs)
+set_property(TEST zero_obs_std PROPERTY LABELS function)
+set_property(TEST zero_obs_std PROPERTY ENVIRONMENT "RINEX_SIMD=std")

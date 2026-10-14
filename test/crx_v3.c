@@ -92,7 +92,7 @@ void test_abmf00glp_crx(void)
     ok(p->obs[ofs+12] == -1221317, "G15 obs 13 is -1221.317");
     ok(p->obs[ofs+13] == 44877, "G15 obs 14 is 44.877");
     for (ii = 14; ii < 18; ++ii)
-        ok(p->obs[ofs+ii] == 0, "G15 obs N is zero");
+        ok(p->obs[ofs+ii] == INT64_MIN, "G15 obs N is blank");
 
     /* 11 tests: second epoch (delta-decompressed) */
     err = p->read(p);

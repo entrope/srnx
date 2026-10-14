@@ -158,7 +158,8 @@ static const char *rnx_parse_obs
     char buf[16];
 
     /* A missing value may still carry LLI/SSI characters, or may be
-     * cut short by the end of the line.
+     * cut short by the end of the line.  It is reported as INT64_MIN,
+     * keeping those characters.
      */
     for (kk = 0; kk < 14 && obs[kk] == ' '; ++kk) {}
     if (kk == 14 || obs[kk] == '\n')
@@ -169,7 +170,7 @@ static const char *rnx_parse_obs
             buf[kk] = (*obs == '\n') ? ' ' : *obs++;
             if (buf[kk] != ' ' && (buf[kk] < '0' || buf[kk] > '9')) return NULL;
         }
-        p->obs[nn] = 0;
+        p->obs[nn] = INT64_MIN;
         p->lli[nn] = buf[14];
         p->ssi[nn] = buf[15];
         return obs;

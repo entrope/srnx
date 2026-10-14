@@ -572,7 +572,7 @@ static int64_t read_file(struct rinex_parser *p, const char filename[])
                 char lli_val = p->lli[jj + kk];
                 char ssi_val = p->ssi[jj + kk];
 
-                if (obs_val >= RINEX_MIN_OBS && (obs_val != 0 || lli_val != ' '))
+                if (obs_val >= RINEX_MIN_OBS && obs_val <= RINEX_MAX_OBS)
                 {
                     record(&sv->obs[kk], sv->n_obs, obs_val, lli_val, ssi_val);
                 }

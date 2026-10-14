@@ -154,6 +154,7 @@ static inline const char *rnx_avx2_parse_obs
     const char *obs,
     __m128i v_obs[],
     const int idx[],
+    int *blank_bits,
     int kk
 )
 {
@@ -175,7 +176,8 @@ static inline const char *rnx_avx2_parse_obs
      * column 10, digits in columns 11-13, and a blank or digit for
      * LLI and SSI.  Requiring column 0 to be a blank or '-' keeps the
      * value within RINEX_{MIN,MAX}_OBS.  A missing value (14 blanks)
-     * may still carry LLI/SSI characters.
+     * may still carry LLI/SSI characters; its bit in \a *blank_bits makes
+     * it INT64_MIN when stored.
      */
     const __m128i v_dig = _mm_sub_epi8(v_obs[kk], _mm_set1_epi8('0'));
     const int c_sp = _mm_movemask_epi8(_mm_cmpeq_epi8(v_obs[kk], v_sp));
@@ -191,6 +193,7 @@ static inline const char *rnx_avx2_parse_obs
     {
         return NULL;
     }
+    *blank_bits = (*blank_bits & ~(1 << kk)) | ((t_ok != 0xffff) << kk);
 
     if (kk == 7)
     {
@@ -230,6 +233,14 @@ static inline const char *rnx_avx2_parse_obs
         p->obs[idx[6]] = _mm256_extract_epi64(obs_47, 1);
         p->obs[idx[5]] = _mm256_extract_epi64(obs_47, 2);
         p->obs[idx[7]] = _mm256_extract_epi64(obs_47, 3);
+        if (*blank_bits)
+        {
+            for (kk = 0; kk < 8; ++kk)
+            {
+                if (*blank_bits & (1 << kk))
+                    p->obs[idx[kk]] = INT64_MIN;
+            }
+        }
     }
     return obs + cnt;
 }
@@ -238,6 +249,7 @@ static inline void rnx_avx2_parse_outro(
     struct rinex_parser *p,
     __m128i v_obs[],
     const int idx[],
+    int blank_bits,
     int kk
 )
 {
@@ -284,20 +296,28 @@ static inline void rnx_avx2_parse_outro(
         p->ssi[idx[0]] = _mm_extract_epi8(v_obs[0], 15);
         p->obs[idx[0]] = _mm256_extract_epi64(res_lo, 0);
     }
+
+    blank_bits &= (1 << kk) - 1;
+    for (kk = 0; blank_bits; ++kk, blank_bits >>= 1)
+    {
+        if (blank_bits & 1)
+            p->obs[idx[kk]] = INT64_MIN;
+    }
 }
 
 #define SIMD_PARSE_INTRO \
     __m128i v_obs[8]; \
     int idx[8]; \
+    int blank_bits = 0; \
     int kk = 0;
 
 #define SIMD_PARSE_OBS \
     idx[kk] = nn; \
-    obs = rnx_avx2_parse_obs(&p->base, obs, v_obs, idx, kk); \
+    obs = rnx_avx2_parse_obs(&p->base, obs, v_obs, idx, &blank_bits, kk); \
     kk = (kk + 1) & 7
 
 #define SIMD_PARSE_OUTRO \
-    if (kk) rnx_avx2_parse_outro(&p->base, v_obs, idx, kk);
+    if (kk) rnx_avx2_parse_outro(&p->base, v_obs, idx, blank_bits, kk);
 
 static int rnx_avx2_get_n_newlines_inner(
     const struct rinex_parser *p,
