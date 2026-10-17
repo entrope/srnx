@@ -268,12 +268,133 @@ void test_one_sat_crx(void)
     }
 }
 
+/* A CRX v3 file (from RNX2CRX 4.2.0) whose satellite list shrinks from
+ * G01 G02 to G01, keeps G01 through a delta line that only changes the
+ * time (shorter than the epoch line it updates), then grows to G01 G02
+ * G03.
+ */
+static const char sat_list_crx[] =
+    "3.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n"
+    "RNX2CRX ver.4.2.0                       17-Oct-26 14:54     CRINEX PROG / DATE\n"
+    "     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE\n"
+    "test                                                        PGM / RUN BY / DATE\n"
+    "G    2 C1C L1C                                              SYS / # / OBS TYPES\n"
+    "                                                            END OF HEADER\n"
+    "> 2020 07 07 00 00  0.0000000  0  2      G01G02\n"
+    "\n"
+    "3&20000000000 3&105000000000 &7&7\n"
+    "3&21000000000 3&110000000000 &7&7\n"
+    "                   3              1         &&&\n"
+    "\n"
+    "30000 150000\n"
+    "                 1 &\n"
+    "\n"
+    "0 0\n"
+    "                   3              3         G02G03\n"
+    "\n"
+    "0 0\n"
+    "3&21000090000 3&110000450000 &7&7\n"
+    "3&22000090000 3&115000450000 &7&7\n";
+
+void test_sat_list_crx(void)
+{
+    static const struct
+    {
+        int hh_mm, sec, n_sats;
+        int64_t c1c[3];
+    } want[] = {
+        { 0, 0, 2, { 20000000000LL, 21000000000LL } },
+        { 0, 30, 1, { 20000030000LL } },
+        { 1, 0, 1, { 20000060000LL } },
+        { 1, 30, 3, { 20000090000LL, 21000090000LL, 22000090000LL } },
+    };
+    struct rinex_stream *stream;
+    struct rinex_parser *p = NULL;
+    rinex_error_t err;
+    char *text;
+    int ii, jj, good;
+
+    text = replace_once(sat_list_crx, "", "");
+    stream = rinex_buffer_stream(text, (int)strlen(text));
+    if (rinex_open(&p, stream))
+        BAIL_OUT("rinex_open() failed for sat_list_crx");
+    for (ii = 0; ii < (int)(sizeof want / sizeof want[0]); ++ii)
+    {
+        err = p->read(p);
+        good = err == RINEX_SUCCESS && p->epoch.hh_mm == want[ii].hh_mm
+            && p->epoch.sec_e7 == want[ii].sec * 10000000
+            && p->epoch.n_sats == want[ii].n_sats;
+        for (jj = 0; good && jj < want[ii].n_sats; ++jj)
+        {
+            good = p->sats[jj].system == 'G' && p->sats[jj].number == jj + 1
+                && p->obs[p->sats[jj].obs_0] == want[ii].c1c[jj];
+        }
+        ok(good, "satellite-list CRX: epoch %d (%s)", ii + 1, p->errmsg);
+    }
+    ok(p->read(p) == RINEX_EOF, "satellite-list CRX: then EOF");
+    p->destroy(p);
+    stream->destroy(stream);
+    free(text);
+}
+
+/* A CRX v3 file like RNX2CRX 4.2.0 writes for 60 satellites (G01-G32,
+ * E01-E28) and then 61 (adding E29), so the epoch line is longer than
+ * the parser's initial 200-byte copy of it, and then grows.  The parser
+ * once left the grown copy without a NUL, so it read past the end.
+ */
+void test_long_epoch_crx(void)
+{
+    static const char header[] =
+        "3.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n"
+        "RNX2CRX ver.4.2.0                       17-Oct-26 14:57     CRINEX PROG / DATE\n"
+        "     3.04           OBSERVATION DATA    M                   RINEX VERSION / TYPE\n"
+        "test                                                        PGM / RUN BY / DATE\n"
+        "G    1 C1C                                                  SYS / # / OBS TYPES\n"
+        "E    1 C1C                                                  SYS / # / OBS TYPES\n"
+        "                                                            END OF HEADER\n"
+        "> 2020 07 07 00 00  0.0000000  0 60      ";
+    struct rinex_stream *stream;
+    struct rinex_parser *p = NULL;
+    rinex_error_t err;
+    char *text, *pos;
+    int ii;
+
+    text = calloc(1, 8192);
+    pos = text + sprintf(text, "%s", header);
+    for (ii = 0; ii < 60; ++ii)
+        pos += sprintf(pos, "%c%02d", ii < 32 ? 'G' : 'E', ii < 32 ? ii + 1 : ii - 31);
+    pos += sprintf(pos, "\n\n");
+    for (ii = 0; ii < 60; ++ii)
+        pos += sprintf(pos, "3&%lld &&\n", 20000000000LL + 1000000LL * ii);
+    pos += sprintf(pos, "%19s3%14s1%186sE29\n\n", "", "", "");
+    for (ii = 0; ii < 60; ++ii)
+        pos += sprintf(pos, "30000\n");
+    sprintf(pos, "3&20060030000 &&\n");
+
+    stream = rinex_buffer_stream(text, (int)strlen(text));
+    if (rinex_open(&p, stream))
+        BAIL_OUT("rinex_open() failed for the long epoch line CRX");
+    err = p->read(p);
+    if (err == RINEX_SUCCESS)
+        err = p->read(p);
+    ok(err == RINEX_SUCCESS && p->epoch.n_sats == 61
+        && p->sats[60].system == 'E' && p->sats[60].number == 29
+        && p->obs[p->sats[60].obs_0] == 20060030000LL,
+        "long epoch line CRX: 61 satellites in epoch 2 (%s)", p->errmsg);
+    ok(p->read(p) == RINEX_EOF, "long epoch line CRX: then EOF");
+    p->destroy(p);
+    stream->destroy(stream);
+    free(text);
+}
+
 int main(int argc, char *argv[])
 {
-    plan(85);
+    plan(92);
 
     test_abmf00glp_crx();
     test_one_sat_crx();
+    test_sat_list_crx();
+    test_long_epoch_crx();
 
     done_testing(); (void)argc; (void)argv;
 }

@@ -284,18 +284,67 @@ static const char *crx_decompress_obs(
     return s;
 }
 
-/** crx_line_space ensures \a crx->epoch_text >= \a line_len. */
+/** crx_line_space ensures \a crx->epoch_text can hold \a line_len
+ * characters and a NUL, keeping its contents (initially empty).
+ */
 static int crx_line_space(struct crx_v23_parser *crx, int line_len)
 {
+    char *text;
+
     if (crx->epoch_alloc <= line_len)
     {
         int new_len = crx->epoch_alloc * 2;
         if (new_len <= line_len)
             new_len = line_len + 1;
-        crx->epoch_text = realloc(crx->epoch_text, new_len);
-        if (!crx->epoch_text)
+        text = realloc(crx->epoch_text, new_len);
+        if (!text)
+        {
+            rnx_errorf(&crx->base.base, "allocation failed for epoch line of length %d", new_len);
             return RINEX_ERR_SYSTEM;
+        }
+        if (!crx->epoch_text)
+            text[0] = '\0';
+        crx->epoch_text = text;
+        crx->epoch_alloc = new_len;
     }
+
+    return 0;
+}
+
+/** crx_repair_epoch applies the delta epoch line \a line (\a line_len
+ * characters) to \a crx->epoch_text, as CRX2RNX's repair() does: a
+ * space keeps the old character, '&' makes it a space, and anything
+ * else replaces it.  Old text past the end of \a line is kept, and old
+ * text shorter than \a line is first padded with spaces.  Trailing
+ * spaces are then removed.
+ */
+static int crx_repair_epoch(struct crx_v23_parser *crx, const char *line,
+    int line_len)
+{
+    int ii, old_len, err;
+
+    err = crx_line_space(crx, line_len);
+    if (err)
+        return err;
+    old_len = strlen(crx->epoch_text);
+    if (old_len < line_len)
+    {
+        memset(crx->epoch_text + old_len, ' ', line_len - old_len);
+        crx->epoch_text[line_len] = '\0';
+        old_len = line_len;
+    }
+
+    for (ii = 0; ii < line_len; ++ii)
+    {
+        if (line[ii] == '&')
+            crx->epoch_text[ii] = ' ';
+        else if (line[ii] != ' ')
+            crx->epoch_text[ii] = line[ii];
+    }
+
+    while (old_len > 0 && crx->epoch_text[old_len - 1] == ' ')
+        old_len--;
+    crx->epoch_text[old_len] = '\0';
 
     return 0;
 }
@@ -625,30 +674,10 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     {
         int old_n_sats = p_->epoch.n_sats;
 
-        crx_line_space(crx, line_len);
-
         /* Apply the update(s) to the epoch header in epoch_text. */
-        for (ii = 1; ii < line_len; ++ii)
-        {
-            if (line[ii] == ' ')
-            {
-                /* leave the existing character */
-            }
-            else if (line[ii] == '&')
-            {
-                crx->epoch_text[ii] = ' ';
-            }
-            else
-            {
-                crx->epoch_text[ii] = line[ii];
-            }
-        }
-
-        /* Discard any residual trailing spaces. */
-        ii = strlen(crx->epoch_text);
-        while (ii > 0 && crx->epoch_text[ii - 1] == ' ')
-            ii--;
-        crx->epoch_text[ii] = '\0';
+        err = crx_repair_epoch(crx, line, line_len);
+        if (err < 0)
+            return err;
 
         /* Parse the timestamp, epoch flag, etc. */
         err = rnx_v2_parse_time(p, crx->epoch_text);
@@ -704,7 +733,9 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
     else if (line[28] == '0' || line[28] == '1' || line[28] == '6')
     {
         /* Observation epoch: copy the header line to epoch_text. */
-        crx_line_space(crx, line_len + 1);
+        err = crx_line_space(crx, line_len + 1);
+        if (err < 0)
+            return err;
         crx->epoch_text[0] = ' ';
         memcpy(crx->epoch_text + 1, line + 1, line_len - 1);
         crx->epoch_text[line_len] = '\0';
@@ -742,7 +773,9 @@ static rinex_error_t crx_read_v2(struct rinex_parser *p_)
          * can be parsed exactly as rnx_read_v2() parses them for the
          * uncompressed sibling file.
          */
-        crx_line_space(crx, line_len + 1);
+        err = crx_line_space(crx, line_len + 1);
+        if (err < 0)
+            return err;
         crx->epoch_text[0] = ' ';
         memcpy(crx->epoch_text + 1, line + 1, line_len - 1);
         crx->epoch_text[line_len] = '\0';
@@ -863,26 +896,24 @@ static rinex_error_t crx_read_v34(struct rinex_parser *p_)
     if (is_init)
     {
         /* Full initialization: copy entire epoch line to epoch_text. */
-        crx_line_space(crx, line_len);
+        err = crx_line_space(crx, line_len);
+        if (err < 0)
+        {
+            p->parse_ofs = res;
+            return err;
+        }
         memcpy(crx->epoch_text, line, line_len);
         crx->epoch_text[line_len] = '\0';
     }
     else
     {
         /* Delta: apply repair to epoch_text. */
-        crx_line_space(crx, line_len);
-        for (ii = 0; ii < line_len; ++ii)
+        err = crx_repair_epoch(crx, line, line_len);
+        if (err < 0)
         {
-            if (line[ii] == '&')
-                crx->epoch_text[ii] = ' ';
-            else if (line[ii] != ' ')
-                crx->epoch_text[ii] = line[ii];
+            p->parse_ofs = res;
+            return err;
         }
-        /* Trim trailing spaces. */
-        ii = strlen(crx->epoch_text);
-        while (ii > 0 && crx->epoch_text[ii - 1] == ' ')
-            ii--;
-        crx->epoch_text[ii] = '\0';
     }
 
     /* Parse epoch fields from epoch_text. */
