@@ -171,10 +171,10 @@ static inline const char *rnx_avx2_parse_obs
     v_obs[kk] = _mm_blendv_epi8(v_obs_2, v_sp, m_sp);
 
     /* Check that v_obs[kk] follows the F14.3,A1,A1 layout, column by
-     * column: a blank or '-' in column 0, then (through column 9)
-     * blanks or '-' only after a blank and digits anywhere, '.' in
-     * column 10, digits in columns 11-13, and a blank or digit for
-     * LLI and SSI.  Requiring column 0 to be a blank or '-' keeps the
+     * column: (through column 9) blanks or '-' only in column 0 or
+     * after a blank and digits anywhere, '.' in column 10, digits in
+     * columns 11-13, and a blank or digit for LLI and SSI.  Only a
+     * positive value can have a digit in column 0, which keeps the
      * value within RINEX_{MIN,MAX}_OBS.  A missing value (14 blanks)
      * may still carry LLI/SSI characters; its bit in \a *blank_bits makes
      * it INT64_MIN when stored.
@@ -187,7 +187,7 @@ static inline const char *rnx_avx2_parse_obs
         _mm_min_epu8(v_dig, _mm_set1_epi8(9)), v_dig));
     const int sign_ok = ((c_sp << 1) | 1) & 0x03ff;
     const int t_ok = (c_sp & (sign_ok | 0xc000)) | (c_minus & sign_ok)
-        | (c_digit & 0xfbfe) | (c_dot & 0x0400);
+        | (c_digit & 0xfbff) | (c_dot & 0x0400);
     const int t_blank = c_sp | (c_digit & 0xc000);
     if (t_ok != 0xffff && t_blank != 0xffff)
     {

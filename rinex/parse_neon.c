@@ -40,10 +40,10 @@ static const char *rnx_neon_parse_obs
     p->ssi[idx] = vgetq_lane_s8(m_obs, 15);
 
     /* Check that m_obs follows the F14.3,A1,A1 layout, column by
-     * column: a blank or '-' in column 0, then (through column 9)
-     * blanks or '-' only after a blank and digits anywhere, '.' in
-     * column 10, digits in columns 11-13, and a blank or digit for
-     * LLI and SSI.  Requiring column 0 to be a blank or '-' keeps the
+     * column: (through column 9) blanks or '-' only in column 0 or
+     * after a blank and digits anywhere, '.' in column 10, digits in
+     * columns 11-13, and a blank or digit for LLI and SSI.  Only a
+     * positive value can have a digit in column 0, which keeps the
      * value within RINEX_{MIN,MAX}_OBS.  A missing value (14 blanks)
      * may still carry LLI/SSI characters; it is reported as INT64_MIN.
      */
@@ -55,7 +55,7 @@ static const char *rnx_neon_parse_obs
     const uint8x16_t c_prev_sp = vextq_u8(vdupq_n_u8(0xff), c_sp, 15);
     const uint8x16_t l_int = {255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0};
     const uint8x16_t l_dot = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0};
-    const uint8x16_t l_digit = {0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 255, 255};
+    const uint8x16_t l_digit = {255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 255, 255};
     const uint8x16_t l_ind = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255};
     const uint8x16_t sign_ok = vandq_u8(c_prev_sp, l_int);
     const uint8x16_t t_ok = vorrq_u8(

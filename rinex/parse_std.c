@@ -178,8 +178,8 @@ static const char *rnx_parse_obs
 
     /* The value must follow the F14.3 layout: blanks, an optional minus
      * and digits in the first 10 characters, '.' in the 11th and digits
-     * in the next three.  The first character must be a blank or minus,
-     * which keeps the value within RINEX_{MIN,MAX}_OBS.
+     * in the next three.  Only a positive value may have a digit in the
+     * first column, which keeps the value within RINEX_{MIN,MAX}_OBS.
      */
     for (kk = 0; kk < 10; ++kk)
     {
@@ -192,10 +192,6 @@ static const char *rnx_parse_obs
         neg = 1;
         buf[kk++] = ' ';
         obs++;
-    }
-    else if (kk == 0)
-    {
-        return NULL;
     }
     for (; kk < 10; ++kk)
     {

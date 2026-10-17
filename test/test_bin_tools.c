@@ -17,10 +17,10 @@
  *    cannot decode), alone with exit status 2, unless given --recompress.
  *
  *  - srnx2rnx's format_observation() must format observation values
- *    correctly at the F14.3 boundary.  The sign position is mandatory
- *    (space for positive, '-' for negative), so a legal value has at
- *    most nine integer digits; the function right-justifies the value
- *    and places the sign at the leftmost digit.  The source is compiled
+ *    correctly at the F14.3 boundary.  As in Fortran, a positive value
+ *    may use all ten integer positions, but a negative one needs a
+ *    column for its '-'; the function right-justifies the value and
+ *    places any sign at the leftmost digit.  The source is compiled
  *    in directly so its static helper can be unit-tested.
  *
  *  - rnxcmp must compare epochs and special events by timestamp when the
@@ -364,11 +364,24 @@ int main(void)
         char storage[64];
         char *buf = storage + 32;   /* 32 guard bytes precede buf */
 
-        /* Legal maximum: nine integer digits, sign position a space. */
+        /* Nine integer digits, sign position a space. */
         memset(storage, 0, sizeof storage);
         format_observation(buf, 999999999999LL, ' ', ' ');
         ok(memcmp(buf, " 999999999.999  ", 16) == 0,
-            "format_observation: F14.3 max ' 999999999.999'");
+            "format_observation: nine digits ' 999999999.999'");
+
+        /* Legal maximum: ten integer digits fill the field. */
+        memset(storage, 0, sizeof storage);
+        format_observation(buf, 9999999999999LL, '1', '7');
+        ok(memcmp(buf, "9999999999.99917", 16) == 0
+            && storage[31] == 0,
+            "format_observation: F14.3 max '9999999999.999'");
+
+        /* Legal minimum: nine integer digits after the '-'. */
+        memset(storage, 0, sizeof storage);
+        format_observation(buf, -999999999999LL, ' ', ' ');
+        ok(memcmp(buf, "-999999999.999  ", 16) == 0,
+            "format_observation: F14.3 min '-999999999.999'");
 
         /* Normal value with an LLI indicator. */
         memset(storage, 0, sizeof storage);
@@ -386,8 +399,8 @@ int main(void)
     /* --- Corrupted input: an out-of-range observation must reach
      *     format_observation's abort().
      *
-     * A ten-digit integer value (9999999999.999) exceeds the F14.3 range
-     * (max 999999999.999).  The text parser rejects it, but the CRX
+     * An eleven-digit integer value (99999999999.999) exceeds the F14.3
+     * range (max 9999999999.999).  The text parser rejects it, but the CRX
      * parser does not range-check values, so rnx2srnx accepts it from
      * CRX input; decoding that with srnx2rnx must trip
      * format_observation()'s range abort(). */
@@ -398,8 +411,8 @@ int main(void)
             "G    1 C1C                                                  SYS / # / OBS TYPES\n",
             "                                                            END OF HEADER\n",
             "> 2020 07 07 00 00  0.0000000  0  1\n",
-            /* Ten-digit integer part: out of the F14.3 range. */
-            "G01" "9999999999.999" "  \n",
+            /* Eleven-digit integer part: out of the F14.3 range. */
+            "G01" "99999999999.999" "  \n",
         };
         const char *corrupt_crx[] = {
             "3.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n",
@@ -411,7 +424,7 @@ int main(void)
             "> 2020 07 07 00 00  0.0000000  0  1      G01\n",
             "\n",
             /* The same value, which CRX writes without a decimal point. */
-            "3&9999999999999\n",
+            "3&99999999999999\n",
         };
         char cmd[1024];
         char rnx_path[256], crx_path[256], srnx_path[256], out_path[256];

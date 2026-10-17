@@ -136,10 +136,10 @@ const unsigned char parse_errors_v3_columns[] =
     "G13  28541439.844 5149986288.817         1175.101 5        35.700\n"
     "> 2020 07 07 00 00  4.0000000  0  1\n" /* valid */
     "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
-    "> 2020 07 07 00 00  5.0000000  0  1\n" /* ten-digit integer part */
+    "> 2020 07 07 00 00  5.0000000  0  1\n" /* minus sign after a first-column digit */
+    "G13  28541439.844 51-49986288.817        1175.101 5        35.700\n"
+    "> 2020 07 07 00 00  6.0000000  0  1\n" /* valid, with a ten-digit integer part */
     "G13  28541439.844 59999999999.999        1175.101 5        35.700\n"
-    "> 2020 07 07 00 00  6.0000000  0  1\n" /* valid */
-    "G13  28541439.844 5 149986288.817        1175.101 5        35.700\n"
     "> 2020 07 07 00 00  7.0000000  0  1\n" /* only two fraction digits */
     "G13  28541439.84  5 149986288.817        1175.101 5        35.700\n"
     "> 2020 07 07 00 00  8.0000000  0  1\n" /* valid */
@@ -326,6 +326,12 @@ void test_parse_errors_v3_columns(void)
                 && p->obs[1] == INT64_MIN && p->lli[1] == ' ' && p->ssi[1] == '5'
                 && p->obs[2] == -1175101 && p->obs[3] == 35700,
                 "rinex v3 columns read() #2 succeeded");
+        }
+        else if (ii == 6)
+        {
+            ok(err == RINEX_SUCCESS && p->epoch.sec_e7 == 60000000
+                && p->obs[1] == 9999999999999 && p->obs[3] == 35700,
+                "rinex v3 columns read() #6 succeeded");
         }
         else
         {

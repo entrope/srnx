@@ -111,10 +111,11 @@ static void format_observation(char buf[17], int64_t obs, char lli, char ssi)
     buf[3] = _d3[frac*3+2];
     buf[2] = _d3[frac*3+1];
     buf[1] = _d3[frac*3+0];
-    buf[0] = _d3[abs_val*3];
+    buf[0] = _d3[abs_val*3+2];
 
+    /* A ten-digit (positive) value fills buf[0] and has no sign. */
     for (ii = 0; buf[ii] == '0'; ii++) buf[ii] = ' ';
-    buf[ii-1] = obs < 0 ? '-': ' ';
+    if (ii > 0) buf[ii-1] = obs < 0 ? '-': ' ';
 }
 
 /** Fill \a buf (16 chars + NUL) with 16 spaces. */
